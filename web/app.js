@@ -89,7 +89,7 @@ worker.onmessage = (ev) => {
     case 'thumb-error': log(`[lapstack] cannot decode ${m.name}: ${m.text}`); break;
     case 'done': onDone(m); break;
     case 'done2': onDone2(m); break;
-    case 'render-cancelled': endRun('cancelled (depth-map render)'); log('[lapstack] depth-map render cancelled; the pyramid result is kept'); finishRun(); break;
+    case 'render-cancelled': endRun('cancelled (depth-map render)'); log('[lapstack] depth-map render cancelled; the LAP result is kept'); finishRun(); break;
     case 'cancelled': endRun('cancelled'); log('[lapstack] cancelled'); break;
     case 'error': endRun('error'); log('[lapstack] error: ' + m.text); toast(/no WebGPU adapter/i.test(m.text) ? 'No WebGPU adapter. ' + gpuHint() : m.text, 0); break;
     case 'png': download(m); break;
@@ -244,7 +244,7 @@ function download(m) {
   const jpeg = m.format === 'jpeg';
   const blob = new Blob([m.bytes], { type: jpeg ? 'image/jpeg' : 'image/png' });
   const base = ($('sv-name').value || 'stacked').replace(/[^\w.-]+/g, '_');
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${base}${m.kind === 'fused' ? '' : '_' + m.kind}.${jpeg ? 'jpg' : 'png'}`; a.click();
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${base}${m.kind === 'fused' ? '' : '_' + (m.kind === 'dmap' ? 'dfr' : m.kind)}.${jpeg ? 'jpg' : 'png'}`; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
   log(`[lapstack] saved ${a.download} (${(blob.size / 1e6).toFixed(1)} MB)`);
 }
@@ -256,7 +256,7 @@ function turbo(t) { // Google Turbo colormap, polynomial fit
   const b = 27.2 + t * (3211.1 + t * (-15327.97 + t * (27814 + t * (-22569.18 + t * 6838.66))));
   return [r, g, b].map((v) => Math.max(0, Math.min(255, v)));
 }
-// the two depth layers: 'depth' = depth from focus (working grid), 'winner' = pyramid winner index
+// the two depth layers: 'depth' = depth from focus (DFF, working grid), 'winner' = LAP winner index
 const isDepthLayer = (t) => t === 'depth' || t === 'winner';
 function depthData(layer) {
   const r = st.result; if (!r) return null;
@@ -545,7 +545,12 @@ $('divider').addEventListener('pointerup', () => { ddrag = false; });
 $('fit').addEventListener('click', fit); $('z100').addEventListener('click', zoom100);
 
 // ---------- header: view / context / compare / scrub ----------
-const LAYERS = [['fused', 'pyramid'], ['dmap', 'DMAP (depth-map render)'], ['depth', 'depth map (from focus)'], ['winner', 'winner map (pyramid)'], ['source', 'source']];
+const LAYERS = [['fused', 'LAP'], ['dmap', 'DFR'], ['depth', 'DFF'], ['winner', 'Winner'], ['source', 'Source']];
+// Header groups: Source | Stack (LAP, DFR) | Depth (DFF, Winner). The sub-control
+// lists the group's layers and is hidden when the group has only one.
+const GROUPS = { source: ['source'], stack: ['fused', 'dmap'], depth: ['depth', 'winner'] };
+const groupOf = (v) => Object.keys(GROUPS).find((g) => GROUPS[g].includes(v)) || null;
+const lastIn = { stack: 'fused', depth: 'depth' };   // last layer picked in each group
 const layerName = (id) => (LAYERS.find((l) => l[0] === id) || [id, id])[1];
 const haveDmap = () => !!(st.result && st.result.dmap);
 function scrubbable() {
@@ -554,8 +559,9 @@ function scrubbable() {
 }
 function updateTabs() {
   const have = !!st.result;
-  $('tab-source').disabled = !st.files.length; $('tab-fused').disabled = !have; $('tab-depth').disabled = !have; $('tab-winner').disabled = !have; $('ab').disabled = !have || st.step !== 'stack';
-  $('tab-dmap').hidden = !haveDmap(); if (!haveDmap() && st.view === 'dmap') st.view = 'fused';
+  $('tab-source').disabled = !st.files.length; $('tab-stack').disabled = !have; $('tab-depth').disabled = !have; $('ab').disabled = !have || st.step !== 'stack';
+  if (!haveDmap() && st.view === 'dmap') st.view = 'fused';
+  if (!haveDmap() && lastIn.stack === 'dmap') lastIn.stack = 'fused';
   if (!haveDmap()) R.target = 'fused'; $('br-target').value = R.target; $('br-target-sec').hidden = $('br-target-row').hidden = !haveDmap();
   $('sv-which-row').hidden = !haveDmap(); if (!haveDmap()) $('sv-which').value = 'fused';
   $('cm-swipe').classList.toggle('on', st.cmpMode !== 'split'); $('cm-split').classList.toggle('on', st.cmpMode === 'split');
@@ -567,7 +573,11 @@ function updateTabs() {
   $('src-status').textContent = retouch ? (R.loading === st.selected ? `loading ${st.files[st.selected]?.name}…` : (R.srcIndex === st.selected ? `source: ${st.files[st.selected]?.name}` : '')) : '';
   $('ab').parentElement.hidden = st.step !== 'stack';
   if (retouch) { st.compare = false; ensureSource(); }
-  document.querySelectorAll('#viewseg button').forEach((b) => b.classList.toggle('on', b.dataset.tab === st.view));
+  const group = groupOf(st.view);
+  document.querySelectorAll('#viewseg button').forEach((b) => b.classList.toggle('on', b.dataset.group === group));
+  const subs = (GROUPS[group] || []).filter((t) => t !== 'dmap' || haveDmap());
+  $('subseg').hidden = st.step !== 'stack' || subs.length < 2;
+  document.querySelectorAll('#subseg button').forEach((b) => { b.hidden = !subs.includes(b.dataset.tab); b.classList.toggle('on', b.dataset.tab === st.view); });
   // compare partner: any layer but the current view
   const sel = $('cmp-sel'); sel.innerHTML = '';
   for (const [id, name] of LAYERS) { if (id === st.view) continue; if (id === 'source' && !st.files.length) continue; if (id === 'dmap' && !haveDmap()) continue; const o = document.createElement('option'); o.value = id; o.textContent = name; sel.appendChild(o); }
@@ -586,7 +596,7 @@ function updateTabs() {
   $('scrubname').textContent = st.files[st.selected] ? `${st.selected + 1}/${st.files.length}` : '';
   $('scrub').title = st.files[st.selected] ? st.files[st.selected].name : '';
 }
-function setView(v) { st.view = v; updateTabs(); renderFilmstrip(); draw(); }
+function setView(v) { st.view = v; const g = groupOf(v); if (g && g !== 'source') lastIn[g] = v; updateTabs(); renderFilmstrip(); draw(); }
 // ---------- workflow steps ----------
 function gotoStep(step) {
   if (step !== 'stack' && !st.result) return;
@@ -604,7 +614,8 @@ function gotoStep(step) {
   updateTabs(); renderFilmstrip(); draw();
 }
 document.querySelectorAll('#steps button').forEach((b) => b.addEventListener('click', () => gotoStep(b.dataset.step)));
-document.querySelectorAll('#viewseg button').forEach((b) => b.addEventListener('click', () => setView(b.dataset.tab)));
+document.querySelectorAll('#viewseg button').forEach((b) => b.addEventListener('click', () => { const g = b.dataset.group; setView(g === 'source' ? 'source' : lastIn[g]); }));
+document.querySelectorAll('#subseg button').forEach((b) => b.addEventListener('click', () => setView(b.dataset.tab)));
 $('cmp-sel').addEventListener('change', (e) => { st.cmp = e.target.value; updateTabs(); draw(); });
 $('cm-swipe').addEventListener('click', () => { st.cmpMode = 'swipe'; saveParams(); updateTabs(); draw(); });
 $('cm-split').addEventListener('click', () => { st.cmpMode = 'split'; saveParams(); updateTabs(); draw(); });

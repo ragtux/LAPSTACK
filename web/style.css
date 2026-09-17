@@ -30,7 +30,10 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #divider { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; opacity: .8; cursor: ew-resize; }
 #divider::after { content: ""; position: absolute; left: -6px; right: -6px; top: 0; bottom: 0; }
 #scrub { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; } #scrubber { width: 180px; }
-#vhead { flex-wrap: nowrap; overflow: hidden; }
+#vhead { flex-wrap: wrap; row-gap: 4px; }
+#vhead > *, #vhead .seg, #vhead .ctx { flex: none; }
+#vhead button, #vhead label { white-space: nowrap; }
+#vhead .ctx { display: inline-flex; align-items: center; gap: 8px; }
 #params, .panel { width: 288px; flex: none; overflow-y: auto; background: var(--panel); border-left: 1px solid var(--border); padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; }
 #params .section, .panel .section { font-size: 11px; letter-spacing: .08em; color: var(--dim); margin: 10px 0 4px; }
 #params label, .panel label { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 0; }
@@ -47,6 +50,8 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .seg button { border: 0; border-radius: 0; border-right: 1px solid var(--border); padding: 3px 12px; }
 .seg button:last-child { border-right: 0; }
+.seg.sub { margin-left: -2px; } .seg.sub button { padding: 3px 9px; font-size: 12px; }
+.seg button[hidden] { display: none; }
 .tog { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; background: var(--widget); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; user-select: none; }
 .tog:has(input:checked) { border-color: var(--accent); color: #fff; }
 .tog:has(input:disabled) { opacity: .4; cursor: default; }

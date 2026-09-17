@@ -204,9 +204,10 @@ The UI follows the workflow as three steps in the top bar:
 *Stack* is the workbench: a filmstrip (thumbnails arrive as frames are
 added, with each frame's registration once aligned), a parameter panel (all
 `lapstack` knobs, persisted in localStorage), Run/Cancel with progress and a
-log, and a viewer whose header is a segmented **Source / Fused / Depth**
-control (a result dropdown appears next to it once more than one fusion
-result exists) followed by controls that only show for what is on screen: on
+log, and a viewer whose header is a segmented **Source / Stack / Depth**
+control with a second-level control for the group's layers — **LAP / DFR**
+under Stack (DFR only when the depth-map render ran), **DFF / Winner** under
+Depth — followed by controls that only show for what is on screen: on
 Source a **peaking** toggle with a threshold stepper; on Depth a Gray/Turbo
 LUT and a **slice** toggle; a frame slider whenever the shown layers depend
 on a frame; and on the right a **compare** toggle whose "vs" dropdown lists
@@ -233,25 +234,25 @@ guide), the peaks are tracked with sub-frame interpolation and confidence,
 the confidence-weighted WLS with its robust reweight runs as fast-global-
 smoother sweeps plus conjugate gradient on the device, and the map is
 guided-upsampled to full resolution for saving. The viewer shows the
-working-grid map under **Depth**; the 16-bit save writes the full-resolution
+working-grid map under **Depth → DFF**; the 16-bit save writes the full-resolution
 one. The browser map matches the native one on the same frames to
 4 × 10⁻⁴ frames (the u16 quantisation), see `web/test.html`. The pass costs
 no measurable wall time on a 25 × 45 MP run and keeps one u16 slice per
 frame (5.7 MB at 45 MP and N = 2). The raw pyramid **winner map** (which
 frame won at pyramid level *winner map level*, a free by-product of fusion)
-is the second depth layer, under **Winner**; both take the Gray/Turbo LUT
+is the second depth layer, under **Depth → Winner**; both take the Gray/Turbo LUT
 and the slice overlay, can be compared against each other, and each has a
 save button.
 
-**Depth-map rendering (DMAP)**: with *also render from the depth map*
+**Depth-map rendering (DFR)**: with *also render from the depth map*
 checked (off by default) the run makes a second stacked image from the depth
 map: every frame is decoded again, warped with the registration found during
 the run, and blended in with weight `1 − |index − depth|` at each pixel, so
 a pixel is the average of the one or two frames nearest its depth index. The
 run then opens the **side by side** compare (two panes, one zoom/pan;
-*swipe* is the divider mode) with the pyramid result on the left and DMAP on
-the right; DMAP has its own tab, can be the retouch target (*paint into*)
-and the saved image (*result*). On the 25 × 45 MP stack the second pass
+*swipe* is the divider mode) with the LAP result on the left and DFR on
+the right; DFR has its own layer under Stack, can be the retouch target
+(*paint into*) and the saved image (*result*). On the 25 × 45 MP stack the second pass
 adds 6.7 s to a 27.7 s run.
 
 **Retouch** (step 2, after a run): two panes with one zoom/pan —

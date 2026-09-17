@@ -11,7 +11,8 @@ const webDir = path.resolve(here, '..');
 const port = 8766, dbg = 9333;
 const align = process.argv.includes('--align');
 const url = process.env.PAGE ? `http://127.0.0.1:${port}/${process.env.PAGE}` : `http://127.0.0.1:${port}/test.html?align=${align ? 1 : 0}`;
-const server = spawn('python3', ['-m', 'http.server', String(port), '--bind', '127.0.0.1'], { cwd: webDir, stdio: 'ignore' });
+// serve.sh sends Cache-Control: no-store, so a persistent headless profile never runs a stale app.js / style.css / pkg.
+const server = spawn('bash', [path.join(webDir, 'serve.sh'), String(port)], { cwd: webDir, stdio: 'ignore' });
 const profile = path.join(process.env.TMPDIR || '/tmp', 'lapstack-headless-profile');
 const chrome = spawn(process.env.CHROME || 'google-chrome-stable', [
   ...(process.env.HEADFUL ? [] : ['--headless=new', '--no-sandbox', '--disable-gpu-sandbox']),
