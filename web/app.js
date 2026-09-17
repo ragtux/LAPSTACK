@@ -545,8 +545,8 @@ $('divider').addEventListener('pointerup', () => { ddrag = false; });
 $('fit').addEventListener('click', fit); $('z100').addEventListener('click', zoom100);
 
 // ---------- header: view / context / compare / scrub ----------
-const LAYERS = [['fused', 'LAP'], ['dmap', 'DFR'], ['depth', 'DFF'], ['winner', 'Winner'], ['source', 'Source']];
-// Header groups: Source | Stack (LAP, DFR) | Depth (DFF, Winner). The sub-control
+const LAYERS = [['fused', 'LAP'], ['dmap', 'DFR'], ['depth', 'Focus depth'], ['winner', 'Winner'], ['source', 'Source']];
+// Header groups: Source | Stack (LAP, DFR) | Depth (Focus depth, Winner). The sub-control
 // lists the group's layers and is hidden when the group has only one.
 const GROUPS = { source: ['source'], stack: ['fused', 'dmap'], depth: ['depth', 'winner'] };
 const groupOf = (v) => Object.keys(GROUPS).find((g) => GROUPS[g].includes(v)) || null;
