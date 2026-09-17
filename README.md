@@ -26,6 +26,9 @@ docs/                  the two papers the algorithm is written from
 
 ## Build & run (native)
 
+`just` lists the developer commands (build, test, serve, chrome, dev, …);
+`just serve` also kills a stale server on the port first.
+
 ```
 cargo build --release
 target/release/lapstack --align-coarsen 2 --save-depth -o out.png frames/*.tif
