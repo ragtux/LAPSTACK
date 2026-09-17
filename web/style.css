@@ -1,4 +1,4 @@
-:root { --bg:#1e1e22; --panel:#26262b; --border:#3a3a42; --widget:#34343c; --accent:#3b82f6; --text:#e6e6e6; --dim:#9a9aa3; }
+:root { --bg:#1e1e22; --panel:#26262b; --border:#3a3a42; --widget:#34343c; --accent:#3b82f6; --pop:#ff7a30; --text:#e6e6e6; --dim:#9a9aa3; }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 13px system-ui, sans-serif; overflow: hidden; }
@@ -30,8 +30,18 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #divider { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; opacity: .8; cursor: ew-resize; }
 #divider::after { content: ""; position: absolute; left: -6px; right: -6px; top: 0; bottom: 0; }
 #scrub { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; } #scrubber { width: 180px; }
-#vhead { flex-wrap: wrap; row-gap: 4px; }
-#vhead > *, #vhead .seg, #vhead .ctx { flex: none; }
+/* header: [layer + context controls] [vs] [compare partner + mode]; equal outer
+   columns keep the vs toggle at the exact horizontal centre of the canvas */
+#vhead { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; column-gap: 10px; }
+#vh-left, #vh-right { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; row-gap: 4px; min-width: 0; }
+#vhead .seg, #vhead .ctx { flex: none; }
+/* the movable context groups and the compare group flow as individual items so the columns wrap cleanly */
+#vhead #view-ctx, #vhead #cmp-ctx, #vhead #ctx-compare { display: contents; }
+.vs { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 48px; height: 30px; border-radius: 8px; border: 2px solid var(--pop); color: var(--pop); font-weight: 700; font-size: 15px; cursor: pointer; user-select: none; }
+.vs input { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
+.vs:hover:has(input:not(:disabled)) { background: rgba(255,122,48,.15); }
+.vs:has(input:checked) { background: var(--pop); color: #fff; box-shadow: 0 0 0 3px rgba(255,122,48,.3); }
+.vs:has(input:disabled) { opacity: .35; cursor: default; }
 #vhead button, #vhead label { white-space: nowrap; }
 #vhead .ctx { display: inline-flex; align-items: center; gap: 8px; }
 #params, .panel { width: 288px; flex: none; overflow-y: auto; background: var(--panel); border-left: 1px solid var(--border); padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; }

@@ -28,6 +28,7 @@
   <div id="filmstrip"><div class="empty dim">Add frames, or drop them here.</div></div>
   <div id="center">
     <div id="vhead">
+      <div id="vh-left">
       <div class="seg" id="viewseg">
         <button data-group="source" id="tab-source" disabled>Source</button>
         <button data-group="stack" id="tab-stack" disabled>Stack</button>
@@ -54,15 +55,16 @@
         <span id="scrub" hidden><input id="scrubber" type="range" min="0" max="0" value="0"><span id="scrubname" class="dim"></span></span>
       </span>
       <span id="ctx-retouch" class="ctx" hidden><span id="src-status" class="dim"></span></span>
-      <span class="spacer"></span>
-      <span class="ctx" id="compare-group">
-        <label class="tog"><input type="checkbox" id="ab" disabled> compare</label>
+      </div>
+      <!-- compare toggle, centred over the canvas (where the side-by-side split falls) -->
+      <label class="vs" title="compare with another layer: swipe or side by side"><input type="checkbox" id="ab" disabled><span>vs</span></label>
+      <div id="vh-right">
         <span id="ctx-compare" class="ctx" hidden>
-          <span class="dim">vs</span><select id="cmp-sel"></select><span id="cmp-ctx" class="ctx"></span>
+          <select id="cmp-sel"></select><span id="cmp-ctx" class="ctx"></span>
           <div class="seg"><button id="cm-swipe" title="one view, draggable divider">swipe</button><button id="cm-split" title="two panes, one zoom/pan">side by side</button></div>
           <button id="flip" title="hold to flip (space)">flip</button>
         </span>
-      </span>
+      </div>
     </div>
     <div id="vwrap"><canvas id="view"></canvas><canvas id="view2" hidden></canvas><div id="divider" hidden></div><div id="panelabels" hidden><span>source</span><span>result — drag to paint, shift+drag pans</span></div>
       <div id="zoombar"><span id="zoom"></span><div class="seg"><button id="fit" title="fit to view (f)">Fit</button><button id="z100" title="actual pixels (z)">100%</button></div></div>
