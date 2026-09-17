@@ -589,6 +589,8 @@ function updateTabs() {
   const place = (el, onView, onPartner) => { const slot = (!onView && onPartner) ? $('cmp-ctx') : $('view-ctx'); if (el.parentElement !== slot) slot.appendChild(el); };
   place($('ctx-depth'), isDepthLayer(st.view), st.compare && isDepthLayer(st.cmp));
   place($('ctx-source'), st.view === 'source', st.compare && st.cmp === 'source');
+  const usesFrame = (t) => t === 'source' || t === 'retouch' || (isDepthLayer(t) && st.slice);
+  place($('scrub'), usesFrame(st.view), st.compare && usesFrame(st.cmp));
   $('ctx-depth').hidden = !depthShown; $('lut-gray').classList.toggle('on', !st.turbo); $('lut-turbo').classList.toggle('on', st.turbo); $('slice').checked = st.slice;
   const havePeaks = st.frames.some((f) => f && f.peak);
   const sourceShown = st.view === 'source' || (st.compare && st.cmp === 'source');
