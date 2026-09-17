@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/lapstack-core", "crates/lapstack-cli", "crates/lapstack-web"]
+# lapstack-web only targets wasm32 (see web/build.sh); keep plain `cargo build`
+# working anywhere by defaulting to core + cli.
+default-members = ["crates/lapstack-core", "crates/lapstack-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
+rayon = "1.10"
+# GPU (optional): dynamic-loading = dlopen libcuda/libnvrtc at runtime (no CUDA at
+# build time; NixOS-friendly). Enable with `--features gpu`.
+cudarc = { version = "0.16", default-features = false, features = ["driver", "nvrtc", "cuda-12050", "dynamic-loading"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# Debug builds: optimize dependencies (rayon/image) so a `cargo build` binary is
+# usable without --release.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.lapstack-core]
+opt-level = 3

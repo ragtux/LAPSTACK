@@ -1,0 +1,9 @@
+<!doctype html><meta charset="utf-8"><title>webgpu probe</title>
+<script type="module">
+const out = { main: null, worker: null };
+try { const a = await navigator.gpu?.requestAdapter(); out.main = a ? { vendor: a.info.vendor, arch: a.info.architecture, desc: a.info.description, maxBuf: a.limits.maxBufferSize, maxStorage: a.limits.maxStorageBufferBindingSize, fallback: a.isFallbackAdapter } : 'null'; } catch (e) { out.main = 'err ' + e.message; }
+const src = `self.onmessage = async () => { const r = {}; for (const pp of [undefined, 'low-power', 'high-performance']) { try { const a = await self.navigator.gpu?.requestAdapter(pp ? {powerPreference: pp} : undefined); r[pp || 'default'] = a ? {vendor:a.info.vendor, maxBuf: a.limits.maxBufferSize} : 'null'; } catch (e) { r[pp || 'default'] = 'err ' + e.message; } } postMessage(r); };`;
+const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+out.worker = await new Promise((r) => { w.onmessage = (e) => r(e.data); w.postMessage(1); });
+window.__result = JSON.stringify({ ok: true, ...out });
+</script>

@@ -1,0 +1,23 @@
+[package]
+name = "lapstack-web"
+version.workspace = true
+edition.workspace = true
+description = "lapstack in the browser: WebGPU fusion + WASM decode/align, driven from a Web Worker"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+lapstack-core = { path = "../lapstack-core" }
+image.workspace = true
+wgpu = { version = "30", default-features = false, features = ["webgpu", "wgsl"] }
+wasm-bindgen = "0.2.128"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["console"] }
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+console_error_panic_hook = "0.1"
+futures-channel = "0.3"
+getrandom = { version = "0.3", features = ["wasm_js"] }

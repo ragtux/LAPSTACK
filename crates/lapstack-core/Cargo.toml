@@ -1,0 +1,15 @@
+[package]
+name = "lapstack-core"
+version.workspace = true
+edition.workspace = true
+description = "Laplacian-pyramid focus stacking (Burt & Adelson 1983/84; Wang & Chang 2011)"
+
+[dependencies]
+image.workspace = true
+rayon.workspace = true
+cudarc = { workspace = true, optional = true }
+
+[features]
+# CUDA fusion + CUDA aligner cost search (`gpu.rs`). Runtime-loaded: no CUDA
+# toolkit needed at build time.
+gpu = ["dep:cudarc"]

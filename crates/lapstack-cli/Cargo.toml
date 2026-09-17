@@ -1,0 +1,15 @@
+[package]
+name = "lapstack-cli"
+version.workspace = true
+edition.workspace = true
+description = "lapstack: CLI for the Laplacian-pyramid focus stacker"
+
+[[bin]]
+name = "lapstack"
+path = "src/main.rs"
+
+[dependencies]
+lapstack-core = { path = "../lapstack-core" }
+
+[features]
+gpu = ["lapstack-core/gpu"]

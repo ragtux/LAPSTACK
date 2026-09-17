@@ -1,0 +1,7 @@
+target/
+web/pkg/
+web/test/frames/
+web/test/expected.png
+web/test/expected_dff.*
+web/test/big/
+web/test/big25/

@@ -1,0 +1,102 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>lapstack web test</title>
+<pre id="log"></pre>
+<script type="module">
+// Automated check: run the worker pipeline on web/test/frames and compare the
+// fused RGBA8 against expected.png (native `lapstack --no-align` on the same
+// crops). Results land in window.__result (JSON) for the headless harness.
+const log = (s) => { document.getElementById('log').textContent += s + '\n'; console.log(s); };
+const q = new URLSearchParams(location.search);
+const align = q.get('align') === '1';
+const listDir = q.get('list') || 'test/frames';       // directory with list.json
+const expectedUrl = q.has('expected') ? q.get('expected') : 'test/expected.png'; // '' = skip the comparison
+const coarsen = Number(q.get('coarsen') || 1);
+const depthMode = q.get('depth') || 'dff';                 // dff | winner
+const depthScale = Number(q.get('depth_scale') || 2);
+const render = q.get('render') === '1';                     // also render from the depth map (second pass)
+const expectedDff = q.has('expected_dff') ? q.get('expected_dff') : 'test/expected_dff.u16'; // raw u16 LE, '' = skip
+const worker = new Worker('./worker.js?t=' + Date.now(), { type: 'module' });
+const wait = (type) => new Promise((res, rej) => {
+  const h = (ev) => { const m = ev.data; if (m.type === 'error') { worker.removeEventListener('message', h); rej(new Error(m.text)); }
+    if (m.type === type) { worker.removeEventListener('message', h); res(m); } };
+  worker.addEventListener('message', h);
+});
+async function decodeExpected() {
+  const blob = await (await fetch('./' + expectedUrl)).blob();
+  const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+  const c = new OffscreenCanvas(bmp.width, bmp.height);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(bmp, 0, 0);
+  return { w: bmp.width, h: bmp.height, data: ctx.getImageData(0, 0, bmp.width, bmp.height).data };
+}
+try {
+  worker.addEventListener('message', (ev) => { if (ev.data.type === 'debug') log('debug: ' + ev.data.text); });
+  const ready = wait('ready');
+  worker.postMessage({ type: 'init', debug: true });
+  const info = (await ready).info;
+  log('adapter: ' + JSON.stringify(info));
+  const names = await (await fetch(`./${listDir}/list.json`)).json();
+  const files = [];
+  for (const n of names) files.push(new File([await (await fetch(`./${listDir}/` + n)).blob()], n));
+  const frames = [];
+  worker.addEventListener('message', (ev) => {
+    const m = ev.data;
+    if (m.type === 'frame') { frames.push(m); log(`frame ${m.index} ${m.name} ${m.w}x${m.h} ${m.bits}-bit sim=[${m.sim.map(v => v.toFixed(3))}] ${m.ms.toFixed(0)} ms`); }
+    if (m.type === 'stage') log('stage: ' + m.text);
+  });
+  const done = wait('done');
+  const done2 = render ? wait('done2') : null;
+  worker.postMessage({ type: 'run', files, params: { align, coarsen, proxy_edge: 400, depth: depthMode, depth_scale: depthScale, render_dmap: render } });
+  const res = await done;
+  log(`done: ${res.w}x${res.h} ${res.frames} frames, ${res.ms.toFixed(0)} ms`);
+  let dmap = null;
+  if (render) {
+    const r2 = await done2;
+    // sanity: the two stacked images agree broadly (mean |diff| in 8-bit steps) but are not identical
+    const a = new Uint8Array(res.rgba), b = new Uint8Array(r2.rgba); let sd = 0;
+    for (let i = 0; i < a.length; i += 4) sd += Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]);
+    dmap = { ms: r2.ms, mean_abs_vs_pyramid: sd / (3 * res.w * res.h) };
+    log(`depth-map render: ${r2.ms.toFixed(0)} ms, mean |diff| vs pyramid ${dmap.mean_abs_vs_pyramid.toFixed(2)}`);
+  }
+  const got = new Uint8Array(res.rgba);
+  let maxd = 0, ndiff = 0, sum = 0;
+  if (expectedUrl) {
+    const exp = await decodeExpected();
+    if (exp.w !== res.w || exp.h !== res.h) throw new Error(`size mismatch ${exp.w}x${exp.h} vs ${res.w}x${res.h}`);
+    for (let i = 0; i < res.w * res.h; i++) {
+      let pd = 0;
+      for (let c = 0; c < 3; c++) { const d = Math.abs(got[4 * i + c] - exp.data[4 * i + c]); pd = Math.max(pd, d); sum += d; }
+      if (pd > 0) ndiff++;
+      maxd = Math.max(maxd, pd);
+    }
+  }
+  const depth = new Float32Array(res.depth);
+  let dmin = Infinity, dmax = -Infinity; for (const v of depth) { dmin = Math.min(dmin, v); dmax = Math.max(dmax, v); }
+  const pngP = wait('png'); worker.postMessage({ type: 'save', kind: 'fused' }); const png = await pngP;
+  // depth from focus: full-res map vs the native reference (same frames, same scale)
+  let dff = null;
+  if (depthMode === 'dff') {
+    const dfP = wait('depth_full'); worker.postMessage({ type: 'depth_full' }); const got16 = new Uint16Array((await dfP).data);
+    dff = { n: got16.length };
+    if (expectedDff) {
+      const r = await fetch('./' + expectedDff);
+      if (r.ok) {
+        const exp16 = new Uint16Array(await r.arrayBuffer());
+        if (exp16.length !== got16.length) throw new Error(`depth size mismatch ${exp16.length} vs ${got16.length}`);
+        const k = (res.frames - 1) / 65535; let mx = 0, s1 = 0, within = 0;
+        for (let i = 0; i < got16.length; i++) { const d = Math.abs(got16[i] - exp16[i]) * k; mx = Math.max(mx, d); s1 += d; if (d <= 0.5) within++; }
+        dff = { n: got16.length, max_abs_frames: mx, mean_abs_frames: s1 / got16.length, within_half_frame: within / got16.length };
+      } else log('no ' + expectedDff + ' (skipping the depth comparison)');
+    }
+  }
+  const result = { ok: true, align, frames: res.frames, w: res.w, h: res.h, maxdiff: maxd, ndiff, ndiff_frac: ndiff / (res.w * res.h),
+    mean_abs: sum / (3 * res.w * res.h), depth_range: [dmin, dmax], depth_dims: [res.depth_w, res.depth_h], dff, dmap, png_bytes: png.bytes.byteLength, ms: res.ms,
+    sims: frames.map(f => f.sim), info };
+  log('RESULT ' + JSON.stringify(result));
+  window.__result = JSON.stringify(result);
+} catch (e) {
+  log('FAIL ' + e.message);
+  window.__result = JSON.stringify({ ok: false, error: e.message });
+}
+</script>
