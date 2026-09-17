@@ -40,13 +40,17 @@
         <button data-tab="winner" title="which frame won at the chosen pyramid level">Winner</button>
       </div>
       <span class="sep"></span>
-      <span id="ctx-source" class="ctx" hidden>
-        <label class="tog"><input type="checkbox" id="peak"> peaking</label>
-        <span id="peakstep" class="stepper" hidden><button id="peak-minus">−</button><span id="peakthr">0.50</span><button id="peak-plus">+</button></span>
-      </span>
-      <span id="ctx-depth" class="ctx" hidden>
-        <div class="seg"><button id="lut-gray">Gray</button><button id="lut-turbo">Turbo</button></div>
-        <label class="tog"><input type="checkbox" id="slice"> slice</label>
+      <!-- layer-specific controls; each lives in #view-ctx when it applies to the
+           shown layer and moves into #cmp-ctx when it applies to the compare partner -->
+      <span id="view-ctx" class="ctx">
+        <span id="ctx-source" class="ctx" hidden>
+          <label class="tog"><input type="checkbox" id="peak"> peaking</label>
+          <span id="peakstep" class="stepper" hidden><button id="peak-minus">−</button><span id="peakthr">0.50</span><button id="peak-plus">+</button></span>
+        </span>
+        <span id="ctx-depth" class="ctx" hidden>
+          <div class="seg"><button id="lut-gray">Gray</button><button id="lut-turbo">Turbo</button></div>
+          <label class="tog"><input type="checkbox" id="slice"> slice</label>
+        </span>
       </span>
       <span id="ctx-retouch" class="ctx" hidden><span id="src-status" class="dim"></span></span>
       <span id="scrub" hidden><input id="scrubber" type="range" min="0" max="0" value="0"><span id="scrubname" class="dim"></span></span>
@@ -54,7 +58,7 @@
       <span class="ctx" id="compare-group">
         <label class="tog"><input type="checkbox" id="ab" disabled> compare</label>
         <span id="ctx-compare" class="ctx" hidden>
-          <span class="dim">vs</span><select id="cmp-sel"></select>
+          <span class="dim">vs</span><select id="cmp-sel"></select><span id="cmp-ctx" class="ctx"></span>
           <div class="seg"><button id="cm-swipe" title="one view, draggable divider">swipe</button><button id="cm-split" title="two panes, one zoom/pan">side by side</button></div>
           <button id="flip" title="hold to flip (space)">flip</button>
         </span>

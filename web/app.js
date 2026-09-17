@@ -585,6 +585,10 @@ function updateTabs() {
   sel.value = st.cmp;
   $('ab').checked = st.compare; $('ctx-compare').hidden = !(st.compare && have) || retouch;
   const depthShown = isDepthLayer(st.view) || (st.compare && isDepthLayer(st.cmp));
+  // put each context group next to the layer it acts on: the shown layer (left) or the compare partner (after "vs")
+  const place = (el, onView, onPartner) => { const slot = (!onView && onPartner) ? $('cmp-ctx') : $('view-ctx'); if (el.parentElement !== slot) slot.appendChild(el); };
+  place($('ctx-depth'), isDepthLayer(st.view), st.compare && isDepthLayer(st.cmp));
+  place($('ctx-source'), st.view === 'source', st.compare && st.cmp === 'source');
   $('ctx-depth').hidden = !depthShown; $('lut-gray').classList.toggle('on', !st.turbo); $('lut-turbo').classList.toggle('on', st.turbo); $('slice').checked = st.slice;
   const havePeaks = st.frames.some((f) => f && f.peak);
   const sourceShown = st.view === 'source' || (st.compare && st.cmp === 'source');
