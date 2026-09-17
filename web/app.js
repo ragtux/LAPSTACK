@@ -613,10 +613,18 @@ $('lut-gray').addEventListener('click', () => { st.turbo = false; saveParams(); 
 $('lut-turbo').addEventListener('click', () => { st.turbo = true; saveParams(); updateTabs(); draw(); });
 const flip = (on) => { st.flipped = on; draw(); };
 $('flip').addEventListener('pointerdown', () => flip(true)); $('flip').addEventListener('pointerup', () => flip(false)); $('flip').addEventListener('pointerleave', () => flip(false));
-function scrub(delta) { if (!st.files.length) return; st.selected = Math.min(st.files.length - 1, Math.max(0, st.selected + delta)); updateTabs(); renderFilmstrip(); draw(); }
+// Keep the selected thumb near the middle of the filmstrip while scrubbing
+// (keys, wheel, slider), so frames above and below stay in view and the strip
+// scrolls under the selection instead of the selection running off-screen.
+// Clicking a thumb does not recentre: it is already on screen.
+function revealSelected() {
+  const el = $('filmstrip').children[st.selected];
+  if (el && el.classList.contains('sel')) el.scrollIntoView({ block: 'center', behavior: 'instant' });
+}
+function scrub(delta) { if (!st.files.length) return; st.selected = Math.min(st.files.length - 1, Math.max(0, st.selected + delta)); updateTabs(); renderFilmstrip(); revealSelected(); draw(); }
 // ResizeObserver: two panes change size when the split toggles
 new ResizeObserver(() => draw()).observe(canvas2);
-$('scrubber').addEventListener('input', (e) => { st.selected = Number(e.target.value); updateTabs(); renderFilmstrip(); draw(); });
+$('scrubber').addEventListener('input', (e) => { st.selected = Number(e.target.value); updateTabs(); renderFilmstrip(); revealSelected(); draw(); });
 for (const id of ['scrub', 'filmstrip']) $(id).addEventListener('wheel', (e) => { if (id === 'filmstrip' && !e.shiftKey && !scrubbable()) return; e.preventDefault(); scrub((e.deltaY > 0 ? 1 : -1) * (e.shiftKey ? 10 : 1)); }, { passive: false });
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox' && e.target.type !== 'range') return;
