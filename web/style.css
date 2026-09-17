@@ -79,6 +79,9 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #zoombar:empty, #zoombar #zoom:empty { display: none; }
 #zoombar #zoom { min-width: 34px; text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
 #zoombar .seg { background: transparent; }
+/* compare mode + flip, centred at the bottom of the canvas under the split */
+#cmpbar { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); z-index: 2; display: inline-flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 8px; background: rgba(20,20,22,.75); border: 1px solid rgba(255,255,255,.12); backdrop-filter: blur(4px); cursor: default; }
+#cmpbar .seg { background: transparent; }
 #panelabels span { flex: 1; text-align: center; font-size: 11px; color: rgba(255,255,255,.7); text-shadow: 0 0 4px #000; }
 #ctx-retouch .stepper { display: inline-flex; align-items: center; gap: 4px; } #ctx-retouch .stepper button { padding: 0 8px; }
 #ctx-retouch .stepper > span { min-width: 40px; text-align: center; }

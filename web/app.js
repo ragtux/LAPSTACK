@@ -583,7 +583,7 @@ function updateTabs() {
   for (const [id, name] of LAYERS) { if (id === st.view) continue; if (id === 'source' && !st.files.length) continue; if (id === 'dmap' && !haveDmap()) continue; const o = document.createElement('option'); o.value = id; o.textContent = name; sel.appendChild(o); }
   if (![...sel.options].some((o) => o.value === st.cmp)) st.cmp = sel.options[0] ? sel.options[0].value : 'depth';
   sel.value = st.cmp;
-  $('ab').checked = st.compare; $('ctx-compare').hidden = !(st.compare && have) || retouch;
+  $('ab').checked = st.compare; $('ctx-compare').hidden = !(st.compare && have) || retouch; $('cmpbar').hidden = $('ctx-compare').hidden;
   const depthShown = isDepthLayer(st.view) || (st.compare && isDepthLayer(st.cmp));
   // put each context group next to the layer it acts on: the shown layer (left) or the compare partner (after "vs")
   const place = (el, onView, onPartner) => { const slot = (!onView && onPartner) ? $('cmp-ctx') : $('view-ctx'); if (el.parentElement !== slot) slot.appendChild(el); };
