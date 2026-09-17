@@ -1,4 +1,4 @@
-// Copyright (c) 2026 MATCHMUSEUM.COM
+// Copyright (c) 2026 RAGTUX LLC
 // INTERNAL USE ONLY
 
 //! Gaussian / Laplacian pyramid (Burt & Adelson 1983; Adelson et al. 1984).

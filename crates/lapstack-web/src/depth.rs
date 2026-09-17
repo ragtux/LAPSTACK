@@ -1,4 +1,4 @@
-// Copyright (c) 2026 MATCHMUSEUM.COM
+// Copyright (c) 2026 RAGTUX LLC
 // INTERNAL USE ONLY
 
 //! Depth from focus on WebGPU — the pipeline of `lapstack_core::depth`

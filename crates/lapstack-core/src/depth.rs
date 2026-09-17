@@ -1,4 +1,4 @@
-// Copyright (c) 2026 MATCHMUSEUM.COM
+// Copyright (c) 2026 RAGTUX LLC
 // INTERNAL USE ONLY
 
 //! Depth from focus (DFF): a dense, sub-frame depth map from the aligned stack.

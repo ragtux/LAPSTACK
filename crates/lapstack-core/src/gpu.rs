@@ -1,4 +1,4 @@
-// Copyright (c) 2026 MATCHMUSEUM.COM
+// Copyright (c) 2026 RAGTUX LLC
 // INTERNAL USE ONLY
 
 //! CUDA fusion path (feature `gpu`). Same maths as `pyramid.rs` + `fuse.rs`
