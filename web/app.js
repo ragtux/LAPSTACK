@@ -508,13 +508,16 @@ function draw() {
   $('zoom').textContent = `${(st.zoom * d * 100).toFixed(0)}%`;
 }
 new ResizeObserver(() => draw()).observe($('vwrap'));
-canvas.addEventListener('wheel', (e) => {
+// One wheel rule for both panes: plain wheel scrubs whenever any visible layer
+// depends on a frame (shift = 10 frames); ctrl/cmd+wheel always zooms at the
+// cursor; plain wheel zooms only when nothing on screen is scrubbable.
+function onWheel(cv, e) {
   e.preventDefault();
   if (st.view !== 'retouch' && scrubbable() && !(e.ctrlKey || e.metaKey) && st.files.length > 1) { scrub((e.deltaY > 0 ? 1 : -1) * (e.shiftKey ? 10 : 1)); return; }
-  const f = Math.pow(1.0015, -e.deltaY); const r = canvas.getBoundingClientRect();
+  const f = Math.pow(1.0015, -e.deltaY); const r = cv.getBoundingClientRect();
   const mx = e.clientX - r.left, my = e.clientY - r.top;
   st.ox = mx - (mx - st.ox) * f; st.oy = my - (my - st.oy) * f; st.zoom *= f; st.fitted = false; draw();
-}, { passive: false });
+}
 let drag = null;
 function imgXY(cv, e) { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left - st.ox) / st.zoom, (e.clientY - r.top - st.oy) / st.zoom]; }
 for (const cv of [canvas, canvas2]) {
@@ -536,7 +539,7 @@ for (const cv of [canvas, canvas2]) {
   cv.addEventListener('pointerup', () => { endStroke(); drag = null; cv.classList.remove('drag'); });
   cv.addEventListener('pointerleave', () => { if (st.view === 'retouch') { R.cursor = null; draw(); } });
   cv.addEventListener('dblclick', () => (st.fitted ? zoom100() : fit()));
-  if (cv === canvas2) cv.addEventListener('wheel', (e) => { e.preventDefault(); const f = Math.pow(1.0015, -e.deltaY); const r = cv.getBoundingClientRect(); const mx = e.clientX - r.left, my = e.clientY - r.top; st.ox = mx - (mx - st.ox) * f; st.oy = my - (my - st.oy) * f; st.zoom *= f; st.fitted = false; draw(); }, { passive: false });
+  cv.addEventListener('wheel', (e) => onWheel(cv, e), { passive: false });
 }
 let ddrag = false;
 $('divider').addEventListener('pointerdown', (e) => { ddrag = true; $('divider').setPointerCapture(e.pointerId); e.stopPropagation(); });
