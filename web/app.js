@@ -51,7 +51,7 @@ const st = {
   zoom: 1, ox: 0, oy: 0, fitted: true,
   running: false,
   retouch: { size: 100, hard: 0.5, painting: false, dabs: [], last: null, cursor: null, target: 'fused',
-             srcIndex: -1, srcCanvas: null, loading: -1, gen: 0, undo: 0, redo: 0 },
+             wasmIndex: -1, loading: -1, gen: 0, genMin: 0, undo: 0, redo: 0 },
 };
 window.__st = st; window.__draw = () => draw();
 const dpr = () => window.devicePixelRatio || 1;
@@ -374,14 +374,38 @@ $('peak-plus').addEventListener('click', () => setPeakThr(st.peak.thr + 0.05));
 // display canvas while dragging, then the worker applies the stroke to the
 // 16-bit master and sends back the exact bbox, which replaces the preview.
 const R = st.retouch;
-function resetRetouch() { R.srcIndex = -1; R.srcCanvas = null; R.loading = -1; R.gen++; R.undo = 0; R.redo = 0; R.painting = false; R.dabs = []; }
+// Full-res sources: an LRU of decoded, run-aligned frames. Each costs 4 bytes/px
+// (a 45 MP frame is 179 MB), so the cache is sized in bytes, not frames: ~10
+// frames at 12 MP, 2 at 45 MP, 1 above that — never fewer than the one on screen.
+let SRC_BUDGET = 512 * 1024 * 1024;
+const srcCache = new Map(); // frame index -> OffscreenCanvas, least recently used first
+const srcLimit = () => { const [w, h] = imageDims(); return w ? Math.max(1, Math.floor(SRC_BUDGET / (w * h * 4))) : 1; };
+function srcGet(i) { const cv = srcCache.get(i); if (!cv) return null; srcCache.delete(i); srcCache.set(i, cv); return cv; } // touch
+function srcPut(i, cv) {
+  srcCache.delete(i); srcCache.set(i, cv);
+  for (const k of [...srcCache.keys()]) {
+    if (srcCache.size <= srcLimit()) break;
+    if (k === i || k === st.selected) continue;      // never drop what is on screen
+    srcCache.get(k).width = 1; srcCache.delete(k);   // 1x1 releases the backing store now, not at the next GC
+  }
+}
+function srcClear() { for (const cv of srcCache.values()) cv.width = 1; srcCache.clear(); }
+window.__srcCache = srcCache; window.__srcBudget = (b) => { SRC_BUDGET = b; };
+function resetRetouch() { srcClear(); R.wasmIndex = -1; R.loading = -1; R.gen++; R.genMin = R.gen; R.undo = 0; R.redo = 0; R.painting = false; R.dabs = []; }
 let srcTimer = null;
+// The Source layer is drawn from the proxy (proxy_edge px long side) until the
+// full-res aligned frame arrives, so a run's result is never compared against a
+// soft image. Retouch needs the same frame to paint from.
+const sourceShown = () => st.view === 'source' || (st.compare && st.cmp === 'source');
 function ensureSource() {
-  if (st.view !== 'retouch' || !st.result || !st.files[st.selected]) return;
-  if (R.srcIndex === st.selected || R.loading === st.selected) return;
+  if (!st.result || !st.files[st.selected]) return;
+  const forPaint = st.view === 'retouch';                      // strokes copy from the worker's own 16-bit copy
+  if (!forPaint && !sourceShown()) return;
+  const have = () => (forPaint ? R.wasmIndex === st.selected : srcCache.has(st.selected));
+  if (have() || R.loading === st.selected) return;
   clearTimeout(srcTimer);
   srcTimer = setTimeout(() => {
-    if (R.srcIndex === st.selected || R.loading === st.selected || st.running) return;
+    if (have() || R.loading === st.selected || st.running) return;
     R.loading = st.selected; R.gen++;
     worker.postMessage({ type: 'load_source', index: st.selected, file: st.files[st.selected], gen: R.gen });
     updateTabs();
@@ -389,10 +413,13 @@ function ensureSource() {
 }
 async function onSource(m) {
   if (R.loading === m.index) R.loading = -1;
-  if (m.index !== st.selected || !st.result) { ensureSource(); return; } // stale: the user scrubbed on
+  if (!st.result || m.gen < R.genMin) return;   // aligned against a run that is gone
   const cv = new OffscreenCanvas(m.w, m.h);
   cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(m.rgba), m.w, m.h), 0, 0);
-  R.srcCanvas = cv; R.srcIndex = m.index;
+  srcPut(m.index, cv);          // keep it even if the user has scrubbed on: that is what the cache is for
+  if (srcCache.size === 1) log(`[lapstack] full-res source cache: up to ${srcLimit()} frame(s), ${(m.w * m.h * 4 / 1e6).toFixed(0)} MB each`);
+  R.wasmIndex = m.index;        // the worker's 16-bit copy is this frame now
+  if (m.index !== st.selected) ensureSource();
   updateTabs(); draw();
 }
 const targetCanvas = () => (R.target === 'dmap' && st.result && st.result.dmap) ? st.result.dmap : st.result && st.result.fused;
@@ -405,12 +432,12 @@ function onPatch(m) {
 }
 const dabCv = new OffscreenCanvas(16, 16);
 function previewDab(x, y) {
-  if (!R.srcCanvas || !st.result) return;
+  const src = srcGet(st.selected); if (!src || !st.result) return;
   const r = R.size, d = Math.ceil(2 * r) + 2;
   if (dabCv.width !== d) { dabCv.width = d; dabCv.height = d; }
   const c = dabCv.getContext('2d');
   c.globalCompositeOperation = 'source-over'; c.clearRect(0, 0, d, d);
-  c.drawImage(R.srcCanvas, x - r, y - r, d, d, 0, 0, d, d);
+  c.drawImage(src, x - r, y - r, d, d, 0, 0, d, d);
   const g = c.createRadialGradient(r + 1, r + 1, r * R.hard, r + 1, r + 1, r);
   g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)');
   c.globalCompositeOperation = 'destination-in'; c.fillStyle = g; c.fillRect(0, 0, d, d);
@@ -479,11 +506,12 @@ function layerFor(tab) {
   }
   const f = st.frames[st.selected]; const bmp = f && (f.proxy || f.thumb); if (!bmp) return null;
   const [w, h] = f.w ? [f.w, f.h] : [bmp.width, bmp.height];
+  const full = srcGet(st.selected); // full res, aligned like the run
   let overlay = null;
   if (st.peak.on && f.peak) {
     if (f.peak.bmp && f.peak.bmpThr === st.peak.thr) overlay = f.peak.bmp; else peakBitmap(f).then(draw);
   }
-  return { bmp, w, h, overlay };
+  return { bmp: full || bmp, w, h, overlay };
 }
 function drawLayer(L, c = ctx) {
   if (!L) return;
@@ -518,7 +546,8 @@ function draw() {
     let L, Rt, labels;
     if (retouch) {
       const f = st.frames[st.selected]; const pbmp = f && (f.proxy || f.thumb);
-      L = R.srcCanvas && R.srcIndex === st.selected ? { bmp: R.srcCanvas, w, h } : (pbmp ? { bmp: pbmp, w, h } : null);
+      const fullSrc = srcGet(st.selected);
+      L = fullSrc ? { bmp: fullSrc, w, h } : (pbmp ? { bmp: pbmp, w, h } : null);
       Rt = { bmp: targetCanvas(), w, h };
       labels = ['source', `${layerName(R.target)} — drag to paint, shift+drag pans`];
     } else {
@@ -563,7 +592,7 @@ for (const cv of [canvas, canvas2]) {
     const paint = st.view === 'retouch' && st.result && e.button === 0 && !e.shiftKey && !(e.buttons & 4);
     try { cv.setPointerCapture(e.pointerId); } catch {}
     if (paint) {
-      if (!R.srcCanvas || R.srcIndex !== st.selected) { toast('Source frame still loading — wait for "loaded" before painting.', 3000); return; }
+      if (R.wasmIndex !== st.selected || !srcGet(st.selected)) { toast('Source frame still loading — wait for "loaded" before painting.', 3000); return; }
       R.painting = true; R.dabs = []; R.last = null; const [x, y] = imgXY(cv, e); addDab(x, y); draw(); return;
     }
     drag = { x: e.clientX, y: e.clientY, ox: st.ox, oy: st.oy }; cv.classList.add('drag');
@@ -611,9 +640,10 @@ function updateTabs() {
   $('viewseg').hidden = st.step !== 'stack';
   $('ctx-retouch').hidden = !retouch;
   $('undo').disabled = !R.undo; $('redo').disabled = !R.redo; $('hist').textContent = R.undo || R.redo ? `${R.undo} undo · ${R.redo} redo` : '';
-  $('src-status').textContent = retouch ? (R.loading === st.selected ? `loading ${st.files[st.selected]?.name}…` : (R.srcIndex === st.selected ? `source: ${st.files[st.selected]?.name}` : '')) : '';
+  $('src-status').textContent = retouch ? (R.loading === st.selected ? `loading ${st.files[st.selected]?.name}…` : (R.wasmIndex === st.selected ? `source: ${st.files[st.selected]?.name}` : '')) : '';
   $('ab').parentElement.hidden = st.step !== 'stack';
-  if (retouch) { st.compare = false; ensureSource(); }
+  if (retouch) st.compare = false;
+  ensureSource();
   const group = groupOf(st.view);
   document.querySelectorAll('#viewseg button').forEach((b) => b.classList.toggle('on', b.dataset.group === group));
   const subs = (GROUPS[group] || []).filter((t) => t !== 'dmap' || haveDmap());
