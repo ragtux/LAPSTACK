@@ -246,7 +246,7 @@ save button.
 
 **Depth-map rendering (DFR)**: with *also render from the depth map*
 checked in the Run button's ▾ menu (off by default; the button then reads
-*Run + DFR*) the run makes a second stacked image from the depth
+*Run LAP + DFR*) the run makes a second stacked image from the depth
 map: every frame is decoded again, warped with the registration found during
 the run, and blended in with weight `1 − |index − depth|` at each pixel, so
 a pixel is the average of the one or two frames nearest its depth index. The

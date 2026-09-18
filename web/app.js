@@ -65,7 +65,7 @@ document.querySelectorAll('#params [data-step]').forEach((b) => b.addEventListen
 }));
 document.querySelectorAll('#params input, #params select').forEach((el) => el.addEventListener('change', saveParams));
 // Run menu (DFR lives here, not in the parameter panel): the Run label shows the state
-const runLabel = () => { $('run').textContent = $('p-dmap').checked ? 'Run + DFR' : 'Run'; };
+const runLabel = () => { $('run').textContent = $('p-dmap').checked ? 'Run LAP + DFR' : 'Run LAP'; };
 $('p-dmap').addEventListener('change', () => { saveParams(); runLabel(); });
 $('run-more').addEventListener('click', (e) => { e.stopPropagation(); $('runmenu').hidden = !$('runmenu').hidden; });
 $('runmenu').addEventListener('click', (e) => e.stopPropagation());
