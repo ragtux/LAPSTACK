@@ -72,7 +72,7 @@ worker.onmessage = (ev) => {
   const m = ev.data;
   switch (m.type) {
     case 'ready': {
-      $('status').textContent = 'ready';
+      $('status').textContent = 'ready'; $('progress').className = '';
       const name = [m.info.vendor, m.info.architecture, m.info.description].filter(Boolean).join(' ') || 'WebGPU adapter';
       $('gpuinfo').textContent = `${name} · buffers ≤ ${m.info.max_buffer_mb} MB, bindings ≤ ${m.info.max_storage_mb} MB`;
       log(`[lapstack] WebGPU ready: ${JSON.stringify(m.info)}`);
@@ -172,8 +172,8 @@ document.addEventListener('drop', (e) => { e.preventDefault(); document.body.cla
 
 // ---------- run ----------
 function setProgress(text, done, total) {
-  $('progress').hidden = false; $('stage').textContent = `${text} ${total ? `${done}/${total}` : ''}`;
-  $('fill').style.width = total ? `${(100 * done / total).toFixed(1)}%` : '0%';
+  $('progress').className = 'running'; $('status').textContent = `${text} ${total ? `${done}/${total}` : ''}`;
+  $('fill').style.width = total ? `${(100 * done / total).toFixed(1)}%` : '100%';   // no total = indeterminate: full pole
 }
 $('run').addEventListener('click', () => {
   if (st.running || !st.files.length) return;
@@ -187,7 +187,8 @@ $('run').addEventListener('click', () => {
 });
 $('cancel').addEventListener('click', () => worker.postMessage({ type: 'cancel' }));
 function endRun(status) {
-  st.running = false; $('run').hidden = false; $('cancel').hidden = true; $('progress').hidden = true; $('clear').disabled = false;
+  st.running = false; $('run').hidden = false; $('cancel').hidden = true; $('clear').disabled = false;
+  $('progress').className = status.startsWith('done') ? 'done' : 'error'; $('fill').style.width = '0';
   $('run').disabled = !st.files.length; $('status').textContent = status; updateTabs();
 }
 async function onFrame(m) {

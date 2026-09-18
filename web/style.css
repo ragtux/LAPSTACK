@@ -11,9 +11,21 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 .dim { color: var(--dim); } .small { font-size: 11px; } .spacer { flex: 1; } .sep { width: 12px; display: inline-block; }
 #toolbar, #vhead { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--border); }
 #toolbar .title { font-size: 16px; padding-right: 8px; }
-#progress { display: inline-flex; align-items: center; gap: 8px; }
-.bar { display: inline-block; width: 192px; height: 6px; background: var(--widget); border-radius: 3px; overflow: hidden; }
-#fill { display: block; height: 100%; width: 0; background: var(--accent); }
+/* toolbar: [file + run + status bar] [steps] [ ]; equal outer columns keep the steps centred */
+#toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); column-gap: 10px; }
+#tb-left, #tb-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
+#run, #cancel { min-width: 76px; }
+/* status bar: fixed size, text inside; .running = red/white barber pole fill, .done = green check, .error = red cross */
+#progress { position: relative; flex: none; width: 280px; height: 26px; border-radius: 7px; background: var(--widget); border: 1px solid var(--border); overflow: hidden; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+#fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; opacity: 0; transition: width .15s linear; }
+#progress.running #fill { opacity: 1; background: repeating-linear-gradient(-45deg, #e23b3b 0 10px, #f4f4f4 10px 20px); background-size: 28.3px 28.3px; animation: pole .5s linear infinite; }
+@keyframes pole { to { background-position: 28.3px 0; } }
+#mark { position: relative; z-index: 1; display: none; font-size: 20px; font-weight: 700; line-height: 1; }
+#progress.done #mark { display: inline; color: #2ecc71; } #progress.done #mark::before { content: "✓"; }
+#progress.error #mark { display: inline; color: #e23b3b; } #progress.error #mark::before { content: "✕"; }
+#status { position: relative; z-index: 1; font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; padding: 0 8px; }
+#progress.running #status { color: #fff; font-weight: 600; text-shadow: 0 0 3px #000, 0 0 3px #000, 0 1px 2px #000; }
+#progress.done #status { color: var(--text); }
 #main { flex: 1; display: flex; min-height: 0; }
 #filmstrip { width: 176px; flex: none; overflow-y: auto; background: var(--panel); border-right: 1px solid var(--border); padding: 6px; display: flex; flex-direction: column; gap: 6px; }
 #filmstrip .empty { padding: 12px; text-align: center; }

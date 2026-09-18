@@ -8,21 +8,23 @@
 </head>
 <body>
 <div id="toolbar">
-  <span class="title">lapstack</span>
-  <button id="add">Add frames…</button>
-  <input id="file" type="file" multiple accept=".png,.jpg,.jpeg,.tif,.tiff,image/png,image/jpeg,image/tiff" hidden>
-  <button id="clear">Clear</button>
-  <button id="run" class="accent" disabled>Run</button>
-  <button id="cancel" hidden>Cancel</button>
-  <span id="progress" hidden><span id="stage"></span><span class="bar"><span id="fill"></span></span></span>
-  <span class="spacer"></span>
+  <div id="tb-left">
+    <span class="title">lapstack</span>
+    <button id="add">Add frames…</button>
+    <input id="file" type="file" multiple accept=".png,.jpg,.jpeg,.tif,.tiff,image/png,image/jpeg,image/tiff" hidden>
+    <button id="clear">Clear</button>
+    <button id="run" class="accent" disabled>Run</button>
+    <button id="cancel" hidden>Cancel</button>
+    <!-- fixed-size status bar: the stage text lives inside it, so the toolbar never reflows;
+         barber pole while running, green check when done -->
+    <span id="progress"><span id="fill"></span><span id="mark"></span><span id="status">starting…</span></span>
+  </div>
   <div class="seg steps" id="steps">
     <button data-step="stack" class="on"><b>1</b> Stack</button>
     <button data-step="retouch" disabled><b>2</b> Retouch</button>
     <button data-step="save" disabled><b>3</b> Save</button>
   </div>
-  <span class="spacer"></span>
-  <span id="status" class="dim">starting…</span>
+  <div id="tb-right"></div>
 </div>
 <div id="main">
   <div id="filmstrip"><div class="empty dim">Add frames, or drop them here.</div></div>
