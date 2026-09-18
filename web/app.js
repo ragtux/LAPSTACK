@@ -530,17 +530,31 @@ function drawCursor(c, d) {
   c.lineWidth = 1.5 / (st.zoom * d); c.strokeStyle = 'rgba(255,255,255,.9)'; c.beginPath(); c.arc(R.cursor[0], R.cursor[1], R.size, 0, 2 * Math.PI); c.stroke();
   c.strokeStyle = 'rgba(0,0,0,.6)'; c.beginPath(); c.arc(R.cursor[0], R.cursor[1], R.size * R.hard, 0, 2 * Math.PI); c.stroke();
 }
+// Pane labels: a chip over every visible image. 'a' is the view layer, 'b' the
+// compare partner, plain = neutral (the retouch source). Positions are inline so
+// one element serves the pane centres, the swipe divider and the centred single view.
+function showLabel(el, text, kind, pos) {
+  el.hidden = !text;
+  if (!text) return;
+  el.textContent = text;
+  el.className = 'plab' + (kind ? ' ' + kind : '');
+  el.style.left = pos.left || 'auto';
+  el.style.right = pos.right || 'auto';
+  el.style.transform = pos.transform || 'none';
+}
 function draw() {
   const d = dpr();
   const retouch = st.view === 'retouch' && !!st.result;
   const split = retouch || (st.compare && st.cmpMode === 'split' && !!st.result);
-  $('vwrap').classList.toggle('split', split); $('vwrap').classList.toggle('paint', retouch); canvas2.hidden = !split; $('panelabels').hidden = !split;
+  $('vwrap').classList.toggle('split', split); $('vwrap').classList.toggle('paint', retouch); canvas2.hidden = !split;
   sizeCanvas(canvas, d); if (split) sizeCanvas(canvas2, d);
   const cw = canvas.clientWidth, ch = canvas.clientHeight;
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = '#141416'; ctx.fillRect(0, 0, canvas.width, canvas.height);
-  const [w, h] = imageDims(); if (!w) { $('zoom').textContent = ''; return; }
+  const [w, h] = imageDims(); if (!w) { $('zoom').textContent = ''; $('panelabels').hidden = true; return; }
   if (st.fitted) { st.zoom = Math.min(cw / w, ch / h); st.ox = (cw - w * st.zoom) / 2; st.oy = (ch - h * st.zoom) / 2; }
   ctx.setTransform(st.zoom * d, 0, 0, st.zoom * d, st.ox * d, st.oy * d);
+  // labels ride the top of the image itself, so they stay on it when it is letterboxed
+  $('panelabels').style.top = `${Math.max(0, Math.min(st.oy, ch - 40))}px`;
   if (split) {
     // two panes, one transform: retouch = source | target result; compare = view | partner
     let L, Rt, labels;
@@ -549,17 +563,20 @@ function draw() {
       const fullSrc = srcGet(st.selected);
       L = fullSrc ? { bmp: fullSrc, w, h } : (pbmp ? { bmp: pbmp, w, h } : null);
       Rt = { bmp: targetCanvas(), w, h };
-      labels = ['source', `${layerName(R.target)} — drag to paint, shift+drag pans`];
+      labels = ['Source', `${layerName(R.target)} — drag to paint, shift+drag pans`];
     } else {
       const A = layerFor(st.view), B = layerFor(st.cmp);
       [L, Rt] = st.flipped ? [B, A] : [A, B];
-      labels = st.flipped ? [layerName(st.cmp), layerName(st.view)] : [layerName(st.view), layerName(st.cmp)];
+      labels = st.flipped ? [layerLabel(st.cmp), layerLabel(st.view)] : [layerLabel(st.view), layerLabel(st.cmp)];
     }
     drawLayer(L); if (retouch) drawCursor(ctx, d);
     ctx2.setTransform(1, 0, 0, 1, 0, 0); ctx2.fillStyle = '#141416'; ctx2.fillRect(0, 0, canvas2.width, canvas2.height);
     ctx2.setTransform(st.zoom * d, 0, 0, st.zoom * d, st.ox * d, st.oy * d);
     drawLayer(Rt, ctx2); if (retouch) drawCursor(ctx2, d);
-    const [l1, l2] = $('panelabels').children; l1.textContent = labels[0]; l2.textContent = labels[1];
+    const [k1, k2] = retouch ? ['', 'a'] : (st.flipped ? ['b', 'a'] : ['a', 'b']);
+    const [l1, l2] = $('panelabels').children; $('panelabels').hidden = false;
+    showLabel(l1, labels[0], k1, { left: '25%', transform: 'translateX(-50%)' });
+    showLabel(l2, labels[1], k2, { left: '75%', transform: 'translateX(-50%)' });
     $('divider').hidden = true; $('zoom').textContent = `${(st.zoom * d * 100).toFixed(0)}%`;
     return;
   }
@@ -571,7 +588,19 @@ function draw() {
     ctx.save(); ctx.beginPath(); ctx.rect(-1e6, -1e6, 1e6 + xs, 2e6); ctx.clip(); drawLayer(left); ctx.restore();
     ctx.save(); ctx.beginPath(); ctx.rect(xs, -1e6, 1e6, 2e6); ctx.clip(); drawLayer(right); ctx.restore();
     $('divider').hidden = false; $('divider').style.left = `${st.divider * cw - 1}px`;
-  } else { drawLayer(A); $('divider').hidden = true; }
+    // the two chips ride the divider, one on each side; each drops out as its side closes
+    const x = st.divider * cw;
+    const [n1, n2] = st.flipped ? [layerLabel(st.cmp), layerLabel(st.view)] : [layerLabel(st.view), layerLabel(st.cmp)];
+    const [k1, k2] = st.flipped ? ['b', 'a'] : ['a', 'b'];
+    const [l1, l2] = $('panelabels').children; $('panelabels').hidden = false;
+    showLabel(l1, x > 40 ? n1 : '', k1, { right: `${Math.round(cw - x + 8)}px` });
+    showLabel(l2, cw - x > 40 ? n2 : '', k2, { left: `${Math.round(x + 8)}px` });
+  } else {
+    drawLayer(A); $('divider').hidden = true;
+    const [l1, l2] = $('panelabels').children; $('panelabels').hidden = false;
+    showLabel(l1, layerLabel(st.view), 'a', { left: '50%', transform: 'translateX(-50%)' });
+    showLabel(l2, '', '', {});
+  }
   $('zoom').textContent = `${(st.zoom * d * 100).toFixed(0)}%`;
 }
 new ResizeObserver(() => draw()).observe($('vwrap'));
@@ -622,6 +651,9 @@ const GROUPS = { source: ['source'], stack: ['fused', 'dmap'], depth: ['depth', 
 const groupOf = (v) => Object.keys(GROUPS).find((g) => GROUPS[g].includes(v)) || null;
 const lastIn = { stack: 'fused', depth: 'depth' };   // last layer picked in each group
 const layerName = (id) => (LAYERS.find((l) => l[0] === id) || [id, id])[1];
+// while the full-res frame decodes, say so: the pane is showing the proxy
+const layerLabel = (id) => (id === 'source' && st.result && !srcCache.has(st.selected))
+  ? `${layerName(id)} — loading full res…` : layerName(id);
 const haveDmap = () => !!(st.result && st.result.dmap);
 function scrubbable() {
   const usesFrame = (t) => t === 'source' || t === 'retouch' || (isDepthLayer(t) && st.slice);
