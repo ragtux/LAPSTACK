@@ -130,7 +130,14 @@
     <div id="sv-info" class="dim small">—</div>
   </div>
 </div>
-<pre id="log"></pre>
+<!-- log strip: a thin vertical toolbar on the left (collapse, copy) beside the log itself -->
+<div id="logwrap">
+  <div id="logbar">
+    <button id="log-toggle" title="collapse log" aria-expanded="true" aria-controls="log">▾</button>
+    <button id="log-copy" title="copy log to clipboard">⧉</button>
+  </div>
+  <pre id="log"></pre>
+</div>
 <div id="toasts"></div>
 <script type="module" src="app.js"></script>
 </body>

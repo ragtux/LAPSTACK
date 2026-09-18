@@ -6,7 +6,36 @@
 
 const $ = (id) => document.getElementById(id);
 const logEl = $('log');
-function log(s) { logEl.textContent += s + '\n'; logEl.scrollTop = logEl.scrollHeight; }
+function log(s) {
+  logEl.textContent += s + '\n';
+  if (!document.body.classList.contains('log-collapsed')) logEl.scrollTop = logEl.scrollHeight;
+}
+
+// log strip toolbar: collapse to just the toolbar, and copy the whole log
+const setLogCollapsed = (on) => {
+  document.body.classList.toggle('log-collapsed', on);
+  const b = $('log-toggle');
+  b.textContent = on ? '▴' : '▾';
+  b.title = on ? 'expand log' : 'collapse log';
+  b.setAttribute('aria-expanded', String(!on));
+  if (!on) logEl.scrollTop = logEl.scrollHeight;
+};
+$('log-toggle').onclick = () => setLogCollapsed(!document.body.classList.contains('log-collapsed'));
+$('log-copy').onclick = async () => {
+  const b = $('log-copy');
+  try {
+    await navigator.clipboard.writeText(logEl.textContent);
+  } catch {
+    // clipboard API needs a secure context; fall back to a scratch selection
+    const ta = document.createElement('textarea');
+    ta.value = logEl.textContent; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch {}
+    ta.remove();
+  }
+  b.textContent = '✓'; b.disabled = true;
+  setTimeout(() => { b.textContent = '⧉'; b.disabled = false; }, 900);
+};
 
 // ---------- state ----------
 const st = {
