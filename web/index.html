@@ -13,7 +13,14 @@
     <button id="add">Add frames…</button>
     <input id="file" type="file" multiple accept=".png,.jpg,.jpeg,.tif,.tiff,image/png,image/jpeg,image/tiff" hidden>
     <button id="clear">Clear</button>
-    <button id="run" class="accent" disabled>Run</button>
+    <!-- split Run button: the arrow opens run options (DFR); the label shows the state -->
+    <span id="runwrap">
+      <span class="seg" id="runseg"><button id="run" class="accent" disabled>Run</button><button id="run-more" class="accent" title="run options" aria-haspopup="true">▾</button></span>
+      <div id="runmenu" class="menu" hidden>
+        <label class="tog"><input type="checkbox" id="p-dmap"> also render from the depth map (DFR)</label>
+        <div class="dim small">A second stacked image, rendered from the focus depth map: each pixel blends the frames nearest its depth. Shown side by side with LAP. Decodes the frames again: about a quarter more run time.</div>
+      </div>
+    </span>
     <button id="cancel" hidden>Cancel</button>
     <!-- fixed-size status bar: the stage text lives inside it, so the toolbar never reflows;
          barber pole while running, green check when done -->
@@ -87,8 +94,6 @@
     <div class="section">DEPTH MAP</div>
     <label class="stepper" title="depth from focus works on a grid of 1/2^N the frame size">grid 1/2^N <span><button data-step="p-depthscale" data-d="-1">−</button><span id="p-depthscale" data-min="1" data-max="4">2</span><button data-step="p-depthscale" data-d="1">+</button></span></label>
     <label class="stepper" title="pyramid level the winner map is read from (0 = full resolution, noisy where the scene is flat)">winner map level <span><button data-step="p-depthlevel" data-d="-1">−</button><span id="p-depthlevel" data-min="0" data-max="6">2</span><button data-step="p-depthlevel" data-d="1">+</button></span></label>
-    <label title="second pass over the frames after the stack: each pixel blends the frames nearest its depth (DFR)"><input type="checkbox" id="p-dmap"> also render from the depth map (DFR)</label>
-    <div class="dim small">A second stacked image, shown side by side with the LAP result. Decodes the frames again: about a quarter more run time.</div>
     <div class="section">VIEW</div>
     <label class="stepper">proxy edge px <span><button data-step="p-proxy" data-d="-200">−</button><span id="p-proxy" data-min="400" data-max="3000">1400</span><button data-step="p-proxy" data-d="200">+</button></span></label>
     <div class="section">GPU</div>

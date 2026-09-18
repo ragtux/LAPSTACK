@@ -64,6 +64,14 @@ document.querySelectorAll('#params [data-step]').forEach((b) => b.addEventListen
   setStep(id, cur + Number(b.dataset.d)); saveParams();
 }));
 document.querySelectorAll('#params input, #params select').forEach((el) => el.addEventListener('change', saveParams));
+// Run menu (DFR lives here, not in the parameter panel): the Run label shows the state
+const runLabel = () => { $('run').textContent = $('p-dmap').checked ? 'Run + DFR' : 'Run'; };
+$('p-dmap').addEventListener('change', () => { saveParams(); runLabel(); });
+$('run-more').addEventListener('click', (e) => { e.stopPropagation(); $('runmenu').hidden = !$('runmenu').hidden; });
+$('runmenu').addEventListener('click', (e) => e.stopPropagation());
+document.addEventListener('click', () => { $('runmenu').hidden = true; });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('runmenu').hidden = true; });
+runLabel();
 
 // ---------- worker ----------
 // (query string: never run a stale cached worker after a rebuild; serve.sh also sends no-store)
@@ -178,7 +186,7 @@ function setProgress(text, done, total) {
 $('run').addEventListener('click', () => {
   if (st.running || !st.files.length) return;
   st.running = true; st.frames = st.frames.map((f) => (f ? { name: f.name, thumb: f.thumb, proxy: f.proxy, w: f.w, h: f.h, bits: f.bits } : f)); st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); if (st.step !== 'stack') gotoStep('stack');
-  $('run').hidden = true; $('cancel').hidden = false; $('clear').disabled = true;
+  runLabel(); $('runwrap').hidden = true; $('runmenu').hidden = true; $('cancel').hidden = false; $('clear').disabled = true;
   setProgress('starting', 0, st.files.length);
   const params = readParams(); delete params.turbo;
   log(`[lapstack] run: ${st.files.length} frames, ${JSON.stringify(params)}`);
@@ -187,7 +195,7 @@ $('run').addEventListener('click', () => {
 });
 $('cancel').addEventListener('click', () => worker.postMessage({ type: 'cancel' }));
 function endRun(status) {
-  st.running = false; $('run').hidden = false; $('cancel').hidden = true; $('clear').disabled = false;
+  st.running = false; $('runwrap').hidden = false; $('cancel').hidden = true; $('clear').disabled = false;
   $('progress').className = status.startsWith('done') ? 'done' : 'error'; $('fill').style.width = '0';
   $('run').disabled = !st.files.length; $('status').textContent = status; updateTabs();
 }
@@ -670,7 +678,7 @@ if (q.get('autorun')) {
     for (const n of names) files.push(new File([await (await fetch(`./${dir}/` + n)).blob()], n));
     addFiles(files);
     if (q.has('align')) $('p-align').checked = q.get('align') === '1';
-    if (q.has('render')) $('p-dmap').checked = q.get('render') === '1';
+    if (q.has('render')) { $('p-dmap').checked = q.get('render') === '1'; runLabel(); }
     if (q.get('norun')) return;
     const tick = () => { if ($('status').textContent === 'ready') $('run').click(); else setTimeout(tick, 100); };
     tick();
