@@ -99,6 +99,9 @@ body.log-collapsed #toasts { bottom: 46px; }
 #vwrap.split { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
 #vwrap.split canvas { position: relative; inset: auto; width: 100%; height: 100%; cursor: grab; }
 #vwrap.paint canvas { cursor: none; }
+/* ctrl+G: pick the frame that won a pixel */
+#vwrap.pick canvas { cursor: crosshair; }
+#pickhint { position: absolute; left: 10px; top: 10px; z-index: 3; padding: 4px 10px; border-radius: 8px; background: rgba(20,20,22,.85); border: 1px solid var(--accent); font-size: 12px; pointer-events: none; }
 /* pane labels: one chip per visible image (pane centres when split, hugging the
    divider in swipe, centred when a single image fills the canvas) */
 #panelabels { position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; overflow: hidden; z-index: 2; }

@@ -49,6 +49,7 @@ const st = {
   sliceBmps: new Map(),   // 'layer:frame index' -> ImageBitmap (magenta band over pixels assigned to that frame)
   peak: { on: false, thr: 0.5, max: 0, pixmax: null, floor: 0 },   // focus peaking, see peakMask()
   zoom: 1, ox: 0, oy: 0, fitted: true,
+  pick: false,          // ctrl+G: the next canvas click jumps to the frame that won that pixel
   running: false,
   retouch: { size: 100, hard: 0.5, painting: false, dabs: [], last: null, cursor: null, target: 'fused',
              wasmIndex: -1, loading: -1, gen: 0, genMin: 0, undo: 0, redo: 0 },
@@ -99,7 +100,7 @@ $('p-dmap').addEventListener('change', () => { saveParams(); runLabel(); });
 $('run-more').addEventListener('click', (e) => { e.stopPropagation(); $('runmenu').hidden = !$('runmenu').hidden; });
 $('runmenu').addEventListener('click', (e) => e.stopPropagation());
 document.addEventListener('click', () => { $('runmenu').hidden = true; });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('runmenu').hidden = true; });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('runmenu').hidden = true; setPick(false); } });
 runLabel();
 
 // ---------- worker ----------
@@ -202,7 +203,7 @@ function renderFilmstrip() {
 }
 $('add').addEventListener('click', () => $('file').click());
 $('file').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
-$('clear').addEventListener('click', () => { if (st.running) return; worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); st.step = 'stack'; if (st.view === 'retouch') st.view = 'source'; gotoStep('stack'); renderFilmstrip(); updateTabs(); setView('source'); });
+$('clear').addEventListener('click', () => { if (st.running) return; setPick(false); worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); st.step = 'stack'; if (st.view === 'retouch') st.view = 'source'; gotoStep('stack'); renderFilmstrip(); updateTabs(); setView('source'); });
 document.addEventListener('dragover', (e) => { e.preventDefault(); document.body.classList.add('drop'); });
 document.addEventListener('dragleave', () => document.body.classList.remove('drop'));
 document.addEventListener('drop', (e) => { e.preventDefault(); document.body.classList.remove('drop'); if (!st.running) addFiles(e.dataTransfer.files); });
@@ -214,7 +215,7 @@ function setProgress(text, done, total) {
 }
 $('run').addEventListener('click', () => {
   if (st.running || !st.files.length) return;
-  st.running = true; st.frames = st.frames.map((f) => (f ? { name: f.name, thumb: f.thumb, proxy: f.proxy, w: f.w, h: f.h, bits: f.bits } : f)); st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); if (st.step !== 'stack') gotoStep('stack');
+  st.running = true; setPick(false); st.frames = st.frames.map((f) => (f ? { name: f.name, thumb: f.thumb, proxy: f.proxy, w: f.w, h: f.h, bits: f.bits } : f)); st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); if (st.step !== 'stack') gotoStep('stack');
   runLabel(); $('runwrap').hidden = true; $('runmenu').hidden = true; $('cancel').hidden = false; $('clear').disabled = true;
   setProgress('starting', 0, st.files.length);
   const params = readParams(); delete params.turbo;
@@ -616,8 +617,44 @@ function onWheel(cv, e) {
 }
 let drag = null;
 function imgXY(cv, e) { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left - st.ox) / st.zoom, (e.clientY - r.top - st.oy) / st.zoom]; }
+// ---------- ctrl+G: jump to the frame that won a pixel ----------
+// The LAP winner map holds, per cell of the depth level's grid, the frame that
+// won there — the same map the Winner layer and the slice overlay read. A single
+// cell is noisy, so a click takes the most common index in the 3x3 around it,
+// with the clicked cell breaking ties.
+function setPick(on) {
+  st.pick = !!on && !!st.result;
+  $('vwrap').classList.toggle('pick', st.pick);
+  $('pickhint').hidden = !st.pick;
+}
+function frameAt(x, y) {
+  const r = st.result; if (!r || !r.winner) return -1;
+  const cx = Math.round((x + 0.5) * r.ww / r.w - 0.5), cy = Math.round((y + 0.5) * r.wh / r.h - 0.5);
+  if (cx < 0 || cy < 0 || cx >= r.ww || cy >= r.wh) return -1;
+  const votes = new Map();
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const px = cx + dx, py = cy + dy; if (px < 0 || py < 0 || px >= r.ww || py >= r.wh) continue;
+    const v = Math.round(r.winner[py * r.ww + px]);
+    votes.set(v, (votes.get(v) || 0) + (dx || dy ? 1 : 1.5));
+  }
+  let best = -1, n = 0;
+  for (const [v, c] of votes) if (c > n) { best = v; n = c; }
+  return best;
+}
+function pickAt(cv, e) {
+  const [x, y] = imgXY(cv, e), [w, h] = imageDims();
+  if (x < 0 || y < 0 || x >= w || y >= h) return;   // outside the image: wait for a click on it
+  const i = frameAt(x, y);
+  setPick(false);
+  if (i < 0 || !st.files[i]) { toast('No winner recorded for that pixel.', 3000); return; }
+  st.selected = i;
+  if (!scrubbable()) st.view = 'source';            // otherwise the jump would be invisible
+  updateTabs(); renderFilmstrip(); revealSelected(); draw();
+  log(`[lapstack] (${Math.round(x)}, ${Math.round(y)}) is sharpest in frame ${i + 1}/${st.files.length}: ${st.files[i].name}`);
+}
 for (const cv of [canvas, canvas2]) {
   cv.addEventListener('pointerdown', (e) => {
+    if (st.pick && e.button === 0) { e.preventDefault(); pickAt(cv, e); return; }
     const paint = st.view === 'retouch' && st.result && e.button === 0 && !e.shiftKey && !(e.buttons & 4);
     try { cv.setPointerCapture(e.pointerId); } catch {}
     if (paint) {
@@ -751,6 +788,12 @@ document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'SELECT') return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); worker.postMessage({ type: e.shiftKey ? 'redo' : 'undo' }); return; }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); worker.postMessage({ type: 'redo' }); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') {
+    e.preventDefault();
+    if (!st.result) { toast('Run first: the sharpest frame comes from the run\'s winner map.', 3000); return; }
+    setPick(!st.pick);
+    return;
+  }
   if (e.key === '[') setBrush(R.size / 1.25, R.hard); else if (e.key === ']') setBrush(R.size * 1.25, R.hard);
   else if (e.key === '1') gotoStep('stack'); else if (e.key === '2') gotoStep('retouch'); else if (e.key === '3') gotoStep('save');
   else if (e.key === 'ArrowLeft') scrub(e.shiftKey ? -10 : -1); else if (e.key === 'ArrowRight') scrub(e.shiftKey ? 10 : 1);
