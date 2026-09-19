@@ -248,11 +248,14 @@ in colour, showing only the parts of it the result uses — Helicon Focus's
 "source map": every pixel is darkened by how far, in frames, the depth map
 puts it from that frame (full brightness within ±0.5 frames, 8 % beyond
 ±0.75, linear between), so the plane of focus stands out with a crisp edge
-and scrubbing sweeps it through the scene. The page builds a preview mask on
-the depth map's working grid straight away; the engine then returns the
-full-resolution aligned frame darkened by the guided-upsampled depth map
-(`source_focus`, ~1 s at 45 MP, cached with the full-res sources), which
-replaces the preview. It can be compared against any layer, LAP in
+and scrubbing sweeps it through the scene. The out-of-focus part keeps its
+outlines: the local contrast of its luminance (|luma − box blur|, radius
+≈ width/1000) is added back in grey, so blurred edges and fibres read as
+light lines against the dimmed colour. The page builds a preview from the
+proxy and the depth map's working grid straight away; the engine then
+returns the full-resolution aligned frame rendered the same way from the
+guided-upsampled depth map (`source_focus`, ~1 s at 45 MP, cached with the
+full-res sources), which replaces the preview. It can be compared against any layer, LAP in
 particular.
 
 **Depth-map rendering (DFR)**: with *also render from the depth map*

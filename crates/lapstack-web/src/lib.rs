@@ -642,11 +642,14 @@ impl Engine {
         self.run.as_ref().and_then(|r| r.src_rgb16.as_ref()).map_or(-1, |(i, _)| *i as i32)
     }
 
-    /// The loaded source frame with every pixel darkened by how far, in frames,
-    /// the full-resolution depth map puts it from that frame (the "In focus"
-    /// layer): brightness = dim + (1 − dim)·clamp((w1 − |depth − index|) / (w1 − w0), 0, 1),
-    /// full inside ±w0 frames, `dim` beyond ±w1. Returns {index, w, h, rgba}.
-    pub fn source_focus(&self, dim: f32, w0: f32, w1: f32) -> Result<JsValue, JsValue> {
+    /// The loaded source frame rendered as the "In focus" layer: every pixel is
+    /// darkened by how far, in frames, the full-resolution depth map puts it from
+    /// that frame — weight w = clamp((w1 − |depth − index|) / (w1 − w0), 0, 1),
+    /// full inside ±w0 frames, none beyond ±w1 — and the out-of-focus part keeps
+    /// its outlines: out = rgb·(w + (1 − w)·dim) + (1 − w)·soft(tex·|luma − box(luma)|),
+    /// the box being (2r+1)² with r = w/1000 px and soft(t) = cap·(1 − e^(−t/cap)),
+    /// cap = 0.4, so hard edges stay light grey. Returns {index, w, h, rgba}.
+    pub fn source_focus(&self, dim: f32, w0: f32, w1: f32, tex: f32) -> Result<JsValue, JsValue> {
         let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no run"))?;
         let (index, src) = run.src_rgb16.as_ref().ok_or_else(|| JsValue::from_str("no source loaded"))?;
         let depth = run.depth_full.as_ref().ok_or_else(|| JsValue::from_str("no depth-from-focus result"))?;
@@ -654,12 +657,60 @@ impl Engine {
         let k = (run.count.max(2) - 1) as f32 / 65535.0;
         let span = (w1 - w0).max(1e-3);
         let ix = *index as f32;
+        let r = (w / 1000).max(1);
+        // luma as u8, box-blurred horizontally into `hb`; the vertical pass runs
+        // inside the output loop with a sliding column sum, so no third plane
+        let luma: Vec<u8> = (0..n)
+            .map(|i| ((0.299 * src[3 * i] as f32 + 0.587 * src[3 * i + 1] as f32 + 0.114 * src[3 * i + 2] as f32) / 257.0 + 0.5) as u8)
+            .collect();
+        let mut hb = vec![0u8; n];
+        for y in 0..h {
+            let row = &luma[y * w..(y + 1) * w];
+            let mut sum: u32 = row[..(r + 1).min(w)].iter().map(|&v| v as u32).sum();
+            for x in 0..w {
+                let lo = x.saturating_sub(r);
+                let hi = (x + r).min(w - 1);
+                hb[y * w + x] = ((sum + (hi - lo + 1) as u32 / 2) / (hi - lo + 1) as u32) as u8;
+                if x + r + 1 < w {
+                    sum += row[x + r + 1] as u32;
+                }
+                if x >= r {
+                    sum -= row[x - r] as u32;
+                }
+            }
+        }
+        let mut col = vec![0u32; w];
+        for y in 0..(r + 1).min(h) {
+            for x in 0..w {
+                col[x] += hb[y * w + x] as u32;
+            }
+        }
         let mut rgba = vec![255u8; n * 4];
-        for i in 0..n {
-            let wgt = ((w1 - (depth[i] as f32 * k - ix).abs()) / span).clamp(0.0, 1.0);
-            let b = (dim + (1.0 - dim) * wgt) / 65535.0 * 255.0;
-            for c in 0..3 {
-                rgba[4 * i + c] = (src[3 * i + c] as f32 * b + 0.5) as u8;
+        for y in 0..h {
+            let lo = y.saturating_sub(r);
+            let hi = (y + r).min(h - 1);
+            let cnt = (hi - lo + 1) as f32;
+            for x in 0..w {
+                let i = y * w + x;
+                let wgt = ((w1 - (depth[i] as f32 * k - ix).abs()) / span).clamp(0.0, 1.0);
+                let hp = (luma[i] as f32 - col[x] as f32 / cnt).abs() / 255.0;
+                let gain = (wgt + (1.0 - wgt) * dim) / 257.0;
+                let add = (1.0 - wgt) * 0.4 * (1.0 - (-tex * hp / 0.4).exp()) * 255.0;
+                for c in 0..3 {
+                    rgba[4 * i + c] = (src[3 * i + c] as f32 * gain + add + 0.5).min(255.0) as u8;
+                }
+            }
+            if y + r + 1 < h {
+                let nr = &hb[(y + r + 1) * w..(y + r + 2) * w];
+                for x in 0..w {
+                    col[x] += nr[x] as u32;
+                }
+            }
+            if y >= r {
+                let orow = &hb[(y - r) * w..(y - r + 1) * w];
+                for x in 0..w {
+                    col[x] -= orow[x] as u32;
+                }
             }
         }
         let o = js_sys::Object::new();

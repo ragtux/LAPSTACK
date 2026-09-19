@@ -46,7 +46,7 @@ const st = {
   step: 'stack', view: 'source', selected: 0,
   compare: false, cmp: 'depth', cmpMode: 'swipe', divider: 0.5, flipped: false,
   turbo: false, slice: true,
-  sliceBmps: new Map(),   // 'slice:i' -> magenta band over pixels whose depth is frame i; 'focus:i' -> the In focus dimming mask of frame i
+  sliceBmps: new Map(),   // 'slice:i' -> magenta band over pixels whose depth is frame i; 'focus:i' -> the In focus preview of frame i (proxy res)
   focusPending: new Set(), // frame indices whose In focus mask is being built
   peak: { on: false, thr: 0.5, max: 0, pixmax: null, floor: 0 },   // focus peaking, see peakMask()
   zoom: 1, ox: 0, oy: 0, fitted: true,
@@ -370,29 +370,82 @@ $('slice').addEventListener('change', (e) => { st.slice = e.target.checked; save
 
 // ---------- in focus ----------
 // The scrubbed frame's real pixels, showing only the parts of it the result
-// uses (Helicon's "source map"): each pixel is darkened by how far, in frames,
-// the depth map puts it from the frame — full brightness within ±FOCUS_W0
-// frames, FOCUS_DIM beyond ±FOCUS_W1, linear between — so the plane of focus
-// stands out with a crisp edge and scrubbing sweeps it through the scene.
-// Two renderings share the formula: a preview mask built here on the depth
-// map's working grid (a black overlay drawn smoothed over the proxy) and the
-// full-resolution frame darkened in the engine by the guided-upsampled depth
-// map, which replaces the preview once it has loaded (srcCache, key 'focus:i').
+// uses (Helicon's "source map"): each pixel is weighted by how far, in frames,
+// the depth map puts it from the frame — w = 1 within ±FOCUS_W0 frames, 0
+// beyond ±FOCUS_W1, linear between — so the plane of focus stands out with a
+// crisp edge and scrubbing sweeps it through the scene. The out-of-focus part
+// is dimmed to FOCUS_DIM but keeps its outlines: the local contrast of its
+// luminance (|luma − box blur|, radius ≈ width/1000) is added back in grey,
+// scaled by FOCUS_TEX and soft-clipped at FOCUS_CAP so hard edges stay light
+// grey, so blurred edges and fibres read as light lines.
+//   out = rgb·(w + (1 − w)·dim) + (1 − w)·soft(tex·|luma − box(luma)|),  soft(t) = cap·(1 − e^(−t/cap))
+// Two renderings share the formula: a preview built here from the proxy and
+// the depth map's working grid, and the full-resolution frame rendered by the
+// engine from the guided-upsampled depth map (source_focus), which replaces
+// the preview once it has loaded (srcCache, key 'focus:i').
 const FOCUS_DIM = 0.08;   // brightness left to a pixel the frame does not contribute
 const FOCUS_W0 = 0.5;     // frames: fully lit within this distance of the plane
 const FOCUS_W1 = 0.75;    // frames: fully dimmed beyond this distance (a quarter-frame feather)
-const focusParams = () => ({ dim: FOCUS_DIM, w0: FOCUS_W0, w1: FOCUS_W1 });
+const FOCUS_TEX = 3;      // gain of the out-of-focus local contrast
+const FOCUS_CAP = 0.4;    // brightness the local contrast term saturates towards
+const focusParams = () => ({ dim: FOCUS_DIM, w0: FOCUS_W0, w1: FOCUS_W1, tex: FOCUS_TEX });
 const focusWeight = (d, ix) => Math.min(1, Math.max(0, (FOCUS_W1 - Math.abs(d - ix)) / (FOCUS_W1 - FOCUS_W0)));
+// |luma − box blur| of an RGBA image, radius r, as a Float32Array in [0, 1]
+function localContrast(px, w, h, r) {
+  const luma = new Float32Array(w * h), hb = new Float32Array(w * h), out = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) luma[i] = (0.299 * px[4 * i] + 0.587 * px[4 * i + 1] + 0.114 * px[4 * i + 2]) / 255;
+  for (let y = 0; y < h; y++) {
+    let sum = 0; for (let x = 0; x <= Math.min(r, w - 1); x++) sum += luma[y * w + x];
+    for (let x = 0; x < w; x++) {
+      const lo = Math.max(0, x - r), hi = Math.min(w - 1, x + r);
+      hb[y * w + x] = sum / (hi - lo + 1);
+      if (x + r + 1 < w) sum += luma[y * w + x + r + 1];
+      if (x >= r) sum -= luma[y * w + x - r];
+    }
+  }
+  const col = new Float32Array(w);
+  for (let y = 0; y <= Math.min(r, h - 1); y++) for (let x = 0; x < w; x++) col[x] += hb[y * w + x];
+  for (let y = 0; y < h; y++) {
+    const lo = Math.max(0, y - r), hi = Math.min(h - 1, y + r), cnt = hi - lo + 1;
+    for (let x = 0; x < w; x++) out[y * w + x] = Math.abs(luma[y * w + x] - col[x] / cnt);
+    if (y + r + 1 < h) for (let x = 0; x < w; x++) col[x] += hb[(y + r + 1) * w + x];
+    if (y >= r) for (let x = 0; x < w; x++) col[x] -= hb[(y - r) * w + x];
+  }
+  return out;
+}
+function sampleBilinear(D, x, y) {
+  const x0 = Math.max(0, Math.min(D.w - 1, Math.floor(x))), y0 = Math.max(0, Math.min(D.h - 1, Math.floor(y)));
+  const x1 = Math.min(D.w - 1, x0 + 1), y1 = Math.min(D.h - 1, y0 + 1);
+  const fx = Math.max(0, Math.min(1, x - x0)), fy = Math.max(0, Math.min(1, y - y0));
+  const a = D.data[y0 * D.w + x0], b = D.data[y0 * D.w + x1], c = D.data[y1 * D.w + x0], d = D.data[y1 * D.w + x1];
+  return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
+}
+// the In focus preview of frame ix at proxy resolution (an image, not an overlay)
 async function focusBitmap(ix) {
-  const D = depthData(); if (!D) return null;
+  const D = depthData(); const f = st.frames[ix]; const src = f && (f.proxy || f.thumb);
+  if (!D || !src) return null;
   const key = `focus:${ix}`;
   if (st.sliceBmps.has(key)) return st.sliceBmps.get(key);
   if (st.focusPending.has(ix)) return null;
   st.focusPending.add(ix);
-  const px = new Uint8ClampedArray(D.w * D.h * 4);
-  for (let i = 0; i < D.data.length; i++) px[4 * i + 3] = Math.round(255 * (1 - FOCUS_DIM) * (1 - focusWeight(D.data[i], ix)));
   let bmp;
-  try { bmp = await createImageBitmap(new ImageData(px, D.w, D.h)); } finally { st.focusPending.delete(ix); }
+  try {
+    const w = src.width, h = src.height;
+    const oc = new OffscreenCanvas(w, h); const c = oc.getContext('2d', { willReadFrequently: true });
+    c.drawImage(src, 0, 0);
+    const img = c.getImageData(0, 0, w, h), px = img.data;
+    const hp = localContrast(px, w, h, Math.max(1, Math.round(w / 1000)));
+    for (let y = 0; y < h; y++) {
+      const dy = (y + 0.5) * D.h / h - 0.5;
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        const wgt = focusWeight(sampleBilinear(D, (x + 0.5) * D.w / w - 0.5, dy), ix);
+        const gain = wgt + (1 - wgt) * FOCUS_DIM, add = (1 - wgt) * FOCUS_CAP * (1 - Math.exp(-FOCUS_TEX * hp[i] / FOCUS_CAP)) * 255;
+        px[4 * i] = px[4 * i] * gain + add; px[4 * i + 1] = px[4 * i + 1] * gain + add; px[4 * i + 2] = px[4 * i + 2] * gain + add;
+      }
+    }
+    bmp = await createImageBitmap(img);
+  } finally { st.focusPending.delete(ix); }
   if (st.sliceBmps.size > 32) st.sliceBmps.clear();
   st.sliceBmps.set(key, bmp); return bmp;
 }
@@ -545,10 +598,10 @@ function layerFor(tab) {
   let overlay = null;
   if (tab === 'focus') {
     if (!st.result) return null;
-    const fullFocus = srcGet(`focus:${st.selected}`);   // full res, darkened by the engine
+    const fullFocus = srcGet(`focus:${st.selected}`);   // full res, rendered by the engine
     if (fullFocus) return { bmp: fullFocus, w, h };
-    overlay = st.sliceBmps.get(`focus:${st.selected}`) || null; if (!overlay) focusBitmap(st.selected).then(draw);
-    return { bmp: full || bmp, w, h, overlay };
+    const preview = st.sliceBmps.get(`focus:${st.selected}`); if (!preview) { focusBitmap(st.selected).then(draw); return { bmp, w, h }; }
+    return { bmp: preview, w, h };
   }
   if (st.peak.on && f.peak) {
     if (f.peak.bmp && f.peak.bmpThr === st.peak.thr) overlay = f.peak.bmp; else peakBitmap(f).then(draw);

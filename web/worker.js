@@ -127,7 +127,7 @@ async function handle(m) {
       }
       running = false;
     } else if (m.type === 'load_source') {
-      // m.focus = {dim, w0, w1}: the In focus rendering of the frame instead of the
+      // m.focus = {dim, w0, w1, tex}: the In focus rendering of the frame instead of the
       // plain frame; the decode is skipped when the engine already holds that frame.
       if (running) return;
       let r = null;
@@ -135,7 +135,7 @@ async function handle(m) {
         const bytes = new Uint8Array(await m.file.arrayBuffer());
         r = await engine.load_source(m.index, bytes);
       }
-      if (m.focus) r = engine.source_focus(m.focus.dim, m.focus.w0, m.focus.w1);
+      if (m.focus) r = engine.source_focus(m.focus.dim, m.focus.w0, m.focus.w1, m.focus.tex);
       const rgba = r.rgba;
       post({ type: 'source', index: r.index, w: r.w, h: r.h, rgba: rgba.buffer, gen: m.gen, focus: !!m.focus }, [rgba.buffer]);
     } else if (m.type === 'stroke' || m.type === 'undo' || m.type === 'redo') {
