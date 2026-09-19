@@ -47,7 +47,7 @@
         <button data-tab="fused" title="Laplacian-pyramid fusion">LAP</button>
         <button data-tab="dmap" title="rendered from the depth map: each pixel blends the frames nearest its depth">DFR</button>
         <button data-tab="depth" title="depth from focus (working grid)">Focus depth</button>
-        <button data-tab="winner" title="which frame won at the chosen pyramid level">Winner</button>
+        <button data-tab="focus" title="the scrubbed frame's own pixels, dimmed where it is out of focus: scrub to sweep the plane of focus">In focus</button>
       </div>
       <span class="sep"></span>
       <!-- layer-specific controls; each lives in #view-ctx when it applies to the
@@ -94,7 +94,7 @@
     <label><input type="checkbox" id="p-chroma"> use chroma</label>
     <div class="section">DEPTH MAP</div>
     <label class="stepper" title="depth from focus works on a grid of 1/2^N the frame size">grid 1/2^N <span><button data-step="p-depthscale" data-d="-1">−</button><span id="p-depthscale" data-min="1" data-max="4">2</span><button data-step="p-depthscale" data-d="1">+</button></span></label>
-    <label class="stepper" title="pyramid level the winner map is read from (0 = full resolution, noisy where the scene is flat)">winner map level <span><button data-step="p-depthlevel" data-d="-1">−</button><span id="p-depthlevel" data-min="0" data-max="6">2</span><button data-step="p-depthlevel" data-d="1">+</button></span></label>
+    <label class="stepper" title="pyramid level the winner map (ctrl+G pixel lookup, Save winner map) is read from (0 = full resolution, noisy where the scene is flat)">winner map level <span><button data-step="p-depthlevel" data-d="-1">−</button><span id="p-depthlevel" data-min="0" data-max="6">2</span><button data-step="p-depthlevel" data-d="1">+</button></span></label>
     <div class="section">VIEW</div>
     <label class="stepper">proxy edge px <span><button data-step="p-proxy" data-d="-200">−</button><span id="p-proxy" data-min="400" data-max="3000">1400</span><button data-step="p-proxy" data-d="200">+</button></span></label>
     <div class="section">GPU</div>

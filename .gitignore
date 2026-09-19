@@ -5,3 +5,5 @@ web/test/expected.png
 web/test/expected_dff.*
 web/test/big/
 web/test/big25/
+docs/*
+!docs/*.pdf

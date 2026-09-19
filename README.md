@@ -206,11 +206,11 @@ added, with each frame's registration once aligned), a parameter panel (all
 `lapstack` knobs, persisted in localStorage), Run/Cancel with progress and a
 log, and a viewer whose header is a segmented **Source / Stack / Depth**
 control with a second-level control for the group's layers — **LAP / DFR**
-under Stack (DFR only when the depth-map render ran), **Focus depth / Winner** under
-Depth — followed by controls that only show for what is on screen: on
-Source a **peaking** toggle with a threshold stepper; on Depth a Gray/Turbo
-LUT and a **slice** toggle; a frame slider whenever the shown layers depend
-on a frame; and on the right a **compare** toggle whose "vs" dropdown lists
+under Stack (DFR only when the depth-map render ran), **Focus depth / In focus**
+under Depth — followed by controls that only show for what is on screen: on
+Source a **peaking** toggle with a threshold stepper; on Focus depth a
+Gray/Turbo LUT and a **slice** toggle; a frame slider whenever the shown
+layers depend on a frame; and on the right a **compare** toggle whose "vs" dropdown lists
 the other layers (the divider is draggable, `flip` or space swaps sides).
 Scroll-zoom at the cursor, drag pan, double-click fit/100 %, wheel / ←/→
 scrub (shift = 10; ctrl+wheel zooms on scrubbable views). Drag-and-drop
@@ -240,9 +240,20 @@ one. The browser map matches the native one on the same frames to
 no measurable wall time on a 25 × 45 MP run and keeps one u16 slice per
 frame (5.7 MB at 45 MP and N = 2). The raw pyramid **winner map** (which
 frame won at pyramid level *winner map level*, a free by-product of fusion)
-is the second depth layer, under **Depth → Winner**; both take the Gray/Turbo LUT
-and the slice overlay, can be compared against each other, and each has a
+is not shown as a layer; it drives the ctrl+G pixel lookup and has its own
 save button.
+
+**In focus** (the second Depth layer) is the scrubbed frame's own pixels,
+in colour, showing only the parts of it the result uses — Helicon Focus's
+"source map": every pixel is darkened by how far, in frames, the depth map
+puts it from that frame (full brightness within ±0.5 frames, 8 % beyond
+±0.75, linear between), so the plane of focus stands out with a crisp edge
+and scrubbing sweeps it through the scene. The page builds a preview mask on
+the depth map's working grid straight away; the engine then returns the
+full-resolution aligned frame darkened by the guided-upsampled depth map
+(`source_focus`, ~1 s at 45 MP, cached with the full-res sources), which
+replaces the preview. It can be compared against any layer, LAP in
+particular.
 
 **Depth-map rendering (DFR)**: with *also render from the depth map*
 checked in the Run button's ▾ menu (off by default; the button then reads

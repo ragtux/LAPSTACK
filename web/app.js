@@ -1,5 +1,5 @@
 // lapstack browser UI. A focus-stacking workbench: filmstrip, parameter
-// panel, run/cancel with progress + log, viewer tabs (Source / Fused / Depth),
+// panel, run/cancel with progress + log, viewer layers (Source / Stack / Depth),
 // tiled-free zoom/pan on a canvas, A/B compare with a draggable divider and
 // hold-to-flip, depth map gray/Turbo, frame scrubbing on the Source view.
 // All heavy work happens in worker.js (WASM + WebGPU).
@@ -42,11 +42,12 @@ const st = {
   files: [],            // File objects
   frames: [],           // per processed frame: {name, w, h, proxy: ImageBitmap, sim}
   result: null,         // {w, h, bits, fused: OffscreenCanvas, dmap: OffscreenCanvas|null, depth: Float32Array, dw, dh, winner: Float32Array, ww, wh}
-  depthBmp: new Map(),  // 'layer:lut' -> ImageBitmap (layer = depth | winner)
+  depthBmp: new Map(),  // 'lut' -> ImageBitmap of the depth map (gray | turbo)
   step: 'stack', view: 'source', selected: 0,
   compare: false, cmp: 'depth', cmpMode: 'swipe', divider: 0.5, flipped: false,
   turbo: false, slice: true,
-  sliceBmps: new Map(),   // 'layer:frame index' -> ImageBitmap (magenta band over pixels assigned to that frame)
+  sliceBmps: new Map(),   // 'slice:i' -> magenta band over pixels whose depth is frame i; 'focus:i' -> the In focus dimming mask of frame i
+  focusPending: new Set(), // frame indices whose In focus mask is being built
   peak: { on: false, thr: 0.5, max: 0, pixmax: null, floor: 0 },   // focus peaking, see peakMask()
   zoom: 1, ox: 0, oy: 0, fitted: true,
   pick: false,          // ctrl+G: the next canvas click jumps to the frame that won that pixel
@@ -295,15 +296,15 @@ function turbo(t) { // Google Turbo colormap, polynomial fit
   const b = 27.2 + t * (3211.1 + t * (-15327.97 + t * (27814 + t * (-22569.18 + t * 6838.66))));
   return [r, g, b].map((v) => Math.max(0, Math.min(255, v)));
 }
-// the two depth layers: 'depth' = depth from focus (DFF, working grid), 'winner' = LAP winner index
-const isDepthLayer = (t) => t === 'depth' || t === 'winner';
-function depthData(layer) {
+// the depth layer: depth from focus (DFF) on its working grid, a fractional frame index
+const isDepthLayer = (t) => t === 'depth';
+function depthData() {
   const r = st.result; if (!r) return null;
-  return layer === 'winner' ? { data: r.winner, w: r.ww, h: r.wh } : { data: r.depth, w: r.dw, h: r.dh };
+  return { data: r.depth, w: r.dw, h: r.dh };
 }
-async function depthBitmap(layer, useTurbo) {
-  const D = depthData(layer); if (!D) return null;
-  const key = `${layer}:${useTurbo ? 'turbo' : 'gray'}`;
+async function depthBitmap(useTurbo) {
+  const D = depthData(); if (!D) return null;
+  const key = useTurbo ? 'turbo' : 'gray';
   if (st.depthBmp.has(key)) return st.depthBmp.get(key);
   let lo = Infinity, hi = -Infinity; for (const v of D.data) { if (v < lo) lo = v; if (v > hi) hi = v; }
   const range = Math.max(hi - lo, 1e-6);
@@ -355,9 +356,9 @@ $('peak').addEventListener('change', (e) => { st.peak.on = e.target.checked; sav
 
 // ---------- depth slice ----------
 // Magenta band over the pixels whose depth index is the scrubbed frame (the depth "slice").
-async function sliceBitmap(layer, ix) {
-  const D = depthData(layer); if (!D) return null;
-  const key = `${layer}:${ix}`;
+async function sliceBitmap(ix) {
+  const D = depthData(); if (!D) return null;
+  const key = `slice:${ix}`;
   if (st.sliceBmps.has(key)) return st.sliceBmps.get(key);
   const px = new Uint8ClampedArray(D.w * D.h * 4);
   for (let i = 0; i < D.data.length; i++) if (Math.round(D.data[i]) === ix) { px[4 * i] = 255; px[4 * i + 1] = 0; px[4 * i + 2] = 255; px[4 * i + 3] = 150; }
@@ -366,6 +367,35 @@ async function sliceBitmap(layer, ix) {
   st.sliceBmps.set(key, bmp); return bmp;
 }
 $('slice').addEventListener('change', (e) => { st.slice = e.target.checked; saveParams(); updateTabs(); draw(); });
+
+// ---------- in focus ----------
+// The scrubbed frame's real pixels, showing only the parts of it the result
+// uses (Helicon's "source map"): each pixel is darkened by how far, in frames,
+// the depth map puts it from the frame — full brightness within ±FOCUS_W0
+// frames, FOCUS_DIM beyond ±FOCUS_W1, linear between — so the plane of focus
+// stands out with a crisp edge and scrubbing sweeps it through the scene.
+// Two renderings share the formula: a preview mask built here on the depth
+// map's working grid (a black overlay drawn smoothed over the proxy) and the
+// full-resolution frame darkened in the engine by the guided-upsampled depth
+// map, which replaces the preview once it has loaded (srcCache, key 'focus:i').
+const FOCUS_DIM = 0.08;   // brightness left to a pixel the frame does not contribute
+const FOCUS_W0 = 0.5;     // frames: fully lit within this distance of the plane
+const FOCUS_W1 = 0.75;    // frames: fully dimmed beyond this distance (a quarter-frame feather)
+const focusParams = () => ({ dim: FOCUS_DIM, w0: FOCUS_W0, w1: FOCUS_W1 });
+const focusWeight = (d, ix) => Math.min(1, Math.max(0, (FOCUS_W1 - Math.abs(d - ix)) / (FOCUS_W1 - FOCUS_W0)));
+async function focusBitmap(ix) {
+  const D = depthData(); if (!D) return null;
+  const key = `focus:${ix}`;
+  if (st.sliceBmps.has(key)) return st.sliceBmps.get(key);
+  if (st.focusPending.has(ix)) return null;
+  st.focusPending.add(ix);
+  const px = new Uint8ClampedArray(D.w * D.h * 4);
+  for (let i = 0; i < D.data.length; i++) px[4 * i + 3] = Math.round(255 * (1 - FOCUS_DIM) * (1 - focusWeight(D.data[i], ix)));
+  let bmp;
+  try { bmp = await createImageBitmap(new ImageData(px, D.w, D.h)); } finally { st.focusPending.delete(ix); }
+  if (st.sliceBmps.size > 32) st.sliceBmps.clear();
+  st.sliceBmps.set(key, bmp); return bmp;
+}
 $('peak-minus').addEventListener('click', () => setPeakThr(st.peak.thr - 0.05));
 $('peak-plus').addEventListener('click', () => setPeakThr(st.peak.thr + 0.05));
 
@@ -379,14 +409,14 @@ const R = st.retouch;
 // (a 45 MP frame is 179 MB), so the cache is sized in bytes, not frames: ~10
 // frames at 12 MP, 2 at 45 MP, 1 above that — never fewer than the one on screen.
 let SRC_BUDGET = 512 * 1024 * 1024;
-const srcCache = new Map(); // frame index -> OffscreenCanvas, least recently used first
+const srcCache = new Map(); // frame index (plain frame) | 'focus:i' (In focus rendering) -> OffscreenCanvas, least recently used first
 const srcLimit = () => { const [w, h] = imageDims(); return w ? Math.max(1, Math.floor(SRC_BUDGET / (w * h * 4))) : 1; };
 function srcGet(i) { const cv = srcCache.get(i); if (!cv) return null; srcCache.delete(i); srcCache.set(i, cv); return cv; } // touch
 function srcPut(i, cv) {
   srcCache.delete(i); srcCache.set(i, cv);
   for (const k of [...srcCache.keys()]) {
     if (srcCache.size <= srcLimit()) break;
-    if (k === i || k === st.selected) continue;      // never drop what is on screen
+    if (k === i || k === st.selected || k === `focus:${st.selected}`) continue;   // never drop what is on screen
     srcCache.get(k).width = 1; srcCache.delete(k);   // 1x1 releases the backing store now, not at the next GC
   }
 }
@@ -394,21 +424,25 @@ function srcClear() { for (const cv of srcCache.values()) cv.width = 1; srcCache
 window.__srcCache = srcCache; window.__srcBudget = (b) => { SRC_BUDGET = b; };
 function resetRetouch() { srcClear(); R.wasmIndex = -1; R.loading = -1; R.gen++; R.genMin = R.gen; R.undo = 0; R.redo = 0; R.painting = false; R.dabs = []; }
 let srcTimer = null;
-// The Source layer is drawn from the proxy (proxy_edge px long side) until the
-// full-res aligned frame arrives, so a run's result is never compared against a
-// soft image. Retouch needs the same frame to paint from.
-const sourceShown = () => st.view === 'source' || (st.compare && st.cmp === 'source');
+// The Source and In focus layers are drawn from the proxy (proxy_edge px long
+// side) until the full-res aligned frame arrives, so a run's result is never
+// compared against a soft image. Retouch needs the same frame to paint from.
+// layers drawn from the scrubbed frame's pixels: Source, and In focus (the frame under its dimming mask)
+const usesSource = (t) => t === 'source' || t === 'focus';
+const shown = (t) => st.view === t || (st.compare && st.cmp === t);
+const sourceShown = () => shown('source') || shown('focus');
 function ensureSource() {
   if (!st.result || !st.files[st.selected]) return;
   const forPaint = st.view === 'retouch';                      // strokes copy from the worker's own 16-bit copy
-  if (!forPaint && !sourceShown()) return;
-  const have = () => (forPaint ? R.wasmIndex === st.selected : srcCache.has(st.selected));
-  if (have() || R.loading === st.selected) return;
+  // the plain frame first (Source, retouch), then the In focus rendering; one request at a time
+  const needPlain = () => (forPaint && R.wasmIndex !== st.selected) || (shown('source') && !srcCache.has(st.selected));
+  const needFocus = () => shown('focus') && !srcCache.has(`focus:${st.selected}`);
+  if (!(needPlain() || needFocus()) || R.loading === st.selected) return;
   clearTimeout(srcTimer);
   srcTimer = setTimeout(() => {
-    if (have() || R.loading === st.selected || st.running) return;
+    if (!(needPlain() || needFocus()) || R.loading === st.selected || st.running) return;
     R.loading = st.selected; R.gen++;
-    worker.postMessage({ type: 'load_source', index: st.selected, file: st.files[st.selected], gen: R.gen });
+    worker.postMessage({ type: 'load_source', index: st.selected, file: st.files[st.selected], gen: R.gen, focus: needPlain() ? null : focusParams() });
     updateTabs();
   }, 250);
 }
@@ -417,10 +451,10 @@ async function onSource(m) {
   if (!st.result || m.gen < R.genMin) return;   // aligned against a run that is gone
   const cv = new OffscreenCanvas(m.w, m.h);
   cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(m.rgba), m.w, m.h), 0, 0);
-  srcPut(m.index, cv);          // keep it even if the user has scrubbed on: that is what the cache is for
+  srcPut(m.focus ? `focus:${m.index}` : m.index, cv);   // keep it even if the user has scrubbed on: that is what the cache is for
   if (srcCache.size === 1) log(`[lapstack] full-res source cache: up to ${srcLimit()} frame(s), ${(m.w * m.h * 4 / 1e6).toFixed(0)} MB each`);
   R.wasmIndex = m.index;        // the worker's 16-bit copy is this frame now
-  if (m.index !== st.selected) ensureSource();
+  ensureSource();               // the other rendering of this frame, or the frame scrubbed to meanwhile
   updateTabs(); draw();
 }
 const targetCanvas = () => (R.target === 'dmap' && st.result && st.result.dmap) ? st.result.dmap : st.result && st.result.fused;
@@ -500,15 +534,22 @@ function layerFor(tab) {
   if (tab === 'dmap') return st.result && st.result.dmap ? { bmp: st.result.dmap, w: st.result.w, h: st.result.h } : null;
   if (isDepthLayer(tab)) {
     if (!st.result) return null;
-    const bmp = st.depthBmp.get(`${tab}:${st.turbo ? 'turbo' : 'gray'}`); if (!bmp) { depthBitmap(tab, st.turbo).then(draw); return null; }
+    const bmp = st.depthBmp.get(st.turbo ? 'turbo' : 'gray'); if (!bmp) { depthBitmap(st.turbo).then(draw); return null; }
     let overlay = null;
-    if (st.slice && st.files.length) { overlay = st.sliceBmps.get(`${tab}:${st.selected}`) || null; if (!overlay) sliceBitmap(tab, st.selected).then(draw); }
+    if (st.slice && st.files.length) { overlay = st.sliceBmps.get(`slice:${st.selected}`) || null; if (!overlay) sliceBitmap(st.selected).then(draw); }
     return { bmp, w: st.result.w, h: st.result.h, pixelated: true, overlay, overlayPixelated: true };
   }
   const f = st.frames[st.selected]; const bmp = f && (f.proxy || f.thumb); if (!bmp) return null;
   const [w, h] = f.w ? [f.w, f.h] : [bmp.width, bmp.height];
   const full = srcGet(st.selected); // full res, aligned like the run
   let overlay = null;
+  if (tab === 'focus') {
+    if (!st.result) return null;
+    const fullFocus = srcGet(`focus:${st.selected}`);   // full res, darkened by the engine
+    if (fullFocus) return { bmp: fullFocus, w, h };
+    overlay = st.sliceBmps.get(`focus:${st.selected}`) || null; if (!overlay) focusBitmap(st.selected).then(draw);
+    return { bmp: full || bmp, w, h, overlay };
+  }
   if (st.peak.on && f.peak) {
     if (f.peak.bmp && f.peak.bmpThr === st.peak.thr) overlay = f.peak.bmp; else peakBitmap(f).then(draw);
   }
@@ -619,9 +660,9 @@ let drag = null;
 function imgXY(cv, e) { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left - st.ox) / st.zoom, (e.clientY - r.top - st.oy) / st.zoom]; }
 // ---------- ctrl+G: jump to the frame that won a pixel ----------
 // The LAP winner map holds, per cell of the depth level's grid, the frame that
-// won there — the same map the Winner layer and the slice overlay read. A single
-// cell is noisy, so a click takes the most common index in the 3x3 around it,
-// with the clicked cell breaking ties.
+// won there (the map "Save winner map" writes). A single cell is noisy, so a
+// click takes the most common index in the 3x3 around it, with the clicked cell
+// breaking ties.
 function setPick(on) {
   st.pick = !!on && !!st.result;
   $('vwrap').classList.toggle('pick', st.pick);
@@ -681,21 +722,20 @@ $('divider').addEventListener('pointerup', () => { ddrag = false; });
 $('fit').addEventListener('click', fit); $('z100').addEventListener('click', zoom100);
 
 // ---------- header: view / context / compare / scrub ----------
-const LAYERS = [['fused', 'LAP'], ['dmap', 'DFR'], ['depth', 'Focus depth'], ['winner', 'Winner'], ['source', 'Source']];
-// Header groups: Source | Stack (LAP, DFR) | Depth (Focus depth, Winner). The sub-control
+const LAYERS = [['fused', 'LAP'], ['dmap', 'DFR'], ['depth', 'Focus depth'], ['focus', 'In focus'], ['source', 'Source']];
+// Header groups: Source | Stack (LAP, DFR) | Depth (Focus depth, In focus). The sub-control
 // lists the group's layers and is hidden when the group has only one.
-const GROUPS = { source: ['source'], stack: ['fused', 'dmap'], depth: ['depth', 'winner'] };
+const GROUPS = { source: ['source'], stack: ['fused', 'dmap'], depth: ['depth', 'focus'] };
 const groupOf = (v) => Object.keys(GROUPS).find((g) => GROUPS[g].includes(v)) || null;
 const lastIn = { stack: 'fused', depth: 'depth' };   // last layer picked in each group
 const layerName = (id) => (LAYERS.find((l) => l[0] === id) || [id, id])[1];
 // while the full-res frame decodes, say so: the pane is showing the proxy
-const layerLabel = (id) => (id === 'source' && st.result && !srcCache.has(st.selected))
+const layerLabel = (id) => (usesSource(id) && st.result && !srcCache.has(id === 'focus' ? `focus:${st.selected}` : st.selected))
   ? `${layerName(id)} — loading full res…` : layerName(id);
 const haveDmap = () => !!(st.result && st.result.dmap);
-function scrubbable() {
-  const usesFrame = (t) => t === 'source' || t === 'retouch' || (isDepthLayer(t) && st.slice);
-  return usesFrame(st.view) || (st.compare && usesFrame(st.cmp));
-}
+// layers that depend on the scrubbed frame
+const usesFrame = (t) => usesSource(t) || t === 'retouch' || (isDepthLayer(t) && st.slice);
+function scrubbable() { return usesFrame(st.view) || (st.compare && usesFrame(st.cmp)); }
 function updateTabs() {
   const have = !!st.result;
   $('tab-source').disabled = !st.files.length; $('tab-stack').disabled = !have; $('tab-depth').disabled = !have; $('ab').disabled = !have || st.step !== 'stack';
@@ -729,13 +769,12 @@ function updateTabs() {
   const place = (el, onView, onPartner) => { const slot = (!onView && onPartner) ? $('cmp-ctx') : $('view-ctx'); if (el.parentElement !== slot) slot.appendChild(el); };
   place($('ctx-depth'), isDepthLayer(st.view), st.compare && isDepthLayer(st.cmp));
   place($('ctx-source'), st.view === 'source', st.compare && st.cmp === 'source');
-  const usesFrame = (t) => t === 'source' || t === 'retouch' || (isDepthLayer(t) && st.slice);
   place($('scrub'), usesFrame(st.view), st.compare && usesFrame(st.cmp));
   $('ctx-depth').hidden = !depthShown; $('lut-gray').classList.toggle('on', !st.turbo); $('lut-turbo').classList.toggle('on', st.turbo); $('slice').checked = st.slice;
   const havePeaks = st.frames.some((f) => f && f.peak);
-  const sourceShown = st.view === 'source' || (st.compare && st.cmp === 'source');
+  const peakShown = st.view === 'source' || (st.compare && st.cmp === 'source');   // peaking is a Source overlay
   if (retouch) $('ctx-depth').hidden = true;
-  $('ctx-source').hidden = !(havePeaks && sourceShown);
+  $('ctx-source').hidden = !(havePeaks && peakShown);
   $('peak').checked = st.peak.on; $('peakthr').textContent = st.peak.thr.toFixed(2); $('peakstep').hidden = !st.peak.on;
   const scrubbing = st.files.length > 1 && scrubbable();
   $('scrub').hidden = !scrubbing; $('scrubber').max = String(Math.max(0, st.files.length - 1)); $('scrubber').value = String(st.selected);

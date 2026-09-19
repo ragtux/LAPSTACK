@@ -637,6 +637,39 @@ impl Engine {
         Ok(o.into())
     }
 
+    /// Index of the source frame currently loaded by `load_source`, or -1.
+    pub fn source_index(&self) -> i32 {
+        self.run.as_ref().and_then(|r| r.src_rgb16.as_ref()).map_or(-1, |(i, _)| *i as i32)
+    }
+
+    /// The loaded source frame with every pixel darkened by how far, in frames,
+    /// the full-resolution depth map puts it from that frame (the "In focus"
+    /// layer): brightness = dim + (1 − dim)·clamp((w1 − |depth − index|) / (w1 − w0), 0, 1),
+    /// full inside ±w0 frames, `dim` beyond ±w1. Returns {index, w, h, rgba}.
+    pub fn source_focus(&self, dim: f32, w0: f32, w1: f32) -> Result<JsValue, JsValue> {
+        let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no run"))?;
+        let (index, src) = run.src_rgb16.as_ref().ok_or_else(|| JsValue::from_str("no source loaded"))?;
+        let depth = run.depth_full.as_ref().ok_or_else(|| JsValue::from_str("no depth-from-focus result"))?;
+        let (w, h, n) = (run.w, run.h, run.w * run.h);
+        let k = (run.count.max(2) - 1) as f32 / 65535.0;
+        let span = (w1 - w0).max(1e-3);
+        let ix = *index as f32;
+        let mut rgba = vec![255u8; n * 4];
+        for i in 0..n {
+            let wgt = ((w1 - (depth[i] as f32 * k - ix).abs()) / span).clamp(0.0, 1.0);
+            let b = (dim + (1.0 - dim) * wgt) / 65535.0 * 255.0;
+            for c in 0..3 {
+                rgba[4 * i + c] = (src[3 * i + c] as f32 * b + 0.5) as u8;
+            }
+        }
+        let o = js_sys::Object::new();
+        set(&o, "index", *index as u32);
+        set(&o, "w", w as u32);
+        set(&o, "h", h as u32);
+        set(&o, "rgba", js_sys::Uint8Array::from(&rgba[..]));
+        Ok(o.into())
+    }
+
     /// Retouch: apply a stroke of soft dabs `[x, y, radius, hardness, ...]`
     /// (image px) copying the loaded source into the fused image (16-bit).
     /// Returns the updated bbox as {x, y, w, h, rgba}.
