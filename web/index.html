@@ -41,13 +41,11 @@
   <div id="center">
     <div id="vwrap"><canvas id="view"></canvas><canvas id="view2" hidden></canvas><div id="divider" hidden></div><div id="panelabels" hidden><span class="plab"></span><span class="plab"></span></div>
       <div id="pickhint" hidden>Click a pixel to jump to its sharpest frame · Esc to cancel</div>
-      <!-- frame scrubber: vertical, centred on the left edge of the canvas (frame 1 at the top, like the
-           filmstrip), with the frame counter in its own box directly below the track -->
-      <div id="scrub" hidden><div id="scrubtrack"><input id="scrubber" type="range" min="0" max="0" value="0"></div><div id="scrubname"></div></div>
       <div id="zoombar"><span id="zoom"></span><div class="seg"><button id="fit" title="fit to view (f)">Fit</button><button id="z100" title="actual pixels (z)">100%</button></div></div>
       <div id="cmpbar" hidden><div class="seg"><button id="cm-swipe" title="one view, draggable divider">swipe</button><button id="cm-split" title="two panes, one zoom/pan">side by side</button></div><button id="flip" title="hold to flip (space)">flip</button></div>
-      <!-- viewer header: floats over the top of the canvas as a row of glass chips (like the scrubber
-           and zoom bar); [layer + context controls] [vs] [compare partner + its controls] -->
+      <!-- viewer header: floats over the canvas as glass chips (like the zoom bar); [layer + context
+           controls, stacked down the left edge, with the frame scrubber under them] [vs] [compare
+           partner + its controls, in a row] -->
       <div id="vhead">
         <div id="vh-left">
         <div class="seg" id="viewseg">
@@ -75,6 +73,9 @@
           </span>
         </span>
         <span id="ctx-retouch" class="ctx" hidden><span id="src-status" class="dim"></span></span>
+        <!-- frame scrubber: vertical, frame 1 at the top like the filmstrip, filling the height left
+             under the chips, with the frame counter in its own box directly below the track -->
+        <div id="scrub" hidden><div id="scrubtrack"><input id="scrubber" type="range" min="0" max="0" value="0"></div><div id="scrubname"></div></div>
         </div>
         <!-- compare toggle, centred over the canvas (where the side-by-side split falls) -->
         <label class="vs" title="compare with another layer: swipe or side by side"><input type="checkbox" id="ab" disabled><span>vs</span></label>
