@@ -1,4 +1,4 @@
-:root { --bg:#1e1e22; --panel:#26262b; --border:#3a3a42; --widget:#34343c; --accent:#3b82f6; --pop:#ff7a30; --text:#e6e6e6; --dim:#9a9aa3; }
+:root { --bg:#1e1e22; --panel:#26262b; --border:#3a3a42; --widget:#34343c; --accent:#3b82f6; --pop:#ff7a30; --text:#e6e6e6; --dim:#9a9aa3; --glass:rgba(20,20,22,.75); --glass-border:rgba(255,255,255,.12); }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 13px system-ui, sans-serif; overflow: hidden; }
@@ -9,7 +9,7 @@ button:disabled { opacity: .4; cursor: default; }
 button.accent, button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 select { background: var(--widget); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font: inherit; }
 .dim { color: var(--dim); } .small { font-size: 11px; } .spacer { flex: 1; } .sep { width: 12px; display: inline-block; }
-#toolbar, #vhead { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--border); }
+#toolbar { align-items: center; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--border); }
 #toolbar .title { font-size: 16px; padding-right: 8px; }
 /* toolbar: [file + run + status bar] [steps] [ ]; equal outer columns keep the steps centred */
 #toolbar { display: grid; grid-template-columns: minmax(max-content, 1fr) auto minmax(0, 1fr); column-gap: 10px; }
@@ -50,16 +50,30 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #view.drag { cursor: grabbing; }
 #divider { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; opacity: .8; cursor: ew-resize; }
 #divider::after { content: ""; position: absolute; left: -6px; right: -6px; top: 0; bottom: 0; }
-/* header: [layer + context controls] [vs] [compare partner + mode]; equal outer
-   columns keep the vs toggle at the exact horizontal centre of the canvas */
-#vhead { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; column-gap: 10px; }
-#vh-left, #vh-right { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; row-gap: 4px; min-width: 0; }
+/* viewer header: floats over the top of the canvas as a row of glass chips (like the scrubber
+   and zoom bar), so the image gets the full height and the controls read against dark glass
+   in larger type. [layer + context controls] [vs] [compare partner + its controls]; equal
+   outer columns keep the vs toggle at the exact horizontal centre of the canvas. Only the
+   chips take the pointer, so the canvas stays draggable between them. */
+#vhead { position: absolute; left: 10px; right: 10px; top: 10px; z-index: 3; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: start; column-gap: 10px; font-size: 15px; pointer-events: none; }
+#vhead * { pointer-events: auto; }
+#vh-left, #vh-right { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; pointer-events: none; }
 #vhead .seg, #vhead .ctx { flex: none; }
 /* the movable context groups and the compare group flow as individual items so the columns wrap cleanly */
 #vhead #view-ctx, #vhead #cmp-ctx, #vhead #ctx-compare { display: contents; }
-.vs { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 48px; height: 30px; border-radius: 8px; border: 2px solid var(--pop); color: var(--pop); font-weight: 700; font-size: 15px; cursor: pointer; user-select: none; }
+/* every chip in the header is 34px tall on the same glass */
+#vhead .seg, #vhead .tog, #vhead select, #vhead .stepper, #vhead #src-status:not(:empty) { height: 34px; background: var(--glass); border: 1px solid var(--glass-border); border-radius: 8px; backdrop-filter: blur(4px); }
+#vhead .seg button { background: transparent; padding: 0 14px; font-size: 15px; border-right-color: var(--glass-border); }
+#vhead .seg button.on { background: var(--accent); }
+#vhead .seg.sub button { padding: 0 11px; font-size: 14px; }
+#vhead .tog { padding: 0 11px; gap: 7px; font-size: 15px; } #vhead .tog input { width: 15px; height: 15px; }
+#vhead select { padding: 0 8px; font-size: 15px; }
+#vhead .stepper { gap: 0; } #vhead .stepper button { height: 100%; padding: 0 11px; font-size: 15px; background: transparent; border: 0; }
+#vhead #peakthr { min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
+#vhead #src-status { display: inline-flex; align-items: center; padding: 0 12px; font-size: 14px; color: var(--text); }
+.vs { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 56px; height: 34px; border-radius: 8px; border: 2px solid var(--pop); background: var(--glass); backdrop-filter: blur(4px); color: var(--pop); font-weight: 700; font-size: 17px; cursor: pointer; user-select: none; }
 .vs input { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
-.vs:hover:has(input:not(:disabled)) { background: rgba(255,122,48,.15); }
+.vs:hover:has(input:not(:disabled)) { background: rgba(255,122,48,.25); }
 .vs:has(input:checked) { background: var(--pop); color: #fff; box-shadow: 0 0 0 3px rgba(255,122,48,.3); }
 .vs:has(input:disabled) { opacity: .35; cursor: default; }
 #vhead button, #vhead label { white-space: nowrap; }
@@ -95,19 +109,19 @@ body.log-collapsed #toasts { bottom: 46px; }
 .tog:has(input:disabled) { opacity: .4; cursor: default; }
 .tog input { margin: 0; accent-color: var(--accent); }
 .ctx { display: inline-flex; align-items: center; gap: 8px; }
-#vhead select { padding: 3px 6px; border-radius: 6px; }
-#peakstep { display: inline-flex; align-items: center; gap: 4px; } #peakstep button { padding: 0 8px; } #peakthr { min-width: 34px; text-align: center; }
+#peakstep { display: inline-flex; align-items: center; }
 /* retouch: two panes */
 #vwrap.split { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
 #vwrap.split canvas { position: relative; inset: auto; width: 100%; height: 100%; cursor: grab; }
 #vwrap.paint canvas { cursor: none; }
 /* ctrl+G: pick the frame that won a pixel */
 #vwrap.pick canvas { cursor: crosshair; }
-#pickhint { position: absolute; left: 10px; top: 10px; z-index: 3; padding: 4px 10px; border-radius: 8px; background: rgba(20,20,22,.85); border: 1px solid var(--accent); font-size: 12px; pointer-events: none; }
+#pickhint { position: absolute; right: 10px; bottom: 10px; z-index: 3; padding: 6px 12px; border-radius: 8px; background: rgba(20,20,22,.85); border: 1px solid var(--accent); font-size: 14px; pointer-events: none; }
 /* pane labels: one chip per visible image (pane centres when split, hugging the
-   divider in swipe, centred when a single image fills the canvas) */
+   divider in swipe, centred when a single image fills the canvas); draw() keeps
+   them below the header row */
 #panelabels { position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; overflow: hidden; z-index: 2; }
-.plab { position: absolute; top: 8px; padding: 3px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; line-height: 1.5; color: #fff; background: rgba(20,20,22,.82); border: 1px solid rgba(255,255,255,.18); white-space: nowrap; box-shadow: 0 1px 6px rgba(0,0,0,.55); }
+.plab { position: absolute; top: 8px; padding: 4px 12px; border-radius: 6px; font-size: 14px; font-weight: 600; line-height: 1.5; color: #fff; background: rgba(20,20,22,.82); border: 1px solid rgba(255,255,255,.18); white-space: nowrap; box-shadow: 0 1px 6px rgba(0,0,0,.55); }
 .plab.a { background: var(--accent); border-color: rgba(255,255,255,.3); }
 .plab.b { background: var(--pop); border-color: rgba(255,255,255,.3); color: #16161a; }
 /* frame scrubber: vertical slider overlaid on the canvas, centred on its left edge;
@@ -115,21 +129,18 @@ body.log-collapsed #toasts { bottom: 46px; }
    The frame counter (e.g. 49/100) is the more useful readout, so it gets its own
    large box directly below the track. */
 #scrub { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); height: min(50%, 420px); min-height: 160px; z-index: 2; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: default; }
-#scrubtrack, #scrubname { border-radius: 8px; background: rgba(20,20,22,.75); border: 1px solid rgba(255,255,255,.12); backdrop-filter: blur(4px); }
+#scrubtrack, #scrubname { border-radius: 8px; background: var(--glass); border: 1px solid var(--glass-border); backdrop-filter: blur(4px); }
 #scrubtrack { flex: 1; min-height: 0; display: flex; padding: 8px 6px; }
 #scrubber { flex: 1; min-height: 0; width: auto; writing-mode: vertical-lr; margin: 0; accent-color: var(--accent); cursor: ns-resize; }
 #scrubname { flex: none; padding: 3px 10px; font-size: 22px; font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; white-space: nowrap; color: #fff; }
-/* zoom readout + Fit/100% as an overlay in the canvas corner (out of the header) */
-#zoombar { position: absolute; left: 10px; bottom: 10px; z-index: 2; display: inline-flex; align-items: center; gap: 8px; padding: 3px 4px 3px 10px; border-radius: 8px; background: rgba(20,20,22,.75); border: 1px solid rgba(255,255,255,.12); backdrop-filter: blur(4px); cursor: default; }
+/* zoom readout + Fit/100% as an overlay in the canvas corner; same 34px chips and 15px type as the header */
+#zoombar { position: absolute; left: 10px; bottom: 10px; z-index: 2; display: inline-flex; align-items: center; gap: 8px; padding: 3px 4px 3px 12px; border-radius: 8px; background: var(--glass); border: 1px solid var(--glass-border); backdrop-filter: blur(4px); cursor: default; font-size: 15px; }
 #zoombar:empty, #zoombar #zoom:empty { display: none; }
-#zoombar #zoom { min-width: 34px; text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
-#zoombar .seg { background: transparent; }
+#zoombar #zoom { min-width: 40px; text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
+#zoombar .seg, #cmpbar .seg { background: transparent; height: 32px; } #zoombar .seg button, #cmpbar .seg button, #cmpbar > button { padding: 0 14px; font-size: 15px; }
+#cmpbar > button { height: 32px; border-radius: 6px; }
 /* compare mode + flip, centred at the bottom of the canvas under the split */
-#cmpbar { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); z-index: 2; display: inline-flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 8px; background: rgba(20,20,22,.75); border: 1px solid rgba(255,255,255,.12); backdrop-filter: blur(4px); cursor: default; }
-#cmpbar .seg { background: transparent; }
-#ctx-retouch .stepper { display: inline-flex; align-items: center; gap: 4px; } #ctx-retouch .stepper button { padding: 0 8px; }
-#ctx-retouch .stepper > span { min-width: 40px; text-align: center; }
-#ctx-retouch { gap: 5px; } #src-status { min-width: 60px; }
+#cmpbar { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); z-index: 2; display: inline-flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 8px; background: var(--glass); border: 1px solid var(--glass-border); backdrop-filter: blur(4px); cursor: default; font-size: 15px; }
 /* workflow steps + step panels */
 .steps button { padding: 4px 16px; } .steps button b { font-weight: 600; opacity: .6; margin-right: 6px; } .steps button.on b { opacity: 1; }
 .panel input[type=range] { width: 100%; accent-color: var(--accent); margin: 0 0 6px; }

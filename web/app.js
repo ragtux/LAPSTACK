@@ -668,8 +668,10 @@ function draw() {
   const [w, h] = imageDims(); if (!w) { $('zoom').textContent = ''; $('panelabels').hidden = true; return; }
   if (st.fitted) { st.zoom = Math.min(cw / w, ch / h); st.ox = (cw - w * st.zoom) / 2; st.oy = (ch - h * st.zoom) / 2; }
   ctx.setTransform(st.zoom * d, 0, 0, st.zoom * d, st.ox * d, st.oy * d);
-  // labels ride the top of the image itself, so they stay on it when it is letterboxed
-  $('panelabels').style.top = `${Math.max(0, Math.min(st.oy, ch - 40))}px`;
+  // labels ride the top of the image itself, so they stay on it when it is letterboxed,
+  // but never under the header row floating at the top of the canvas
+  const hdr = $('vhead').offsetTop + $('vhead').offsetHeight;
+  $('panelabels').style.top = `${Math.max(hdr, Math.min(st.oy, ch - 40))}px`;
   if (split) {
     // two panes, one transform: retouch = source | target result; compare = view | partner
     let L, Rt, labels;

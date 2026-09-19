@@ -39,42 +39,6 @@
     <div id="fs-foot"><label class="tog small" title="Show each frame's in-focus band on its thumbnail (dimmed frame under the magenta band). Independent of the canvas overlay; shares its threshold."><input type="checkbox" id="peak-strip" disabled> peaking in previews</label></div>
   </div>
   <div id="center">
-    <div id="vhead">
-      <div id="vh-left">
-      <div class="seg" id="viewseg">
-        <button data-group="source" id="tab-source" disabled>Source</button>
-        <button data-group="stack" id="tab-stack" disabled>Stack</button>
-        <button data-group="depth" id="tab-depth" disabled>Depth</button>
-      </div>
-      <div class="seg sub" id="subseg" hidden>
-        <button data-tab="fused" title="Laplacian-pyramid fusion">LAP</button>
-        <button data-tab="dmap" title="rendered from the depth map: each pixel blends the frames nearest its depth">DFR</button>
-        <button data-tab="depth" title="depth from focus (working grid)">Focus depth</button>
-        <button data-tab="focus" title="the scrubbed frame's own pixels, dimmed where it is out of focus: scrub to sweep the plane of focus">In focus</button>
-      </div>
-      <span class="sep"></span>
-      <!-- layer-specific controls; each lives in #view-ctx when it applies to the
-           shown layer and moves into #cmp-ctx when it applies to the compare partner -->
-      <span id="view-ctx" class="ctx">
-        <span id="ctx-source" class="ctx" hidden>
-          <label class="tog"><input type="checkbox" id="peak"> peaking</label>
-          <span id="peakstep" class="stepper" hidden><button id="peak-minus">−</button><span id="peakthr">0.50</span><button id="peak-plus">+</button></span>
-        </span>
-        <span id="ctx-depth" class="ctx" hidden>
-          <div class="seg"><button id="lut-gray">Gray</button><button id="lut-turbo">Turbo</button></div>
-          <label class="tog"><input type="checkbox" id="slice"> slice</label>
-        </span>
-      </span>
-      <span id="ctx-retouch" class="ctx" hidden><span id="src-status" class="dim"></span></span>
-      </div>
-      <!-- compare toggle, centred over the canvas (where the side-by-side split falls) -->
-      <label class="vs" title="compare with another layer: swipe or side by side"><input type="checkbox" id="ab" disabled><span>vs</span></label>
-      <div id="vh-right">
-        <span id="ctx-compare" class="ctx" hidden>
-          <select id="cmp-sel"></select><span id="cmp-ctx" class="ctx"></span>
-        </span>
-      </div>
-    </div>
     <div id="vwrap"><canvas id="view"></canvas><canvas id="view2" hidden></canvas><div id="divider" hidden></div><div id="panelabels" hidden><span class="plab"></span><span class="plab"></span></div>
       <div id="pickhint" hidden>Click a pixel to jump to its sharpest frame · Esc to cancel</div>
       <!-- frame scrubber: vertical, centred on the left edge of the canvas (frame 1 at the top, like the
@@ -82,6 +46,44 @@
       <div id="scrub" hidden><div id="scrubtrack"><input id="scrubber" type="range" min="0" max="0" value="0"></div><div id="scrubname"></div></div>
       <div id="zoombar"><span id="zoom"></span><div class="seg"><button id="fit" title="fit to view (f)">Fit</button><button id="z100" title="actual pixels (z)">100%</button></div></div>
       <div id="cmpbar" hidden><div class="seg"><button id="cm-swipe" title="one view, draggable divider">swipe</button><button id="cm-split" title="two panes, one zoom/pan">side by side</button></div><button id="flip" title="hold to flip (space)">flip</button></div>
+      <!-- viewer header: floats over the top of the canvas as a row of glass chips (like the scrubber
+           and zoom bar); [layer + context controls] [vs] [compare partner + its controls] -->
+      <div id="vhead">
+        <div id="vh-left">
+        <div class="seg" id="viewseg">
+          <button data-group="source" id="tab-source" disabled>Source</button>
+          <button data-group="stack" id="tab-stack" disabled>Stack</button>
+          <button data-group="depth" id="tab-depth" disabled>Depth</button>
+        </div>
+        <div class="seg sub" id="subseg" hidden>
+          <button data-tab="fused" title="Laplacian-pyramid fusion">LAP</button>
+          <button data-tab="dmap" title="rendered from the depth map: each pixel blends the frames nearest its depth">DFR</button>
+          <button data-tab="depth" title="depth from focus (working grid)">Focus depth</button>
+          <button data-tab="focus" title="the scrubbed frame's own pixels, dimmed where it is out of focus: scrub to sweep the plane of focus">In focus</button>
+        </div>
+        <span class="sep"></span>
+        <!-- layer-specific controls; each lives in #view-ctx when it applies to the
+             shown layer and moves into #cmp-ctx when it applies to the compare partner -->
+        <span id="view-ctx" class="ctx">
+          <span id="ctx-source" class="ctx" hidden>
+            <label class="tog"><input type="checkbox" id="peak"> peaking</label>
+            <span id="peakstep" class="stepper" hidden><button id="peak-minus">−</button><span id="peakthr">0.50</span><button id="peak-plus">+</button></span>
+          </span>
+          <span id="ctx-depth" class="ctx" hidden>
+            <div class="seg"><button id="lut-gray">Gray</button><button id="lut-turbo">Turbo</button></div>
+            <label class="tog"><input type="checkbox" id="slice"> slice</label>
+          </span>
+        </span>
+        <span id="ctx-retouch" class="ctx" hidden><span id="src-status" class="dim"></span></span>
+        </div>
+        <!-- compare toggle, centred over the canvas (where the side-by-side split falls) -->
+        <label class="vs" title="compare with another layer: swipe or side by side"><input type="checkbox" id="ab" disabled><span>vs</span></label>
+        <div id="vh-right">
+          <span id="ctx-compare" class="ctx" hidden>
+            <select id="cmp-sel"></select><span id="cmp-ctx" class="ctx"></span>
+          </span>
+        </div>
+      </div>
     </div>
   </div>
   <div id="params" class="panel">
