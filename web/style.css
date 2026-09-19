@@ -52,15 +52,15 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #divider::after { content: ""; position: absolute; left: -6px; right: -6px; top: 0; bottom: 0; }
 /* viewer header: floats over the canvas as glass chips (like the zoom bar), so the image gets
    the full height and the controls read against dark glass in larger type. Layer + context
-   controls stack down the left edge in one column of equal-width chips (segmented controls
-   become vertical stacks); vs sits at the top centre and the compare partner + its controls
+   controls stack down the left edge in one fixed-width column, every chip the full column
+   width in the same 15px type (segmented controls become vertical stacks); vs sits at the top centre and the compare partner + its controls
    run in a row to its right. Equal outer grid columns keep vs at the exact horizontal centre
    of the canvas. Only the chips take the pointer, so the canvas stays draggable around them. */
 #vhead { position: absolute; left: 10px; right: 10px; top: 10px; z-index: 3; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: start; column-gap: 10px; font-size: 15px; pointer-events: none; }
 #vhead * { pointer-events: auto; }
 #vh-left, #vh-right { display: flex; gap: 8px; min-width: 0; pointer-events: none; }
 #vh-right { flex-wrap: wrap; align-items: center; }
-#vh-left { flex-direction: column; align-items: stretch; width: max-content; }
+#vh-left { flex-direction: column; align-items: stretch; width: 160px; }
 #vhead .seg, #vhead .ctx { flex: none; }
 /* the movable context groups and the compare group flow as individual items so the columns wrap cleanly */
 #vhead #view-ctx, #vhead #cmp-ctx, #vhead #ctx-compare { display: contents; }
@@ -79,7 +79,8 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #vhead #vh-left .seg { flex-direction: column; height: auto; }
 #vhead #vh-left .seg button { height: 34px; text-align: left; border-right: 0; border-bottom: 1px solid var(--glass-border); }
 #vhead #vh-left .seg button:not(:has(~ button:not([hidden]))) { border-bottom: 0; }
-#vhead #vh-left .seg.sub { margin: 0 0 0 12px; }
+#vhead #vh-left .seg.sub { margin: 0; } #vhead #vh-left .seg.sub button { padding: 0 14px; font-size: 15px; }
+#vhead #vh-left #src-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; line-height: 32px; font-size: 15px; }
 #vhead #vh-left #ctx-source, #vhead #vh-left #ctx-depth, #vhead #vh-left #ctx-retouch { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
 #vhead #vh-left .stepper { justify-content: space-between; } #vhead #vh-left .stepper > span { flex: 1; }
 .vs { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 56px; height: 34px; border-radius: 8px; border: 2px solid var(--pop); background: var(--glass); backdrop-filter: blur(4px); color: var(--pop); font-weight: 700; font-size: 17px; cursor: pointer; user-select: none; }
