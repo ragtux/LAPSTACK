@@ -50,7 +50,6 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #view.drag { cursor: grabbing; }
 #divider { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; opacity: .8; cursor: ew-resize; }
 #divider::after { content: ""; position: absolute; left: -6px; right: -6px; top: 0; bottom: 0; }
-#scrub { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; } #scrubber { width: 180px; }
 /* header: [layer + context controls] [vs] [compare partner + mode]; equal outer
    columns keep the vs toggle at the exact horizontal centre of the canvas */
 #vhead { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; column-gap: 10px; }
@@ -111,6 +110,15 @@ body.log-collapsed #toasts { bottom: 46px; }
 .plab { position: absolute; top: 8px; padding: 3px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; line-height: 1.5; color: #fff; background: rgba(20,20,22,.82); border: 1px solid rgba(255,255,255,.18); white-space: nowrap; box-shadow: 0 1px 6px rgba(0,0,0,.55); }
 .plab.a { background: var(--accent); border-color: rgba(255,255,255,.3); }
 .plab.b { background: var(--pop); border-color: rgba(255,255,255,.3); color: #16161a; }
+/* frame scrubber: vertical slider overlaid on the canvas, centred on its left edge;
+   frame 1 at the top like the filmstrip, so wheel-down and slider-down both advance.
+   The frame counter (e.g. 49/100) is the more useful readout, so it gets its own
+   large box directly below the track. */
+#scrub { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); height: min(50%, 420px); min-height: 160px; z-index: 2; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: default; }
+#scrubtrack, #scrubname { border-radius: 8px; background: rgba(20,20,22,.75); border: 1px solid rgba(255,255,255,.12); backdrop-filter: blur(4px); }
+#scrubtrack { flex: 1; min-height: 0; display: flex; padding: 8px 6px; }
+#scrubber { flex: 1; min-height: 0; width: auto; writing-mode: vertical-lr; margin: 0; accent-color: var(--accent); cursor: ns-resize; }
+#scrubname { flex: none; padding: 3px 10px; font-size: 22px; font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; white-space: nowrap; color: #fff; }
 /* zoom readout + Fit/100% as an overlay in the canvas corner (out of the header) */
 #zoombar { position: absolute; left: 10px; bottom: 10px; z-index: 2; display: inline-flex; align-items: center; gap: 8px; padding: 3px 4px 3px 10px; border-radius: 8px; background: rgba(20,20,22,.75); border: 1px solid rgba(255,255,255,.12); backdrop-filter: blur(4px); cursor: default; }
 #zoombar:empty, #zoombar #zoom:empty { display: none; }
