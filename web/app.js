@@ -721,7 +721,7 @@ function draw() {
   }
   $('zoom').textContent = `${(st.zoom * d * 100).toFixed(0)}%`;
 }
-new ResizeObserver(() => draw()).observe($('vwrap'));
+new ResizeObserver(() => { layoutScrub(); draw(); }).observe($('vwrap'));
 // One wheel rule for both panes: plain wheel scrubs whenever any visible layer
 // depends on a frame (shift = 10 frames); ctrl/cmd+wheel always zooms at the
 // cursor; plain wheel zooms only when nothing on screen is scrubbable.
@@ -856,6 +856,22 @@ function updateTabs() {
   $('scrub').hidden = !scrubbing; $('scrubber').max = String(Math.max(0, st.files.length - 1)); $('scrubber').value = String(st.selected);
   $('scrubname').textContent = st.files[st.selected] ? `${st.selected + 1}/${st.files.length}` : '';
   $('scrub').title = st.files[st.selected] ? st.files[st.selected].name : '';
+  layoutScrub();
+}
+// The scrubber wants to sit centred on the left edge at min(50%, 420px) tall. The chip
+// column floats above it on the same edge, so when the centred track would run into the
+// chips, shorten it (down to 160px) to keep the centre; if even that overlaps, centre it
+// in the free band between the chips and the zoom bar instead.
+function layoutScrub() {
+  const sc = $('scrub'); if (sc.hidden) return;
+  const ch = $('vwrap').clientHeight, gap = 10;
+  const colBottom = $('vh-left').offsetHeight ? $('vhead').offsetTop + $('vh-left').offsetHeight + gap : 0;
+  const free = ch - 60;                                          // above the zoom bar
+  const full = Math.min(ch * .5, 420);
+  let top, h = Math.min(full, 2 * (ch / 2 - colBottom), 2 * (free - ch / 2));
+  if (h >= Math.min(full, 160)) { top = ch / 2 - h / 2; }
+  else { h = Math.max(120, Math.min(full, free - colBottom)); top = colBottom + (free - colBottom - h) / 2; }
+  sc.style.top = `${Math.round(top)}px`; sc.style.height = `${Math.round(h)}px`; sc.style.transform = 'none';
 }
 function setView(v) { st.view = v; const g = groupOf(v); if (g && g !== 'source') lastIn[g] = v; updateTabs(); renderFilmstrip(); draw(); }
 // ---------- workflow steps ----------

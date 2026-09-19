@@ -53,16 +53,14 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 /* viewer header: floats over the canvas as glass chips (like the zoom bar), so the image gets
    the full height and the controls read against dark glass in larger type. Layer + context
    controls stack down the left edge in one column of equal-width chips (segmented controls
-   become vertical stacks), with the frame scrubber filling the height left under them; vs
-   sits at the top centre and the compare partner + its controls run in a row to its right.
-   Equal outer grid columns keep vs at the exact horizontal centre of the canvas. Only the
-   chips take the pointer, so the canvas stays draggable around them. The 60px bottom inset
-   keeps the column clear of the zoom bar. */
-#vhead { position: absolute; left: 10px; right: 10px; top: 10px; bottom: 60px; z-index: 3; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: start; column-gap: 10px; font-size: 15px; pointer-events: none; }
+   become vertical stacks); vs sits at the top centre and the compare partner + its controls
+   run in a row to its right. Equal outer grid columns keep vs at the exact horizontal centre
+   of the canvas. Only the chips take the pointer, so the canvas stays draggable around them. */
+#vhead { position: absolute; left: 10px; right: 10px; top: 10px; z-index: 3; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: start; column-gap: 10px; font-size: 15px; pointer-events: none; }
 #vhead * { pointer-events: auto; }
 #vh-left, #vh-right { display: flex; gap: 8px; min-width: 0; pointer-events: none; }
 #vh-right { flex-wrap: wrap; align-items: center; }
-#vh-left { flex-direction: column; align-items: stretch; align-self: stretch; width: max-content; min-height: 0; }
+#vh-left { flex-direction: column; align-items: stretch; width: max-content; }
 #vhead .seg, #vhead .ctx { flex: none; }
 /* the movable context groups and the compare group flow as individual items so the columns wrap cleanly */
 #vhead #view-ctx, #vhead #cmp-ctx, #vhead #ctx-compare { display: contents; }
@@ -137,12 +135,12 @@ body.log-collapsed #toasts { bottom: 46px; }
 .plab { position: absolute; top: 8px; padding: 4px 12px; border-radius: 6px; font-size: 14px; font-weight: 600; line-height: 1.5; color: #fff; background: rgba(20,20,22,.82); border: 1px solid rgba(255,255,255,.18); white-space: nowrap; box-shadow: 0 1px 6px rgba(0,0,0,.55); }
 .plab.a { background: var(--accent); border-color: rgba(255,255,255,.3); }
 .plab.b { background: var(--pop); border-color: rgba(255,255,255,.3); color: #16161a; }
-/* frame scrubber: vertical slider at the bottom of the left chip column, taking the height
-   left under the chips; frame 1 at the top like the filmstrip, so wheel-down and slider-down
-   both advance. The frame counter (e.g. 49/100) is the more useful readout, so it gets its
-   own large box directly below the track. */
-#scrub { flex: 1 1 auto; min-height: 160px; align-self: flex-start; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: default; pointer-events: none; }
-#scrub > * { pointer-events: auto; }
+/* frame scrubber: vertical slider overlaid on the canvas, centred on its left edge; frame 1
+   at the top like the filmstrip, so wheel-down and slider-down both advance. The frame
+   counter (e.g. 49/100) is the more useful readout, so it gets its own large box directly
+   below the track. Its default height is min(50%, 420px); layoutScrub() overrides top and
+   height inline when the chip column above would otherwise overlap it. */
+#scrub { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); height: min(50%, 420px); min-height: 120px; z-index: 2; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: default; }
 #scrubtrack, #scrubname { border-radius: 8px; background: var(--glass); border: 1px solid var(--glass-border); backdrop-filter: blur(4px); }
 #scrubtrack { flex: 1; min-height: 0; display: flex; padding: 8px 6px; }
 #scrubber { flex: 1; min-height: 0; width: auto; writing-mode: vertical-lr; margin: 0; accent-color: var(--accent); cursor: ns-resize; }
