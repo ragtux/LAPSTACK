@@ -48,7 +48,7 @@ const st = {
   turbo: false, slice: true,
   sliceBmps: new Map(),   // 'slice:i' -> magenta band over pixels whose depth is frame i; 'focus:i' -> the In focus preview of frame i (proxy res)
   focusPending: new Set(), // frame indices whose In focus mask is being built
-  peak: { on: false, thr: 0.5, max: 0, pixmax: null, floor: 0 },   // focus peaking, see peakMask()
+  peak: { on: false, strip: false, thr: 0.5, max: 0, pixmax: null, floor: 0 },   // focus peaking, see peakMask(); `on` is the canvas overlay, `strip` the filmstrip thumbs
   zoom: 1, ox: 0, oy: 0, fitted: true,
   pick: false,          // ctrl+G: the next canvas click jumps to the frame that won that pixel
   running: false,
@@ -68,7 +68,7 @@ function readParams() {
     coarsen: n('p-coarsen'), levels: n('p-levels') || null, energy_radius: n('p-energy'), top: $('p-top').value,
     top_radius: n('p-topr'), use_chroma: $('p-chroma').checked, proxy_edge: n('p-proxy'),
     depth_scale: n('p-depthscale'), depth_level: n('p-depthlevel'), render_dmap: $('p-dmap').checked,
-    turbo: st.turbo, slice: st.slice, peak_on: st.peak.on, peak_thr: st.peak.thr, cmp_mode: st.cmpMode,
+    turbo: st.turbo, slice: st.slice, peak_on: st.peak.on, peak_strip: st.peak.strip, peak_thr: st.peak.thr, cmp_mode: st.cmpMode,
     brush_size: st.retouch.size, brush_hard: st.retouch.hard,
   };
 }
@@ -84,7 +84,7 @@ function applyParams(p) {
   $('p-top').value = p.top ?? 'de'; setStep('p-topr', p.top_radius ?? 2); $('p-chroma').checked = p.use_chroma ?? false;
   setStep('p-proxy', p.proxy_edge ?? 1400); st.turbo = p.turbo ?? false;
   setStep('p-depthscale', p.depth_scale ?? 2); setStep('p-depthlevel', p.depth_level ?? 2); $('p-dmap').checked = p.render_dmap ?? false; st.cmpMode = p.cmp_mode ?? 'swipe';
-  st.peak.on = p.peak_on ?? false; st.peak.thr = p.peak_thr ?? 0.5; st.slice = p.slice ?? true;
+  st.peak.on = p.peak_on ?? false; st.peak.strip = p.peak_strip ?? false; st.peak.thr = p.peak_thr ?? 0.5; st.slice = p.slice ?? true;
   st.retouch.size = p.brush_size ?? 100; st.retouch.hard = p.brush_hard ?? 0.5;
 }
 function saveParams() { try { localStorage.setItem(PK, JSON.stringify(readParams())); } catch {} }
@@ -193,7 +193,7 @@ function renderFilmstrip() {
       const c = document.createElement('canvas'); c.width = 160; c.height = 100;
       const s = Math.min(160 / bmp.width, 100 / bmp.height);
       const g = c.getContext('2d'); const r = [(160 - bmp.width * s) / 2, (100 - bmp.height * s) / 2, bmp.width * s, bmp.height * s];
-      const peaking = st.peak.on && fr.peak;   // with peaking on, the thumb is the dimmed frame under its magenta in-focus band
+      const peaking = st.peak.strip && fr.peak;   // with preview peaking on, the thumb is the dimmed frame under its magenta in-focus band
       if (peaking) g.filter = 'grayscale(1) brightness(0.6)';
       g.drawImage(bmp, ...r);
       if (peaking) { g.filter = 'none'; g.drawImage(peakThumb(fr, Math.round(r[2]), Math.round(r[3])), r[0], r[1]); }
@@ -201,7 +201,7 @@ function renderFilmstrip() {
     } else { const ph = document.createElement('div'); ph.className = 'ph'; ph.textContent = fr ? '…' : String(i); d.appendChild(ph); }
     const n = document.createElement('div'); n.className = 'name'; n.textContent = f.name; d.appendChild(n);
     if (fr && fr.sim) { const s = document.createElement('div'); s.className = 'sim'; s.textContent = `${fr.sim[0].toFixed(1)}, ${fr.sim[1].toFixed(1)} px · ×${fr.sim[2].toFixed(4)} · ${fr.sim[3].toFixed(2)}°`; d.appendChild(s); }
-    if (st.peak.on && fr && fr.peak) { const s = document.createElement('div'); s.className = 'sim pct'; s.textContent = `${peakPercent(fr).toFixed(1)} % in focus`; d.appendChild(s); }
+    if (st.peak.strip && fr && fr.peak) { const s = document.createElement('div'); s.className = 'sim pct'; s.textContent = `${peakPercent(fr).toFixed(1)} % in focus`; d.appendChild(s); }
     d.addEventListener('click', () => { st.selected = i; if (!scrubbable()) st.view = 'source'; updateTabs(); renderFilmstrip(); draw(); });
     fs.appendChild(d);
   });
@@ -371,7 +371,8 @@ function peakThumb(fr, tw, th) {
   p.tc = c; p.tcThr = thr; return c;
 }
 function setPeakThr(v) { st.peak.thr = Math.min(1, Math.max(0.05, v)); $('peakthr').textContent = st.peak.thr.toFixed(2); saveParams(); renderFilmstrip(); draw(); }
-$('peak').addEventListener('change', (e) => { st.peak.on = e.target.checked; saveParams(); updateTabs(); renderFilmstrip(); draw(); });
+$('peak').addEventListener('change', (e) => { st.peak.on = e.target.checked; saveParams(); updateTabs(); draw(); });
+$('peak-strip').addEventListener('change', (e) => { st.peak.strip = e.target.checked; saveParams(); renderFilmstrip(); });
 
 // ---------- depth slice ----------
 // Magenta band over the pixels whose depth index is the scrubbed frame (the depth "slice").
@@ -847,7 +848,8 @@ function updateTabs() {
   const peakShown = st.view === 'source' || (st.compare && st.cmp === 'source');   // peaking is a Source overlay
   if (retouch) $('ctx-depth').hidden = true;
   $('ctx-source').hidden = !(havePeaks && peakShown);
-  $('peak').checked = st.peak.on; $('peakthr').textContent = st.peak.thr.toFixed(2); $('peakstep').hidden = !st.peak.on;
+  $('peak').checked = st.peak.on; $('peakthr').textContent = st.peak.thr.toFixed(2); $('peakstep').hidden = !(st.peak.on || st.peak.strip);
+  $('peak-strip').checked = st.peak.strip; $('peak-strip').disabled = !havePeaks;
   const scrubbing = st.files.length > 1 && scrubbable();
   $('scrub').hidden = !scrubbing; $('scrubber').max = String(Math.max(0, st.files.length - 1)); $('scrubber').value = String(st.selected);
   $('scrubname').textContent = st.files[st.selected] ? `${st.selected + 1}/${st.files.length}` : '';
