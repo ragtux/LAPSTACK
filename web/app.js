@@ -192,7 +192,11 @@ function renderFilmstrip() {
     if (bmp) {
       const c = document.createElement('canvas'); c.width = 160; c.height = 100;
       const s = Math.min(160 / bmp.width, 100 / bmp.height);
-      c.getContext('2d').drawImage(bmp, (160 - bmp.width * s) / 2, (100 - bmp.height * s) / 2, bmp.width * s, bmp.height * s);
+      const g = c.getContext('2d'); const r = [(160 - bmp.width * s) / 2, (100 - bmp.height * s) / 2, bmp.width * s, bmp.height * s];
+      const peaking = st.peak.on && fr.peak;   // with peaking on, the thumb is the dimmed frame under its magenta in-focus band
+      if (peaking) g.filter = 'grayscale(1) brightness(0.6)';
+      g.drawImage(bmp, ...r);
+      if (peaking) { g.filter = 'none'; g.drawImage(peakThumb(fr, Math.round(r[2]), Math.round(r[3])), r[0], r[1]); }
       d.appendChild(c);
     } else { const ph = document.createElement('div'); ph.className = 'ph'; ph.textContent = fr ? '…' : String(i); d.appendChild(ph); }
     const n = document.createElement('div'); n.className = 'name'; n.textContent = f.name; d.appendChild(n);
@@ -332,7 +336,7 @@ function peakStats() {
   const sorted = Float32Array.from(pm).sort();
   st.peak.floor = 0.02 * sorted[Math.floor(0.995 * (n - 1))];
   pm.n = frs.length; st.peak.pixmax = pm;
-  for (const f of frs) { f.peak.pct = null; f.peak.bmp = null; }
+  for (const f of frs) { f.peak.pct = null; f.peak.bmp = null; f.peak.tc = null; }
   return st.peak;
 }
 function peakMask(fr) { const ps = peakStats(); return { p: fr.peak, pm: ps.pixmax, thr: st.peak.thr, floor: ps.floor }; }
@@ -350,6 +354,21 @@ async function peakBitmap(fr) {
   const t2 = thr * thr;
   for (let i = 0; i < p.data.length; i++) if (pm[i] > floor && p.data[i] >= t2 * pm[i]) { px[4 * i] = 255; px[4 * i + 1] = 0; px[4 * i + 2] = 255; px[4 * i + 3] = 150; }
   p.bmp = await createImageBitmap(new ImageData(px, p.w, p.h)); p.bmpThr = thr; return p.bmp;
+}
+// The filmstrip's peaking band: the mask box-averaged to thumb size, so the
+// alpha is the in-focus fraction of each thumb pixel (no 5 MB bitmap per frame).
+function peakThumb(fr, tw, th) {
+  const { p, pm, thr, floor } = peakMask(fr);
+  if (p.tc && p.tcThr === thr && p.tc.width === tw && p.tc.height === th) return p.tc;
+  const t2 = thr * thr; const cnt = new Uint16Array(tw * th), tot = new Uint16Array(tw * th);
+  for (let y = 0, i = 0; y < p.h; y++) {
+    const row = Math.floor(y * th / p.h) * tw;
+    for (let x = 0; x < p.w; x++, i++) { const j = row + Math.floor(x * tw / p.w); tot[j]++; if (pm[i] > floor && p.data[i] >= t2 * pm[i]) cnt[j]++; }
+  }
+  const px = new Uint8ClampedArray(tw * th * 4);
+  for (let j = 0; j < tw * th; j++) { px[4 * j] = 255; px[4 * j + 2] = 255; px[4 * j + 3] = tot[j] ? Math.round(230 * cnt[j] / tot[j]) : 0; }
+  const c = new OffscreenCanvas(tw, th); c.getContext('2d').putImageData(new ImageData(px, tw, th), 0, 0);
+  p.tc = c; p.tcThr = thr; return c;
 }
 function setPeakThr(v) { st.peak.thr = Math.min(1, Math.max(0.05, v)); $('peakthr').textContent = st.peak.thr.toFixed(2); saveParams(); renderFilmstrip(); draw(); }
 $('peak').addEventListener('change', (e) => { st.peak.on = e.target.checked; saveParams(); updateTabs(); renderFilmstrip(); draw(); });
