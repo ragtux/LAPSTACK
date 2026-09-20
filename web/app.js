@@ -21,6 +21,18 @@ const setLogCollapsed = (on) => {
   if (!on) logEl.scrollTop = logEl.scrollHeight;
 };
 $('log-toggle').onclick = () => setLogCollapsed(!document.body.classList.contains('log-collapsed'));
+// keyboard shortcut card (bottom right of the canvas): collapses to its title row; the
+// choice is remembered, open by default
+const setKeysCollapsed = (on) => {
+  $('keys').classList.toggle('collapsed', on);
+  $('keys-arrow').textContent = on ? '▴' : '▾';
+  $('keys-toggle').title = on ? 'show shortcuts (?)' : 'collapse shortcuts (?)';
+  $('keys-toggle').setAttribute('aria-expanded', String(!on));
+  try { localStorage.setItem('lapstack.keys', on ? '0' : '1'); } catch {}
+};
+const toggleKeys = () => setKeysCollapsed(!$('keys').classList.contains('collapsed'));
+$('keys-toggle').onclick = toggleKeys;
+try { if (localStorage.getItem('lapstack.keys') === '0') setKeysCollapsed(true); } catch {}
 $('log-copy').onclick = async () => {
   const b = $('log-copy');
   try {
@@ -852,6 +864,9 @@ function updateTabs() {
   $('ctx-source').hidden = !(havePeaks && peakShown);
   $('peak').checked = st.peak.on; $('peakthr').textContent = st.peak.thr.toFixed(2); $('peakstep').hidden = !(st.peak.on || st.peak.strip);
   $('peak-strip').checked = st.peak.strip; $('peak-strip').disabled = !havePeaks;
+  // shortcut card: rows for a result / retouch / compare appear once they apply
+  const when = { result: have, retouch, compare: st.compare && have && !retouch };
+  document.querySelectorAll('#keys-list [data-when]').forEach((r) => { r.hidden = !when[r.dataset.when]; });
   const scrubbing = st.files.length > 1 && scrubbable();
   $('scrub').hidden = !scrubbing; $('scrubber').max = String(Math.max(0, st.files.length - 1)); $('scrubber').value = String(st.selected);
   $('scrubname').textContent = st.files[st.selected] ? `${st.selected + 1}/${st.files.length}` : '';
@@ -930,6 +945,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'ArrowLeft') scrub(e.shiftKey ? -10 : -1); else if (e.key === 'ArrowRight') scrub(e.shiftKey ? 10 : 1);
   else if (e.key === 'f') fit(); else if (e.key === 'z' && !e.ctrlKey) zoom100();
   else if (e.key === ' ' && st.compare) { e.preventDefault(); flip(true); }
+  else if (e.key === '?') toggleKeys();
 });
 document.addEventListener('keyup', (e) => { if (e.key === ' ') flip(false); });
 

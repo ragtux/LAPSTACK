@@ -40,7 +40,28 @@
   </div>
   <div id="center">
     <div id="vwrap"><canvas id="view"></canvas><canvas id="view2" hidden></canvas><div id="divider" hidden></div><div id="panelabels" hidden><span class="plab"></span><span class="plab"></span></div>
-      <div id="pickhint" hidden>Click a pixel to jump to its sharpest frame · Esc to cancel</div>
+      <!-- bottom-right corner: the ctrl+G hint stacks above the keyboard shortcut card; the card
+           collapses to its title row, and rows that need a result / retouch / compare are hidden
+           until they apply (updateTabs) -->
+      <div id="corner-br">
+        <div id="pickhint" hidden>Click a pixel to jump to its sharpest frame · Esc to cancel</div>
+        <div id="keys">
+          <button id="keys-toggle" title="collapse shortcuts (?)" aria-expanded="true" aria-controls="keys-list"><span>Keys</span><span id="keys-arrow">▾</span></button>
+          <div id="keys-list">
+            <div><span><kbd>←</kbd><kbd>→</kbd></span><span>prev / next frame</span></div>
+            <div><span><kbd>⇧</kbd><kbd>←</kbd><kbd>→</kbd></span><span>jump 10 frames</span></div>
+            <div><span><kbd>F</kbd></span><span>fit to view</span></div>
+            <div><span><kbd>Z</kbd></span><span>actual pixels</span></div>
+            <div><span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd></span><span>stack / retouch / save</span></div>
+            <div data-when="result"><span><kbd>Ctrl</kbd><kbd>G</kbd></span><span>pick sharpest frame</span></div>
+            <div data-when="compare"><span><kbd>Space</kbd></span><span>hold to flip</span></div>
+            <div data-when="retouch"><span><kbd>[</kbd><kbd>]</kbd></span><span>brush size</span></div>
+            <div data-when="retouch"><span><kbd>Ctrl</kbd><kbd>Z</kbd></span><span>undo</span></div>
+            <div data-when="retouch"><span><kbd>Ctrl</kbd><kbd>⇧</kbd><kbd>Z</kbd></span><span>redo</span></div>
+            <div><span><kbd>?</kbd></span><span>toggle this card</span></div>
+          </div>
+        </div>
+      </div>
       <div id="zoombar"><span id="zoom"></span><div class="seg"><button id="fit" title="fit to view (f)">Fit</button><button id="z100" title="actual pixels (z)">100%</button></div></div>
       <div id="cmpbar" hidden><div class="seg"><button id="cm-swipe" title="one view, draggable divider">swipe</button><button id="cm-split" title="two panes, one zoom/pan">side by side</button></div><button id="flip" title="hold to flip (space)">flip</button></div>
       <!-- frame scrubber: vertical, centred on the left edge of the canvas (frame 1 at the top, like the

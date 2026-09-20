@@ -142,7 +142,19 @@ body.log-collapsed #toasts { bottom: 46px; }
 #vwrap.paint canvas { cursor: none; }
 /* ctrl+G: pick the frame that won a pixel */
 #vwrap.pick canvas { cursor: crosshair; }
-#pickhint { position: absolute; right: 10px; bottom: 10px; z-index: 3; padding: 6px 12px; border-radius: 8px; background: rgba(20,20,22,.85); border: 1px solid var(--accent); font-size: var(--fs-lg); pointer-events: none; }
+#corner-br { position: absolute; right: 10px; bottom: 10px; z-index: 3; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
+#pickhint { padding: 6px 12px; border-radius: 8px; background: rgba(20,20,22,.85); border: 1px solid var(--accent); font-size: var(--fs-lg); white-space: nowrap; }
+/* keyboard shortcut card: opaque panel (not glass) so the list stays legible over any image;
+   the title row is the collapse toggle and is all that remains when collapsed */
+#keys { pointer-events: auto; min-width: 170px; border-radius: 8px; background: var(--panel); border: 1px solid var(--border); box-shadow: 0 2px 10px rgba(0,0,0,.45); color: var(--text); font-size: var(--fs-md); overflow: hidden; }
+#keys-toggle { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 5px 10px; background: transparent; border: 0; border-radius: 0; color: var(--dim); font-size: var(--fs-sm); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+#keys-toggle:hover { color: var(--text); background: rgba(255,255,255,.06); }
+#keys-list { display: grid; grid-template-columns: auto 1fr; column-gap: 12px; row-gap: 5px; padding: 2px 10px 9px; }
+#keys-list > div { display: contents; }
+#keys-list > div > span:first-child { display: inline-flex; gap: 3px; justify-content: flex-end; }
+#keys-list > div > span:last-child { white-space: nowrap; line-height: 20px; }
+#keys kbd { display: inline-block; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 4px; background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.22); box-shadow: 0 1px 0 rgba(0,0,0,.5); color: #fff; font: 600 var(--fs-sm)/18px var(--font); text-align: center; }
+#keys.collapsed #keys-list { display: none; }
 /* pane labels: one chip per visible image (pane centres when split, hugging the
    divider in swipe, centred when a single image fills the canvas); draw() keeps
    them below the header row */
