@@ -65,7 +65,7 @@ const st = {
   zoom: 1, ox: 0, oy: 0, fitted: true,
   pick: false,          // ctrl+G: the next canvas click jumps to the frame that won that pixel
   running: false,
-  retouch: { size: 100, hard: 0.5, painting: false, dabs: [], last: null, cursor: null, target: 'fused',
+  retouch: { on: false, prev: null, size: 100, hard: 0.5, painting: false, dabs: [], last: null, cursor: null,   // on: retouch mode (a compare split, stack layer | Source); prev: the compare state to restore on exit
              wasmIndex: -1, loading: -1, gen: 0, genMin: 0, undo: 0, redo: 0,
              gpuIndex: -1, prefetch: -1, ahead: null, dir: 1, lastSel: -1 },   // see ensureSource(): the frame the worker holds on the GPU, the one being prefetched, the read-ahead slot, the scrub direction
 };
@@ -82,7 +82,7 @@ function readParams() {
     coarsen: n('p-coarsen'), levels: n('p-levels') || null, energy_radius: n('p-energy'), top: $('p-top').value,
     top_radius: n('p-topr'), use_chroma: $('p-chroma').checked, proxy_edge: n('p-proxy'),
     depth_scale: n('p-depthscale'), depth_level: n('p-depthlevel'), render_dmap: $('p-dmap').checked,
-    turbo: st.turbo, slice: st.slice, peak_on: st.peak.on, peak_strip: st.peak.strip, peak_thr: st.peak.thr, cmp_mode: st.cmpMode,
+    turbo: st.turbo, slice: st.slice, peak_on: st.peak.on, peak_strip: st.peak.strip, peak_thr: st.peak.thr, cmp_mode: st.retouch.on && st.retouch.prev ? st.retouch.prev.cmpMode : st.cmpMode,
     brush_size: st.retouch.size, brush_hard: st.retouch.hard,
   };
 }
@@ -115,7 +115,7 @@ $('p-dmap').addEventListener('change', () => { saveParams(); runLabel(); });
 $('run-more').addEventListener('click', (e) => { e.stopPropagation(); $('runmenu').hidden = !$('runmenu').hidden; });
 $('runmenu').addEventListener('click', (e) => e.stopPropagation());
 document.addEventListener('click', () => { $('runmenu').hidden = true; });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('runmenu').hidden = true; setPick(false); } });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('runmenu').hidden = true; if (st.pick) setPick(false); else exitRetouch(); } });
 runLabel();
 
 // ---------- worker ----------
@@ -235,7 +235,7 @@ function thumbEl(i) {
 }
 $('add').addEventListener('click', () => $('file').click());
 $('file').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
-$('clear').addEventListener('click', () => { if (st.running) return; setPick(false); worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); st.step = 'stack'; if (st.view === 'retouch') st.view = 'source'; gotoStep('stack'); renderFilmstrip(); updateTabs(); setView('source'); });
+$('clear').addEventListener('click', () => { if (st.running) return; setPick(false); worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); st.step = 'stack'; gotoStep('stack'); renderFilmstrip(); updateTabs(); setView('source'); });
 document.addEventListener('dragover', (e) => { e.preventDefault(); document.body.classList.add('drop'); });
 document.addEventListener('dragleave', () => document.body.classList.remove('drop'));
 document.addEventListener('drop', (e) => { e.preventDefault(); document.body.classList.remove('drop'); if (!st.running) addFiles(e.dataTransfer.files); });
@@ -498,10 +498,11 @@ $('peak-minus').addEventListener('click', () => setPeakThr(st.peak.thr - 0.05));
 $('peak-plus').addEventListener('click', () => setPeakThr(st.peak.thr + 0.05));
 
 // ---------- retouch ----------
-// Two panes (source | fused) with one transform. The brush copies the aligned
-// source frame into the fused image: a live preview is composited on the
-// display canvas while dragging, then the worker applies the stroke to the
-// 16-bit master and sends back the exact bbox, which replaces the preview.
+// A mode over the Stack layers, not a step: while it is on, the view is a side-by-side
+// compare of the shown stacked image (LAP or DFR, the paint target) and the scrubbed
+// Source frame, and the brush copies the aligned source frame into the target: a live
+// preview is composited on the display canvas while dragging, then the worker applies
+// the stroke to the 16-bit master and sends back the exact bbox, which replaces the preview.
 const R = st.retouch;
 // Full-res sources: an LRU of decoded, run-aligned frames. Each costs 4 bytes/px
 // (a 45 MP frame is 179 MB), so the cache is sized in bytes, not frames: ~10
@@ -520,7 +521,7 @@ function srcPut(i, cv) {
 }
 function srcClear() { for (const cv of srcCache.values()) cv.width = 1; srcCache.clear(); }
 window.__srcCache = srcCache; window.__srcBudget = (b) => { SRC_BUDGET = b; };
-function resetRetouch() { srcClear(); R.wasmIndex = -1; R.gpuIndex = -1; R.loading = -1; R.prefetch = -1; R.ahead = null; R.gen++; R.genMin = R.gen; R.undo = 0; R.redo = 0; R.painting = false; R.dabs = []; }
+function resetRetouch() { srcClear(); R.on = false; R.prev = null; R.cursor = null; R.wasmIndex = -1; R.gpuIndex = -1; R.loading = -1; R.prefetch = -1; R.ahead = null; R.gen++; R.genMin = R.gen; R.undo = 0; R.redo = 0; R.painting = false; R.dabs = []; }
 let srcTimer = null;
 // The Source and In focus layers are drawn from the proxy (proxy_edge px long
 // side) until the full-res aligned frame arrives, so a run's result is never
@@ -557,7 +558,7 @@ function requestSource(index, focus, prefetch) {
 function ensureSource() {
   if (!st.result || !st.files[st.selected]) return;
   if (st.selected !== R.lastSel) { R.dir = st.selected < R.lastSel ? -1 : 1; R.lastSel = st.selected; }
-  const forPaint = st.view === 'retouch';                      // strokes copy from the worker's own 16-bit copy
+  const forPaint = R.on;                                       // strokes copy from the worker's own 16-bit copy
   // the plain frame first (Source, retouch), then the In focus rendering; one request at a time
   const needPlain = () => (forPaint && R.wasmIndex !== st.selected) || (shown('source') && !srcCache.has(st.selected));
   const needFocus = () => shown('focus') && !srcCache.has(`focus:${st.selected}`);
@@ -596,7 +597,9 @@ async function onSource(m) {
 }
 // the worker dropped a request that a newer one had superseded; ask again for what is on screen now
 function onSourceSkipped(m) { if (R.loading === m.index) R.loading = -1; if (R.prefetch === m.index) R.prefetch = -1; ensureSource(); updateTabs(); }
-const targetCanvas = () => (R.target === 'dmap' && st.result && st.result.dmap) ? st.result.dmap : st.result && st.result.fused;
+// the paint target is the stacked image on screen: DFR when it is the view, else LAP
+const target = () => (st.view === 'dmap' && haveDmap()) ? 'dmap' : 'fused';
+const targetCanvas = () => st.result && st.result[target()];
 function onPatch(m) {
   R.undo = m.undo; R.redo = m.redo; updateTabs();
   if (!m.rgba || !st.result) return;
@@ -630,7 +633,7 @@ function addDab(x, y) {
 function endStroke() {
   if (!R.painting) return;
   R.painting = false;
-  if (R.dabs.length) worker.postMessage({ type: 'stroke', dabs: new Float32Array(R.dabs), target: R.target });
+  if (R.dabs.length) worker.postMessage({ type: 'stroke', dabs: new Float32Array(R.dabs), target: target() });
   R.dabs = []; R.last = null;
 }
 window.__retouchStroke = (pts) => { R.painting = true; R.dabs = []; R.last = null; for (const [x, y] of pts) addDab(x, y); endStroke(); };
@@ -646,7 +649,27 @@ function setBrush(size, hard) {
 $('br-size-in').addEventListener('input', (e) => setBrush(sizeFromSlider(Number(e.target.value)), R.hard));
 $('br-hard-in').addEventListener('input', (e) => setBrush(R.size, Number(e.target.value) / 100));
 $('undo').addEventListener('click', () => worker.postMessage({ type: 'undo' })); $('redo').addEventListener('click', () => worker.postMessage({ type: 'redo' }));
-$('br-target').addEventListener('change', (e) => { R.target = e.target.value; updateTabs(); draw(); });
+// Enter: make sure a stack layer is the view and put Source beside it, side by side;
+// the compare state it replaces comes back on exit. Leaving the Stack group, the stack
+// step, or losing the result all end the mode (updateTabs).
+function enterRetouch() {
+  if (R.on || !st.result || st.step !== 'stack') return;
+  if (groupOf(st.view) !== 'stack') { setView(st.compare && groupOf(st.cmp) === 'stack' ? st.cmp : lastIn.stack); }
+  R.prev = { compare: st.compare, cmpMode: st.cmpMode, cmp: st.cmp };
+  R.on = true; st.compare = true; st.cmpMode = 'split'; st.cmp = 'source'; st.flipped = false;
+  setBrush(R.size, R.hard);
+  updateTabs(); renderFilmstrip(); draw();
+}
+// state only (no redraw): updateTabs and gotoStep call this mid-refresh
+function leaveRetouch(restore = true) {
+  if (!R.on) return;
+  endStroke(); R.on = false; R.cursor = null;
+  if (R.prev) { st.cmpMode = R.prev.cmpMode; if (restore && st.step === 'stack') { st.compare = R.prev.compare; st.cmp = R.prev.cmp; } }
+  R.prev = null;
+}
+function exitRetouch() { if (!R.on) return; leaveRetouch(); updateTabs(); renderFilmstrip(); draw(); }
+const toggleRetouch = () => (R.on ? exitRetouch() : enterRetouch());
+$('retouch').addEventListener('click', toggleRetouch);
 
 // ---------- viewer ----------
 const canvas = $('view'), ctx = canvas.getContext('2d');
@@ -725,8 +748,8 @@ function showLabel(el, text, kind, pos) {
 }
 function draw() {
   const d = dpr();
-  const retouch = st.view === 'retouch' && !!st.result;
-  const split = retouch || (st.compare && st.cmpMode === 'split' && !!st.result);
+  const retouch = R.on && !!st.result;
+  const split = st.compare && st.cmpMode === 'split' && !!st.result;
   $('vwrap').classList.toggle('split', split); $('vwrap').classList.toggle('paint', retouch); canvas2.hidden = !split;
   sizeCanvas(canvas, d); if (split) sizeCanvas(canvas2, d);
   const cw = canvas.clientWidth, ch = canvas.clientHeight;
@@ -740,24 +763,16 @@ function draw() {
   const hdr = $('vhead').offsetTop + Math.max(vs.offsetTop + vs.offsetHeight, vr.offsetTop + vr.offsetHeight);
   $('panelabels').style.top = `${Math.max(hdr, Math.min(st.oy, ch - 40))}px`;
   if (split) {
-    // two panes, one transform: retouch = source | target result; compare = view | partner
-    let L, Rt, labels;
-    if (retouch) {
-      const f = st.frames[st.selected]; const pbmp = f && (f.proxy || f.thumb);
-      const fullSrc = srcGet(st.selected);
-      L = fullSrc ? { bmp: fullSrc, w, h } : (pbmp ? { bmp: pbmp, w, h } : null);
-      Rt = { bmp: targetCanvas(), w, h };
-      labels = ['Source', `${layerName(R.target)} — drag to paint, shift+drag pans`];
-    } else {
-      const A = layerFor(st.view), B = layerFor(st.cmp);
-      [L, Rt] = st.flipped ? [B, A] : [A, B];
-      labels = st.flipped ? [layerLabel(st.cmp), layerLabel(st.view)] : [layerLabel(st.view), layerLabel(st.cmp)];
-    }
+    // two panes, one transform: view | partner (retouch: paint target | Source, never flipped)
+    const A = layerFor(st.view), B = layerFor(st.cmp);
+    const [L, Rt] = st.flipped ? [B, A] : [A, B];
+    const labels = st.flipped ? [layerLabel(st.cmp), layerLabel(st.view)] : [layerLabel(st.view), layerLabel(st.cmp)];
+    if (retouch) labels[0] += ' — drag to paint, shift+drag pans';
     drawLayer(L); if (retouch) drawCursor(ctx, d);
     ctx2.setTransform(1, 0, 0, 1, 0, 0); ctx2.fillStyle = '#141416'; ctx2.fillRect(0, 0, canvas2.width, canvas2.height);
     ctx2.setTransform(st.zoom * d, 0, 0, st.zoom * d, st.ox * d, st.oy * d);
     drawLayer(Rt, ctx2); if (retouch) drawCursor(ctx2, d);
-    const [k1, k2] = retouch ? ['', 'a'] : (st.flipped ? ['b', 'a'] : ['a', 'b']);
+    const [k1, k2] = st.flipped ? ['b', 'a'] : ['a', 'b'];
     const [l1, l2] = $('panelabels').children; $('panelabels').hidden = false;
     showLabel(l1, labels[0], k1, { left: '25%', transform: 'translateX(-50%)' });
     showLabel(l2, labels[1], k2, { left: '75%', transform: 'translateX(-50%)' });
@@ -793,7 +808,8 @@ new ResizeObserver(() => { layoutScrub(); draw(); }).observe($('vwrap'));
 // cursor; plain wheel zooms only when nothing on screen is scrubbable.
 function onWheel(cv, e) {
   e.preventDefault();
-  if (st.view !== 'retouch' && scrubbable() && !(e.ctrlKey || e.metaKey) && st.files.length > 1) { scrub((e.deltaY > 0 ? 1 : -1) * (e.shiftKey ? 10 : 1)); return; }
+  // retouch: the wheel zooms under the brush; scrub with the keys or the slider
+  if (!R.on && scrubbable() && !(e.ctrlKey || e.metaKey) && st.files.length > 1) { scrub((e.deltaY > 0 ? 1 : -1) * (e.shiftKey ? 10 : 1)); return; }
   const f = Math.pow(1.0015, -e.deltaY); const r = cv.getBoundingClientRect();
   const mx = e.clientX - r.left, my = e.clientY - r.top;
   st.ox = mx - (mx - st.ox) * f; st.oy = my - (my - st.oy) * f; st.zoom *= f; st.fitted = false; draw();
@@ -838,7 +854,7 @@ function pickAt(cv, e) {
 for (const cv of [canvas, canvas2]) {
   cv.addEventListener('pointerdown', (e) => {
     if (st.pick && e.button === 0) { e.preventDefault(); pickAt(cv, e); return; }
-    const paint = st.view === 'retouch' && st.result && e.button === 0 && !e.shiftKey && !(e.buttons & 4);
+    const paint = R.on && st.result && e.button === 0 && !e.shiftKey && !(e.buttons & 4);
     try { cv.setPointerCapture(e.pointerId); } catch {}
     if (paint) {
       if (R.wasmIndex !== st.selected || !srcGet(st.selected)) { toast('Source frame still loading — wait for "loaded" before painting.', 3000); return; }
@@ -847,13 +863,13 @@ for (const cv of [canvas, canvas2]) {
     drag = { x: e.clientX, y: e.clientY, ox: st.ox, oy: st.oy }; cv.classList.add('drag');
   });
   cv.addEventListener('pointermove', (e) => {
-    if (st.view === 'retouch') { R.cursor = imgXY(cv, e); }
+    if (R.on) { R.cursor = imgXY(cv, e); }
     if (R.painting) { const [x, y] = imgXY(cv, e); addDab(x, y); draw(); return; }
     if (drag) { st.ox = drag.ox + e.clientX - drag.x; st.oy = drag.oy + e.clientY - drag.y; st.fitted = false; }
-    if (drag || st.view === 'retouch') draw();
+    if (drag || R.on) draw();
   });
   cv.addEventListener('pointerup', () => { endStroke(); drag = null; cv.classList.remove('drag'); });
-  cv.addEventListener('pointerleave', () => { if (st.view === 'retouch') { R.cursor = null; draw(); } });
+  cv.addEventListener('pointerleave', () => { if (R.on) { R.cursor = null; draw(); } });
   cv.addEventListener('dblclick', () => (st.fitted ? zoom100() : fit()));
   cv.addEventListener('wheel', (e) => onWheel(cv, e), { passive: false });
 }
@@ -872,30 +888,33 @@ const groupOf = (v) => Object.keys(GROUPS).find((g) => GROUPS[g].includes(v)) ||
 const lastIn = { stack: 'fused', depth: 'depth' };   // last layer picked in each group
 const layerName = (id) => (LAYERS.find((l) => l[0] === id) || [id, id])[1];
 // while the full-res frame decodes, say so: the pane is showing the proxy
-const layerLabel = (id) => (usesSource(id) && st.result && !srcCache.has(id === 'focus' ? `focus:${st.selected}` : st.selected))
+const layerLabel = (id) => (usesSource(id) && st.result && (!srcCache.has(id === 'focus' ? `focus:${st.selected}` : st.selected) || (R.on && id === 'source' && R.wasmIndex !== st.selected)))
   ? `${layerName(id)} — loading full res…` : layerName(id);
 const haveDmap = () => !!(st.result && st.result.dmap);
 // layers that depend on the scrubbed frame
-const usesFrame = (t) => usesSource(t) || t === 'retouch' || (isDepthLayer(t) && st.slice);
+const usesFrame = (t) => usesSource(t) || (isDepthLayer(t) && st.slice);
 function scrubbable() { return usesFrame(st.view) || (st.compare && usesFrame(st.cmp)); }
 function updateTabs() {
   const have = !!st.result;
   $('tab-source').disabled = !st.files.length; $('tab-stack').disabled = !have; $('tab-depth').disabled = !have; $('ab').disabled = !have || st.step !== 'stack';
   if (!haveDmap() && st.view === 'dmap') st.view = 'fused';
   if (!haveDmap() && lastIn.stack === 'dmap') lastIn.stack = 'fused';
-  if (!haveDmap()) R.target = 'fused'; $('br-target').value = R.target; $('br-target-sec').hidden = $('br-target-row').hidden = !haveDmap();
   $('sv-which-row').hidden = !haveDmap(); if (!haveDmap()) $('sv-which').value = 'fused';
   $('cm-swipe').classList.toggle('on', st.cmpMode !== 'split'); $('cm-split').classList.toggle('on', st.cmpMode === 'split');
   document.querySelectorAll('#steps button').forEach((b) => { if (b.dataset.step !== 'stack') b.disabled = !have; });
-  const retouch = st.view === 'retouch' && have;
-  $('viewseg').hidden = st.step !== 'stack';
-  $('ctx-retouch').hidden = !retouch;
-  $('undo').disabled = !R.undo; $('redo').disabled = !R.redo; $('hist').textContent = R.undo || R.redo ? `${R.undo} undo · ${R.redo} redo` : '';
-  $('src-status').textContent = retouch ? (R.loading === st.selected ? `loading ${st.files[st.selected]?.name}…` : (R.wasmIndex === st.selected ? `source: ${st.files[st.selected]?.name}` : '')) : '';
-  $('ab').parentElement.hidden = st.step !== 'stack';
-  if (retouch) st.compare = false;
-  ensureSource();
   const group = groupOf(st.view);
+  // retouch mode ends when its target leaves the screen; while it is on, the split is pinned to target | Source
+  if (R.on && (!have || st.step !== 'stack' || group !== 'stack')) leaveRetouch();
+  const retouch = R.on;
+  if (retouch) { st.compare = true; st.cmpMode = 'split'; st.cmp = 'source'; st.flipped = false; }
+  $('viewseg').hidden = st.step !== 'stack';
+  $('brush').hidden = !retouch;
+  $('undo').disabled = !R.undo; $('redo').disabled = !R.redo; $('hist').textContent = R.undo || R.redo ? `${R.undo} undo · ${R.redo} redo` : '';
+  $('ab').parentElement.hidden = st.step !== 'stack';
+  // the Retouch button: whenever a stacked image is on screen (as the view or the compare partner)
+  const canRetouch = have && st.step === 'stack' && (group === 'stack' || (st.compare && groupOf(st.cmp) === 'stack'));
+  $('rtseg').hidden = !canRetouch; $('retouch').classList.toggle('on', retouch);
+  ensureSource();
   document.querySelectorAll('#viewseg button').forEach((b) => b.classList.toggle('on', b.dataset.group === group));
   const subs = (GROUPS[group] || []).filter((t) => t !== 'dmap' || haveDmap());
   $('subseg').hidden = st.step !== 'stack' || subs.length < 2;
@@ -905,7 +924,7 @@ function updateTabs() {
   for (const [id, name] of LAYERS) { if (id === st.view) continue; if (id === 'source' && !st.files.length) continue; if (id === 'dmap' && !haveDmap()) continue; const o = document.createElement('option'); o.value = id; o.textContent = name; sel.appendChild(o); }
   if (![...sel.options].some((o) => o.value === st.cmp)) st.cmp = sel.options[0] ? sel.options[0].value : 'depth';
   sel.value = st.cmp;
-  $('ab').checked = st.compare; $('ctx-compare').hidden = !(st.compare && have) || retouch; $('cmpbar').hidden = $('ctx-compare').hidden;
+  $('ab').checked = st.compare; $('ctx-compare').hidden = !(st.compare && have); $('cmp-sel').disabled = retouch; $('cmpbar').hidden = $('ctx-compare').hidden || retouch;
   const depthShown = isDepthLayer(st.view) || (st.compare && isDepthLayer(st.cmp));
   // put each context group next to the layer it acts on: the shown layer (left) or the compare partner (after "vs")
   const place = (el, onView, onPartner) => { const slot = (!onView && onPartner) ? $('cmp-ctx') : $('view-ctx'); if (el.parentElement !== slot) slot.appendChild(el); };
@@ -914,12 +933,11 @@ function updateTabs() {
   $('ctx-depth').hidden = !depthShown; $('lut-gray').classList.toggle('on', !st.turbo); $('lut-turbo').classList.toggle('on', st.turbo); $('slice').checked = st.slice;
   const havePeaks = st.frames.some((f) => f && f.peak);
   const peakShown = st.view === 'source' || (st.compare && st.cmp === 'source');   // peaking is a Source overlay
-  if (retouch) $('ctx-depth').hidden = true;
   $('ctx-source').hidden = !(havePeaks && peakShown);
   $('peak').checked = st.peak.on; $('peakthr').textContent = st.peak.thr.toFixed(2); $('peakstep').hidden = !(st.peak.on || st.peak.strip);
   $('peak-strip').checked = st.peak.strip; $('peak-strip').disabled = !havePeaks;
   // shortcut card: rows for a result / retouch / compare appear once they apply
-  const when = { result: have, retouch, compare: st.compare && have && !retouch };
+  const when = { result: have, retouch, canretouch: canRetouch, compare: st.compare && have && !retouch };
   document.querySelectorAll('#keys-list [data-when]').forEach((r) => { r.hidden = !when[r.dataset.when]; });
   const scrubbing = st.files.length > 1 && scrubbable();
   $('scrub').hidden = !scrubbing; $('scrubber').max = String(Math.max(0, st.files.length - 1)); $('scrubber').value = String(st.selected);
@@ -947,16 +965,13 @@ function setView(v) { st.view = v; const g = groupOf(v); if (g && g !== 'source'
 function gotoStep(step) {
   if (step !== 'stack' && !st.result) return;
   st.step = step;
-  if (step === 'retouch') st.view = 'retouch';
-  else if (step === 'save') { st.view = 'fused'; st.compare = false; }
-  else if (st.view === 'retouch') st.view = 'fused';
+  if (step === 'save') { leaveRetouch(false); st.view = 'fused'; st.compare = false; }
   document.querySelectorAll('#steps button').forEach((b) => b.classList.toggle('on', b.dataset.step === step));
-  $('params').hidden = step !== 'stack'; $('brushpanel').hidden = step !== 'retouch'; $('savepanel').hidden = step !== 'save';
+  $('params').hidden = step !== 'stack'; $('savepanel').hidden = step !== 'save';
   if (step === 'save' && st.result) {
     const strokes = R.undo;
     $('sv-info').textContent = `${st.result.w}×${st.result.h}, ${st.result.bits}-bit input, ${st.files.length} frames` + (strokes ? `, ${strokes} retouch stroke${strokes > 1 ? 's' : ''}` : '');
   }
-  if (step === 'retouch') setBrush(R.size, R.hard);
   updateTabs(); renderFilmstrip(); draw();
 }
 document.querySelectorAll('#steps button').forEach((b) => b.addEventListener('click', () => gotoStep(b.dataset.step)));
@@ -965,7 +980,7 @@ document.querySelectorAll('#subseg button').forEach((b) => b.addEventListener('c
 $('cmp-sel').addEventListener('change', (e) => { st.cmp = e.target.value; updateTabs(); draw(); });
 $('cm-swipe').addEventListener('click', () => { st.cmpMode = 'swipe'; saveParams(); updateTabs(); draw(); });
 $('cm-split').addEventListener('click', () => { st.cmpMode = 'split'; saveParams(); updateTabs(); draw(); });
-$('ab').addEventListener('change', (e) => { st.compare = e.target.checked; if (st.compare && st.view === 'source') st.view = 'fused'; updateTabs(); draw(); });
+$('ab').addEventListener('change', (e) => { if (R.on) leaveRetouch(false); st.compare = e.target.checked; if (st.compare && st.view === 'source') st.view = 'fused'; updateTabs(); draw(); });
 $('lut-gray').addEventListener('click', () => { st.turbo = false; saveParams(); updateTabs(); draw(); });
 $('lut-turbo').addEventListener('click', () => { st.turbo = true; saveParams(); updateTabs(); draw(); });
 const flip = (on) => { st.flipped = on; draw(); };
@@ -994,11 +1009,12 @@ document.addEventListener('keydown', (e) => {
     setPick(!st.pick);
     return;
   }
-  if (e.key === '[') setBrush(R.size / 1.25, R.hard); else if (e.key === ']') setBrush(R.size * 1.25, R.hard);
-  else if (e.key === '1') gotoStep('stack'); else if (e.key === '2') gotoStep('retouch'); else if (e.key === '3') gotoStep('save');
+  if (e.key === '[' && R.on) setBrush(R.size / 1.25, R.hard); else if (e.key === ']' && R.on) setBrush(R.size * 1.25, R.hard);
+  else if (e.key === '1') gotoStep('stack'); else if (e.key === '2') gotoStep('save');
+  else if (e.key === 'r' && !e.ctrlKey && !e.metaKey) toggleRetouch();
   else if (e.key === 'ArrowLeft') scrub(e.shiftKey ? -10 : -1); else if (e.key === 'ArrowRight') scrub(e.shiftKey ? 10 : 1);
   else if (e.key === 'f') fit(); else if (e.key === 'z' && !e.ctrlKey) zoom100();
-  else if (e.key === ' ' && st.compare) { e.preventDefault(); flip(true); }
+  else if (e.key === ' ' && st.compare && !R.on) { e.preventDefault(); flip(true); }
   else if (e.key === '?') toggleKeys();
 });
 document.addEventListener('keyup', (e) => { if (e.key === ' ') flip(false); });

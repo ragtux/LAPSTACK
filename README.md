@@ -196,10 +196,9 @@ worker. The app warns when it lands on a software adapter.
 Chrome/Edge on Windows/macOS have WebGPU on by default; Firefox needs
 `dom.webgpu.enabled` (and `dom.webgpu.workers.enabled`); Safari 26+.
 
-The UI follows the workflow as three steps in the top bar:
-**1 Stack** (add frames, set parameters, run, inspect the result),
-**2 Retouch** (paint from source frames into the result) and **3 Save**
-(format, file name, depth map). Keys 1/2/3 switch steps.
+The UI follows the workflow as two steps in the top bar:
+**1 Stack** (add frames, set parameters, run, inspect and retouch the
+result) and **2 Save** (format, file name, depth map). Keys 1/2 switch steps.
 
 *Stack* is the workbench: a filmstrip (thumbnails arrive as frames are
 added, with each frame's registration once aligned), a parameter panel (all
@@ -211,7 +210,9 @@ under Depth — followed by controls that only show for what is on screen: on
 Source a **peaking** toggle with a threshold stepper; on Focus depth a
 Gray/Turbo LUT and a **slice** toggle; a frame slider whenever the shown
 layers depend on a frame; and on the right a **compare** toggle whose "vs" dropdown lists
-the other layers (the divider is draggable, `flip` or space swaps sides).
+the other layers (the divider is draggable, `flip` or space swaps sides);
+a **Retouch** button in the top-right corner whenever LAP or DFR is on
+screen (see below).
 Scroll-zoom at the cursor, drag pan, double-click fit/100 %, wheel / ←/→
 scrub (shift = 10; ctrl+wheel zooms on scrubbable views). Drag-and-drop
 works. Added frames are decoded and downscaled in the worker straight away
@@ -266,20 +267,26 @@ the run, and blended in with weight `1 − |index − depth|` at each pixel, so
 a pixel is the average of the one or two frames nearest its depth index. The
 run then opens the **side by side** compare (two panes, one zoom/pan;
 *swipe* is the divider mode) with the LAP result on the left and DFR on
-the right; DFR has its own layer under Stack, can be the retouch target
-(*paint into*) and the saved image (*result*). On the 25 × 45 MP stack the second pass
+the right; DFR has its own layer under Stack, is the retouch target while
+it is the shown layer, and can be the saved image (*result*). On the 25 × 45 MP stack the second pass
 adds 6.7 s to a 27.7 s run.
 
-**Retouch** (step 2, after a run): two panes with one zoom/pan —
-the selected source frame on the left, the fused result on the right — and
-a soft brush that copies the *aligned* source into the result. Drag on
-either pane to paint (a circle shows the brush on both), shift+drag pans,
-the wheel zooms, the panel's sliders (or `[` / `]`) set the brush size and
-hardness, and ctrl+z / ctrl+shift+z undo and redo whole strokes. The frame
-slider, filmstrip or ←/→ choose the source; since full frames are not kept
-after the run, the chosen one is decoded again and re-warped with the
-registration found during the run (about a second at 45 MP; the pane shows
-its proxy until "loaded" appears). While dragging, the stroke is previewed
+**Retouch** is a mode of the Stack step, not a step of its own: the
+**Retouch** button in the viewer's top-right corner (or `R`) is there
+whenever LAP or DFR is on screen. It turns the view into a side-by-side
+compare with one zoom/pan — the stacked image on the left (LAP or DFR,
+whichever is selected: that is the paint target), the scrubbed source frame
+on the right — and shows the brush controls above the run parameters in the
+panel. A soft brush copies the *aligned* source into the stacked image.
+Drag on either pane to paint (a circle shows the brush on both), shift+drag
+pans, the wheel zooms, the panel's sliders (or `[` / `]`) set the brush
+size and hardness, and ctrl+z / ctrl+shift+z undo and redo whole strokes.
+The frame slider, filmstrip or ←/→ choose the source; since full frames are
+not kept after the run, the chosen one is decoded again and re-warped with
+the registration found during the run (about a second at 45 MP; the pane
+label says *loading full res…* until then). The button again, `Esc`,
+unticking *vs*, or leaving the Stack layers ends the mode and brings back
+the compare that was open before it. While dragging, the stroke is previewed
 on the display copy; on release the worker applies it to the 16-bit master,
 sends back the exact patch, and Save writes the retouched image. Undo
 history is capped at ~600 MB of patches.

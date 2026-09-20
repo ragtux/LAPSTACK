@@ -28,8 +28,7 @@
   </div>
   <div class="seg steps" id="steps">
     <button data-step="stack" class="on"><b>1</b> Stack</button>
-    <button data-step="retouch" disabled><b>2</b> Retouch</button>
-    <button data-step="save" disabled><b>3</b> Save</button>
+    <button data-step="save" disabled><b>2</b> Save</button>
   </div>
   <div id="tb-right"></div>
 </div>
@@ -52,9 +51,11 @@
             <div><span><kbd>⇧</kbd><kbd>←</kbd><kbd>→</kbd></span><span>jump 10 frames</span></div>
             <div><span><kbd>F</kbd></span><span>fit to view</span></div>
             <div><span><kbd>Z</kbd></span><span>actual pixels</span></div>
-            <div><span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd></span><span>stack / retouch / save</span></div>
+            <div><span><kbd>1</kbd><kbd>2</kbd></span><span>stack / save</span></div>
             <div data-when="result"><span><kbd>Ctrl</kbd><kbd>G</kbd></span><span>pick sharpest frame</span></div>
             <div data-when="compare"><span><kbd>Space</kbd></span><span>hold to flip</span></div>
+            <div data-when="canretouch"><span><kbd>R</kbd></span><span>retouch on / off</span></div>
+            <div data-when="retouch"><span><kbd>Esc</kbd></span><span>leave retouch</span></div>
             <div data-when="retouch"><span><kbd>[</kbd><kbd>]</kbd></span><span>brush size</span></div>
             <div data-when="retouch"><span><kbd>Ctrl</kbd><kbd>Z</kbd></span><span>undo</span></div>
             <div data-when="retouch"><span><kbd>Ctrl</kbd><kbd>⇧</kbd><kbd>Z</kbd></span><span>redo</span></div>
@@ -96,7 +97,6 @@
             <label class="tog"><input type="checkbox" id="slice"> slice</label>
           </span>
         </span>
-        <span id="ctx-retouch" class="ctx" hidden><span id="src-status" class="dim"></span></span>
         </div>
         <!-- compare toggle, centred over the canvas (where the side-by-side split falls) -->
         <label class="vs" title="compare with another layer: swipe or side by side"><input type="checkbox" id="ab" disabled><span>vs</span></label>
@@ -104,11 +104,28 @@
           <span id="ctx-compare" class="ctx" hidden>
             <select id="cmp-sel"></select><span id="cmp-ctx" class="ctx"></span>
           </span>
+          <!-- retouch mode: shown whenever LAP or DFR is on screen; on = paint the scrubbed source
+               frame (right pane) into the stacked image (left pane) -->
+          <span class="seg" id="rtseg" hidden><button id="retouch" title="paint from a source frame into the stacked image (R; Esc leaves)">Retouch</button></span>
         </div>
       </div>
     </div>
   </div>
   <div id="params" class="panel">
+    <!-- retouch mode: the brush sits above the run parameters while it is on -->
+    <div id="brush" hidden>
+      <div class="section">Brush</div>
+      <label>size <span class="val" id="br-size">100</span></label>
+      <input type="range" id="br-size-in" min="0" max="100" value="50" title="[ / ]">
+      <label>hardness <span class="val" id="br-hard">0.50</span></label>
+      <input type="range" id="br-hard-in" min="0" max="95" value="50">
+      <div class="section">Source</div>
+      <div class="dim small">Pick the frame to paint from in the filmstrip, with ←/→ or the slider. It is decoded and re-aligned on demand (~1 s at 45 MP).</div>
+      <div class="section">History</div>
+      <div class="row"><button id="undo" title="ctrl+z" disabled>undo</button><button id="redo" title="ctrl+shift+z" disabled>redo</button><span id="hist" class="dim small"></span></div>
+      <div class="section">How to</div>
+      <div class="dim small">Left pane: the stacked image (LAP or DFR, whichever is selected) · right pane: the source frame. Drag on either pane to paint the source into the stacked image; shift+drag pans; wheel zooms; double-click fits / 100 %. Esc or the Retouch button leaves.</div>
+    </div>
     <div class="section">Alignment</div>
     <label><input type="checkbox" id="p-align" checked> align frames</label>
     <label><input type="checkbox" id="p-shift" checked> shift</label>
@@ -128,21 +145,6 @@
     <label class="stepper">proxy edge px <span><button data-step="p-proxy" data-d="-200">−</button><span id="p-proxy" data-min="400" data-max="3000">1400</span><button data-step="p-proxy" data-d="200">+</button></span></label>
     <div class="section">GPU</div>
     <div id="gpuinfo" class="dim small">—</div>
-  </div>
-  <div id="brushpanel" class="panel" hidden>
-    <div class="section">Brush</div>
-    <label>size <span class="val" id="br-size">100</span></label>
-    <input type="range" id="br-size-in" min="0" max="100" value="50" title="[ / ]">
-    <label>hardness <span class="val" id="br-hard">0.50</span></label>
-    <input type="range" id="br-hard-in" min="0" max="95" value="50">
-    <div class="section" id="br-target-sec" hidden>Target</div>
-    <label id="br-target-row" hidden>paint into <select id="br-target"><option value="fused">LAP result</option><option value="dmap">DFR result</option></select></label>
-    <div class="section">Source</div>
-    <div class="dim small">Pick the frame to paint from in the filmstrip, with ←/→ or the slider. It is decoded and re-aligned on demand (~1 s at 45 MP).</div>
-    <div class="section">History</div>
-    <div class="row"><button id="undo" title="ctrl+z" disabled>undo</button><button id="redo" title="ctrl+shift+z" disabled>redo</button><span id="hist" class="dim small"></span></div>
-    <div class="section">How to</div>
-    <div class="dim small">Left pane: source · right pane: result. Drag on either pane to paint the source into the result; shift+drag pans; wheel zooms; double-click fits / 100 %.</div>
   </div>
   <div id="savepanel" class="panel" hidden>
     <div class="section">Image</div>

@@ -71,7 +71,7 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 /* the movable context groups and the compare group flow as individual items so the columns wrap cleanly */
 #vhead #view-ctx, #vhead #cmp-ctx, #vhead #ctx-compare { display: contents; }
 /* every chip in the header is 34px tall on the same glass */
-#vhead .seg, #vhead .tog, #vhead select, #vhead .stepper, #vhead #src-status:not(:empty) { height: 34px; background: var(--glass); border: 1px solid var(--glass-border); border-radius: 8px; backdrop-filter: blur(4px); }
+#vhead .seg, #vhead .tog, #vhead select, #vhead .stepper { height: 34px; background: var(--glass); border: 1px solid var(--glass-border); border-radius: 8px; backdrop-filter: blur(4px); }
 #vhead .seg button { background: transparent; padding: 0 14px; font-size: var(--fs-lg); border-right-color: var(--glass-border); }
 #vhead .seg button.on { background: var(--accent); }
 #vhead .seg.sub button { padding: 0 11px; }
@@ -79,15 +79,15 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #vhead select { padding: 0 8px; }
 #vhead .stepper { gap: 0; } #vhead .stepper button { height: 100%; padding: 0 11px; background: transparent; border: 0; }
 #vhead #peakthr { min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
-#vhead #src-status { display: inline-flex; align-items: center; padding: 0 12px; color: var(--text); }
+/* the Retouch button sits at the right end of the right column, whatever else is in it */
+#vhead #rtseg { margin-left: auto; }
 /* the left column: segmented controls stack their buttons, context groups stack their chips */
 #vhead #vh-left .sep { display: none; }
 #vhead #vh-left .seg { flex-direction: column; height: auto; }
 #vhead #vh-left .seg button { height: 34px; text-align: left; border-right: 0; border-bottom: 1px solid var(--glass-border); }
 #vhead #vh-left .seg button:not(:has(~ button:not([hidden]))) { border-bottom: 0; }
 #vhead #vh-left .seg.sub { margin: 0; } #vhead #vh-left .seg.sub button { padding: 0 14px; }
-#vhead #vh-left #src-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; line-height: 32px; }
-#vhead #vh-left #ctx-source, #vhead #vh-left #ctx-depth, #vhead #vh-left #ctx-retouch { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+#vhead #vh-left #ctx-source, #vhead #vh-left #ctx-depth { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
 #vhead #vh-left .stepper { justify-content: space-between; } #vhead #vh-left .stepper > span { flex: 1; }
 .vs { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 56px; height: 34px; border-radius: 8px; border: 2px solid var(--pop); background: var(--glass); backdrop-filter: blur(4px); color: var(--pop); font-weight: 700; font-size: var(--fs-lg); cursor: pointer; user-select: none; }
 .vs input { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
@@ -102,7 +102,10 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
    above, and the first one flush with the top of the panel. */
 .panel { width: 288px; flex: none; overflow-y: auto; background: var(--panel); border-left: 1px solid var(--border); padding: 12px 12px; display: flex; flex-direction: column; gap: 2px; }
 .panel .section { font-size: var(--fs-sm); font-weight: 600; color: var(--dim); margin: 16px 0 4px; }
-.panel .section:first-child { margin-top: 0; }
+.panel > .section:first-child, #brush > .section:first-child, #brush[hidden] + .section { margin-top: 0; }
+/* the brush block joins the panel's column while retouch mode is on */
+#brush { display: flex; flex-direction: column; gap: 2px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+#brush[hidden] { display: none; }
 .panel label { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 8px; min-height: 26px; }
 .panel label > input, .panel label > select, .panel label > span { justify-self: end; order: 1; }
 .panel label > input[type=checkbox] { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
@@ -138,7 +141,7 @@ body.log-collapsed #toasts { bottom: 46px; }
 .tog input { margin: 0; accent-color: var(--accent); }
 .ctx { display: inline-flex; align-items: center; gap: 8px; }
 #peakstep { display: inline-flex; align-items: center; }
-/* retouch: two panes */
+/* compare side by side / retouch: two panes */
 #vwrap.split { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
 #vwrap.split canvas { position: relative; inset: auto; width: 100%; height: 100%; cursor: grab; }
 #vwrap.paint canvas { cursor: none; }
