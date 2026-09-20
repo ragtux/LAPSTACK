@@ -332,7 +332,7 @@ const OUTPUTS = [
 ];
 const SV = { sel: new Set(['lap']), exif: null, exifFor: null, exporting: false, cancel: false };
 const SK = 'lapstack.save';
-const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'an-edge', 'an-fps', 'an-loop'];
+const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'an-edge', 'an-fps', 'an-loop', 'cc-on', 'cc-name'];
 function saveSaveSettings() {
   const o = { sel: [...SV.sel], 'an-step': Number($('an-step').textContent) };
   for (const id of svIds) { const el = $(id); o[id] = el.type === 'checkbox' ? el.checked : el.value; }
@@ -493,7 +493,7 @@ async function winnerBitmap() {
   for (let i = 0; i < w * h; i++) { const g = (d[i] - lo) * k; px[4 * i] = g; px[4 * i + 1] = g; px[4 * i + 2] = g; px[4 * i + 3] = 255; }
   const bmp = await createImageBitmap(new ImageData(px, w, h)); st.depthBmp.set('winner', bmp); return bmp;
 }
-for (const id of svIds) $(id).addEventListener(id === 'sv-quality' || id === 'sv-name' ? 'input' : 'change', () => { $('sv-qval').textContent = $('sv-quality').value; saveSaveSettings(); renderSave(); });
+for (const id of svIds) $(id).addEventListener(id === 'sv-quality' || id === 'sv-name' || id === 'cc-name' ? 'input' : 'change', () => { $('sv-qval').textContent = $('sv-quality').value; saveSaveSettings(); renderSave(); });
 document.querySelectorAll('#savecard [data-step]').forEach((b) => b.addEventListener('click', () => { setStep('an-step', Number($('an-step').textContent) + Number(b.dataset.d)); saveSaveSettings(); renderSave(); }));
 $('sv-all').addEventListener('change', (e) => { for (const o of OUTPUTS) if (o.avail()) { if (e.target.checked) SV.sel.add(o.id); else SV.sel.delete(o.id); } saveSaveSettings(); renderSave(); });
 function downloadBlob(blob, name) {
@@ -538,12 +538,42 @@ async function drawAnimFrame(id, i, c, ow, oh) {
   else { const bmp = await createImageBitmap(img); c.drawImage(bmp, 0, 0, ow, oh); bmp.close(); }
   if (id === 'anim-peak') { const f = st.frames[i]; if (f && f.peak) c.drawImage(await peakBitmap(f), 0, 0, ow, oh); }
 }
+// content credentials: a self-signed certificate per signer name, kept in this browser
+const CC_KEY = 'lapstack.cc';
+async function credentials() {
+  const name = ($('cc-name').value || '').trim() || 'lapstack user';
+  let cc = null; try { cc = JSON.parse(localStorage.getItem(CC_KEY)); } catch {}
+  if (!cc || cc.name !== name || !cc.cert || !cc.key) {
+    const r = await call({ type: 'make_cert', name });
+    cc = { name, cert: r.cert, key: r.key };
+    try { localStorage.setItem(CC_KEY, JSON.stringify(cc)); } catch {}
+    log(`[lapstack] content credentials: new self-signed certificate for "${name}"`);
+  }
+  return cc;
+}
+const CC_SIGN_MAX = 512 * 1024 * 1024;   // the whole file passes through wasm memory to be signed
+async function signBlob(blob, o, name, mime) {
+  if (blob.size > CC_SIGN_MAX) { log(`[lapstack] ${name}: too large to sign in the browser (${fmtMB(blob.size)}), saved without content credentials`); return blob; }
+  const cc = await credentials();
+  const p = readParams();
+  const manifest = {
+    claim_generator_info: [{ name: 'lapstack', version: '0.1.0' }],
+    title: name,
+    assertions: [
+      { label: 'c2pa.actions', data: { actions: [{ action: 'c2pa.created', digitalSourceType: 'http://cv.iptc.org/newscodes/digitalsourcetype/compositeCapture', softwareAgent: { name: 'lapstack', version: '0.1.0' } }] } },
+      { label: 'org.lapstack.stack', data: { output: o.token, frames: st.files.map((f) => f.name), align: p.align, levels: p.levels, energy_radius: p.energy_radius, top: p.top, top_radius: p.top_radius, use_chroma: p.use_chroma, retouch_strokes: R.undo } },
+    ],
+  };
+  const bytes = await blob.arrayBuffer();
+  const r = await call({ type: 'sign', bytes, mime, manifest: JSON.stringify(manifest), cert: cc.cert, key: cc.key }, [bytes]);
+  return new Blob([r.bytes], { type: mime });
+}
 async function saveSelected() {
   if (SV.exporting || !st.result || st.running) return;
   const items = OUTPUTS.filter((o) => o.avail() && SV.sel.has(o.id));
   if (!items.length) return;
   SV.exporting = true; SV.cancel = false; updateSaveButtons(); $('run').disabled = true; $('clear').disabled = true;
-  const now = new Date(), fmt = $('sv-format').value, q = Number($('sv-quality').value);
+  const now = new Date(), fmt = $('sv-format').value, q = Number($('sv-quality').value), sign = $('cc-on').checked;
   const setState = (o, t) => { const row = $('sv-files').querySelector(`[data-id="${o.id}"] .state`); if (row) row.textContent = t; };
   const prog = (t, done, total) => { $('sv-progress').textContent = t; setProgress(t, done, total); };
   let status = 'saved';
@@ -561,6 +591,7 @@ async function saveSelected() {
         const r = await call({ type: 'save', kind: o.kind, format: f, quality: q });
         mime = f === 'jpeg' ? 'image/jpeg' : 'image/png'; blob = new Blob([r.bytes], { type: mime });
       }
+      if (sign) { prog(`signing ${name}`, 0, 0); setState(o, 'signing…'); blob = await signBlob(blob, o, name, mime); }
       downloadBlob(blob, name); setState(o, `saved · ${fmtMB(blob.size)}`);
     }
   } catch (e) {

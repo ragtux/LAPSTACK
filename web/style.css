@@ -242,5 +242,6 @@ body.step-save #toasts { bottom: 16px; }
 .svf .desc { font-size: var(--fs-xs); color: var(--dim); margin-top: 2px; }
 .svf .state { font-size: var(--fs-xs); color: var(--dim); white-space: nowrap; }
 #an-info.warn { color: #e88; }
+#savecard a { color: var(--accent); }
 #sv-actions { margin-top: 18px; }
 #sv-progress { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

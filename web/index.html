@@ -179,6 +179,10 @@
       <label>speed <select id="an-fps"><option value="5">5 fps</option><option value="10" selected>10 fps</option><option value="15">15 fps</option><option value="25">25 fps</option></select></label>
       <label>loop <select id="an-loop"><option value="pingpong">back and forth</option><option value="forward">forward</option></select></label>
       <div class="dim small" id="an-info">—</div>
+      <div class="section">Content credentials</div>
+      <label class="check"><input type="checkbox" id="cc-on"> <span>attach content credentials (C2PA)</span></label>
+      <label>signed as <input type="text" id="cc-name" placeholder="your name"></label>
+      <div class="dim small">A signed C2PA manifest is embedded in each saved file (<a href="https://contentcredentials.org/" target="_blank" rel="noopener">contentcredentials.org</a>). The certificate is self-signed and made in this browser: verifiers show the manifest, its assertions and the content hash as valid, and the signer as unknown. The key never leaves this browser.</div>
       <div class="row" id="sv-actions"><button id="sv-go" class="accent">Save selected</button><button id="sv-cancel" hidden>Cancel</button><span id="sv-progress" class="dim small"></span></div>
     </div>
   </div>

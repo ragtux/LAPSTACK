@@ -1,8 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/lapstack-core", "crates/lapstack-cli", "crates/lapstack-web"]
-# lapstack-web only targets wasm32 (see web/build.sh); keep plain `cargo build`
-# working anywhere by defaulting to core + cli.
+members = ["crates/lapstack-core", "crates/lapstack-cli", "crates/lapstack-web", "crates/lapstack-cc"]
+# lapstack-web and lapstack-cc only target wasm32 (see web/build.sh); keep plain
+# `cargo build` working anywhere by defaulting to core + cli.
 default-members = ["crates/lapstack-core", "crates/lapstack-cli"]
 
 [workspace.package]

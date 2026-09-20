@@ -162,7 +162,7 @@ browser memory stays at a couple of frames regardless of stack size. Only the
 residual rule and PNG encoding run on the CPU side (lapstack-core in WASM).
 
 ```
-./web/build.sh          # wasm32 build + wasm-bindgen glue into web/pkg
+./web/build.sh          # wasm32 build + wasm-bindgen glue into web/pkg (+ web/pkg-cc)
 ./web/serve.sh          # http://localhost:8765/  (WebGPU needs a secure context; localhost is one)
 ```
 
@@ -199,7 +199,7 @@ Chrome/Edge on Windows/macOS have WebGPU on by default; Firefox needs
 The UI follows the workflow as two steps in the top bar:
 **1 Stack** (add frames, set parameters, run, inspect and retouch the
 result) and **2 Save** (a file list of everything the run can produce, file
-names, animations). Keys 1/2 switch steps.
+names, animations, content credentials). Keys 1/2 switch steps.
 
 *Stack* is the workbench: a filmstrip (thumbnails arrive as frames are
 added, with each frame's registration once aligned), a parameter panel (all
@@ -242,6 +242,16 @@ the EXIF date/time of the first frame (read from the JPEG APP1 / TIFF /
 PNG eXIf structure), a date/time found in the first frame's name, the
 current date/time, a custom text, and the layer name (`lap`, `dfr`, `depth`,
 `depth16`, `winner`, `depth-slice`, `infocus`, `peaking`).
+**Content credentials** ([C2PA](https://contentcredentials.org/)) can be
+attached to every saved file: a self-signed ES256 certificate is generated
+in the browser for the *signed as* name (kept in localStorage, the key never
+leaves the browser) and a manifest with a `c2pa.created` action
+(`compositeCapture`) and an `org.lapstack.stack` assertion (frames, fusion
+parameters, retouch strokes) is embedded and signed. Verifiers show the
+manifest, assertions and content hash as valid and the signer as unknown
+(a self-signed certificate is on no trust list). The c2pa crate is large, so
+it is a second wasm module (`crates/lapstack-cc` → `web/pkg-cc`) that the
+worker loads on the first signed save.
 
 **Depth map**: every run ends with the **depth from focus** pass — the
 pipeline of `crates/lapstack-core/src/depth.rs` as WGSL kernels

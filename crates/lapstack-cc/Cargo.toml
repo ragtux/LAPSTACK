@@ -1,0 +1,18 @@
+[package]
+name = "lapstack-cc"
+version.workspace = true
+edition.workspace = true
+description = "lapstack in the browser: content credentials (C2PA manifests, self-signed in the browser); a separate wasm module the worker loads on first use"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+c2pa = { version = "0.90", default-features = false, features = ["rust_native_crypto"] }
+x509-cert = { version = "0.2", default-features = false, features = ["builder", "pem", "std"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "pkcs8", "std"] }
+const-oid = { version = "0.9", features = ["db"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+wasm-bindgen = "0.2.128"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }

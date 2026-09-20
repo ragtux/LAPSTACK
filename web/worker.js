@@ -13,6 +13,14 @@ async function loadWasm() {
   const mod = await import(`./pkg/lapstack_web.js?t=${V}`);
   ({ default: init, create_engine, thumbnail, GifWriter = null } = mod);
 }
+// content credentials live in their own module (pkg-cc, ~3 MB): loaded on the first save that asks for them
+let cc = null;
+async function loadCc() {
+  if (cc) return cc;
+  const mod = await import(`./pkg-cc/lapstack_cc.js?t=${V}`);
+  await mod.default({ module_or_path: `./pkg-cc/lapstack_cc_bg.wasm?t=${V}` });
+  cc = mod; return cc;
+}
 
 let engine = null;
 let gifw = null;          // the animated GIF being written (gif_begin … gif_end), see gif.rs
@@ -82,8 +90,8 @@ self.onmessage = (ev) => {
 
 // ---------- remote calls (Save step) ----------
 // The page composes export frames itself and only needs the engine for what it cannot
-// do: full-resolution aligned frames (plain or In focus), GIF quantisation + LZW, and
-// image encoding.
+// do: full-resolution aligned frames (plain or In focus), GIF quantisation + LZW, image
+// encoding, and content credentials.
 async function handleCall(m) {
   if (m.type === 'save') {
     const bytes = engine.encode(m.kind, m.format || 'png', m.quality || 90);
@@ -114,6 +122,12 @@ async function handleCall(m) {
   } else if (m.type === 'gif_abort') {
     if (gifw) { gifw.free(); gifw = null; }
     post({ type: 'gif', rid: m.rid });
+  } else if (m.type === 'make_cert') {
+    const [cert, key] = (await loadCc()).make_cert(m.name, Date.now() / 1000);
+    post({ type: 'cert', rid: m.rid, cert, key });
+  } else if (m.type === 'sign') {
+    const bytes = (await loadCc()).sign_image(new Uint8Array(m.bytes), m.mime, m.manifest, m.cert, m.key);
+    post({ type: 'signed', rid: m.rid, bytes: bytes.buffer }, [bytes.buffer]);
   } else throw new Error('unknown call ' + m.type);
 }
 

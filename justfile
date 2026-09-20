@@ -106,4 +106,4 @@ test-frames dir:
 # Remove build outputs
 clean:
     cargo clean
-    rm -rf web/pkg
+    rm -rf web/pkg web/pkg-cc
