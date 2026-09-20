@@ -42,6 +42,13 @@ async function thumbLoop() {
 }
 
 function post(msg, transfer) { self.postMessage(msg, transfer || []); }
+// Start reading a frame's bytes. A File read only progresses while this thread's
+// event loop is idle, which it is while a push awaits the GPU, so the next frame's
+// read is started before the current push and is usually complete by the time
+// it is needed (the fold spent a third of its time reading otherwise). The early
+// catch keeps an abandoned read (cancel) from surfacing as an unhandled rejection;
+// awaiting the promise still throws.
+function readAhead(f) { const p = f.arrayBuffer(); p.catch(() => {}); return p; }
 
 // Engine calls must not overlap (wasm-bindgen rejects re-entrant use of the
 // engine while an async call is in flight), so everything that touches it
@@ -95,11 +102,13 @@ async function handle(m) {
       engine.reset();
       const params = JSON.stringify(m.params);
       const t0 = performance.now();
+      let next = m.files.length ? readAhead(m.files[0]) : null;
       for (let i = 0; i < m.files.length; i++) {
         if (cancelled) break;
         const f = m.files[i];
         post({ type: 'stage', text: `decoding ${f.name}`, done: i, total: m.files.length });
-        const bytes = new Uint8Array(await f.arrayBuffer());
+        const bytes = new Uint8Array(await next);
+        next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
         const r = await engine.push(bytes, params);
         const proxy = r.proxy, peak = r.peak;
         post({ type: 'frame', index: r.index, name: f.name, w: r.w, h: r.h, bits: r.bits,
@@ -117,10 +126,12 @@ async function handle(m) {
       // optional second pass: render a second image from the depth map (frames are decoded again)
       if (m.params.render_dmap) {
         const t1 = performance.now();
+        let next = readAhead(m.files[0]);
         for (let i = 0; i < m.files.length; i++) {
           if (cancelled) break;
           post({ type: 'stage', text: `rendering from depth map: ${m.files[i].name}`, done: i, total: m.files.length });
-          const bytes = new Uint8Array(await m.files[i].arrayBuffer());
+          const bytes = new Uint8Array(await next);
+          next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
           await engine.render_push(i, bytes);
         }
         if (cancelled) { post({ type: 'render-cancelled' }); running = false; return; }
