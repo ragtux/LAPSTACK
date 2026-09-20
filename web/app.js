@@ -538,7 +538,7 @@ async function onSource(m) {
   cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(m.rgba), m.w, m.h), 0, 0);
   srcPut(m.focus ? `focus:${m.index}` : m.index, cv);   // keep it even if the user has scrubbed on: that is what the cache is for
   if (srcCache.size === 1) log(`[lapstack] full-res source cache: up to ${srcLimit()} frame(s), ${(m.w * m.h * 4 / 1e6).toFixed(0)} MB each`);
-  R.wasmIndex = m.index;        // the worker's 16-bit copy is this frame now
+  if (!m.focus) R.wasmIndex = m.index;   // the worker's 16-bit copy is this frame now (In focus is rendered on the GPU without one)
   ensureSource();               // the other rendering of this frame, or the frame scrubbed to meanwhile
   updateTabs(); draw();
 }

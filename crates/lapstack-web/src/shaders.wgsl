@@ -679,3 +679,28 @@ fn dmap_norm(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroup
     let d = 1.0 / max(o[i], 1e-6);
     b[i] = clamp(b[i] * d, 0.0, 1.0); b[n + i] = clamp(b[n + i] * d, 0.0, 1.0); b[2u * n + i] = clamp(b[2u * n + i] * d, 0.0, 1.0);
 }
+
+// ---- In focus (twin of the formula in lib.rs source_focus): the warped frame
+// `a` (3 planes) dimmed by how far the full-res depth `wt` (frame index per
+// pixel) puts each pixel from frame off_in. b = row sums of the frame's luma
+// over ±klen px (box_h); this kernel finishes the box mean with the column
+// pass (border-clipped, like box_v) and writes packed RGBA8 to `o`.
+// f0 = dim, f1 = w0, f2 = w1 (frames), f3 = tex; the soft clip caps at 0.4.
+@compute @workgroup_size(16, 16)
+fn focus_out(@builtin(global_invocation_id) g: vec3<u32>) {
+    let x = g.x; let y = g.y;
+    if (x >= p.w || y >= p.h) { return; }
+    let n = p.w * p.h; let i = y * p.w + x;
+    let r = i32(p.klen); let y0 = max(i32(y) - r, 0); let y1 = min(i32(y) + r + 1, i32(p.h));
+    var s = 0.0;
+    for (var j = y0; j < y1; j++) { s += b[u32(j) * p.w + x]; }
+    let cx = f32(min(i32(x) + r + 1, i32(p.w)) - max(i32(x) - r, 0));
+    let mean = s / (cx * f32(y1 - y0));
+    let rgb = vec3<f32>(a[i], a[n + i], a[2u * n + i]);
+    let luma = dot(rgb, vec3<f32>(0.299, 0.587, 0.114));
+    let wgt = clamp((p.f2 - abs(wt[i] - f32(p.off_in))) / max(p.f2 - p.f1, 1e-3), 0.0, 1.0);
+    let gain = wgt + (1.0 - wgt) * p.f0;
+    let add = (1.0 - wgt) * 0.4 * (1.0 - exp(-p.f3 * abs(luma - mean) / 0.4));
+    let v = vec3<u32>(clamp(rgb * gain + add, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0 + 0.5);
+    o[i] = bitcast<f32>(v.x | (v.y << 8u) | (v.z << 16u) | (255u << 24u));
+}

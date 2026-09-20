@@ -128,14 +128,18 @@ async function handle(m) {
       running = false;
     } else if (m.type === 'load_source') {
       // m.focus = {dim, w0, w1, tex}: the In focus rendering of the frame instead of the
-      // plain frame; the decode is skipped when the engine already holds that frame.
+      // plain frame. The decode + warp is skipped when the engine already holds that
+      // frame on the GPU; the plain frame also needs the CPU readback (the retouch
+      // brush source).
       if (running) return;
+      const held = engine.source_gpu_index() === m.index;
       let r = null;
-      if (!(m.focus && engine.source_index() === m.index)) {
+      if (!held) {
         const bytes = new Uint8Array(await m.file.arrayBuffer());
-        r = await engine.load_source(m.index, bytes);
+        r = await engine.load_source(m.index, bytes, !m.focus);
       }
-      if (m.focus) r = engine.source_focus(m.focus.dim, m.focus.w0, m.focus.w1, m.focus.tex);
+      if (m.focus) r = await engine.source_focus(m.focus.dim, m.focus.w0, m.focus.w1, m.focus.tex);
+      else if (held) r = await engine.source_readback();
       const rgba = r.rgba;
       post({ type: 'source', index: r.index, w: r.w, h: r.h, rgba: rgba.buffer, gen: m.gen, focus: !!m.focus }, [rgba.buffer]);
     } else if (m.type === 'stroke' || m.type === 'undo' || m.type === 'redo') {

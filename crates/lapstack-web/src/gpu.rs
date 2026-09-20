@@ -26,7 +26,7 @@ pub struct P {
 
 const SLOT: u64 = 256;
 const SLOTS: usize = 2048;
-const KERNELS: [&str; 47] = [
+const KERNELS: [&str; 48] = [
     "red_h", "red_v", "exp_h", "exp_v", "energy", "win_h", "win_v", "sel", "clamp01", "copy_plane",
     "warp", "cost", "to_rgba8", "to_rgb16", "proxy", "luma_u16", "luma_f32", "down1",
     // depth from focus (depth.rs)
@@ -34,8 +34,8 @@ const KERNELS: [&str; 47] = [
     "peak_init", "peak_push", "peak_finish", "median3", "scale_clamp", "edge_w", "fgs_rows", "fgs_cols",
     "cg_matvec", "cg_resid", "cg_zp", "dot_partial", "reduce_scal", "cg_axpy_u", "cg_update_rz",
     "cg_update_p", "robust_w", "up_apply",
-    // depth-map rendering
-    "dmap_acc", "dmap_norm",
+    // depth-map rendering, In focus
+    "dmap_acc", "dmap_norm", "focus_out",
 ];
 
 pub struct Gpu {

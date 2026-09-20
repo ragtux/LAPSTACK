@@ -161,6 +161,8 @@ struct Run {
     dmap_rgb16: Option<Vec<u16>>,
     /// Retouch: the currently loaded aligned source frame (index, RGB u16).
     src_rgb16: Option<(usize, Vec<u16>)>,
+    /// The source frame currently warped into `cur[0]` (`load_source`); In focus renders from it.
+    src_gpu: Option<usize>,
     undo: Vec<Patch>,
     redo: Vec<Patch>,
     undo_bytes: usize,
@@ -543,6 +545,7 @@ impl Engine {
             p.f3 = inv[1][1] as f32;
         }
         rec.dispatch("warp", [None, None, Some(&run.cur[0]), None, Some(&run.aff), Some(&run.up)], p, grid2(w, h));
+        run.src_gpu = None;
         rec.dispatch(
             "dmap_acc",
             [Some(&run.cur[0]), Some(&run.acc[0]), Some(&run.best[0]), None, Some(&run.en2), None],
@@ -588,10 +591,13 @@ impl Engine {
         Ok(o.into())
     }
 
-    /// Retouch: decode frame `index` again, warp it with the registration found
-    /// during the run, and keep it as the brush source. Returns
-    /// {index, w, h, rgba: Uint8Array} (full-resolution RGBA8 for display).
-    pub async fn load_source(&mut self, index: usize, bytes: &[u8]) -> Result<JsValue, JsValue> {
+    /// Decode frame `index` again and warp it with the registration found
+    /// during the run into `cur[0]`, the GPU-resident source frame that
+    /// `source_focus` renders from. With `readback` it is also copied to the
+    /// CPU as the retouch brush source and returned for display, {index, w, h,
+    /// rgba: Uint8Array} (full-resolution RGBA8); without, the reply is just
+    /// {index, w, h} and the two full-frame readbacks are skipped.
+    pub async fn load_source(&mut self, index: usize, bytes: &[u8], readback: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
         let frame = decode::decode(bytes).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
@@ -603,7 +609,7 @@ impl Engine {
             return Err(JsValue::from_str("frame size differs from the run"));
         }
         let sim = *run.sims.get(index).ok_or_else(|| JsValue::from_str("unknown frame index"))?;
-        let (w, h, n) = (run.w, run.h, run.w * run.h);
+        let (w, h) = (run.w, run.h);
         g.queue.write_buffer(&run.up, 0, bytemuck::cast_slice(&frame.rgb));
         drop(frame);
         let identity = !run.params.align || index == 0;
@@ -618,7 +624,30 @@ impl Engine {
         }
         let mut rec = g.rec();
         rec.dispatch("warp", [None, None, Some(&run.cur[0]), None, Some(&run.aff), Some(&run.up)], p, grid2(w, h));
+        rec.submit();
+        run.src_gpu = Some(index);
+        if !readback {
+            log(&format!("[lapstack] source {index} warped ({:.0} ms)", now() - t0));
+            let o = js_sys::Object::new();
+            set(&o, "index", index as u32);
+            set(&o, "w", w as u32);
+            set(&o, "h", h as u32);
+            return Ok(o.into());
+        }
+        let o = self.source_readback().await?;
+        log(&format!("[lapstack] retouch source {index} loaded ({:.0} ms)", now() - t0));
+        Ok(o)
+    }
+
+    /// Retouch: read the GPU-resident source frame back as the 16-bit brush
+    /// source, and return it for display: {index, w, h, rgba: Uint8Array}.
+    pub async fn source_readback(&mut self) -> Result<JsValue, JsValue> {
+        let g = &self.gpu;
+        let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
+        let index = run.src_gpu.ok_or_else(|| JsValue::from_str("no source loaded"))?;
+        let (w, h, n) = (run.w, run.h, run.w * run.h);
         let pw = P { w: w as u32, h: h as u32, ..Default::default() };
+        let mut rec = g.rec();
         rec.dispatch("to_rgba8", [Some(&run.cur[0]), None, Some(&run.tmp_full), None, None, None], pw, grid1(n));
         let rgb16 = g.buffer("src rgb16", ((3 * n).div_ceil(2) * 4) as u64);
         rec.dispatch("to_rgb16", [Some(&run.cur[0]), None, Some(&rgb16), None, None, None], pw, grid1((3 * n).div_ceil(2)));
@@ -628,7 +657,6 @@ impl Engine {
         let mut v16: Vec<u16> = bytemuck::cast_slice(&r16).to_vec();
         v16.truncate(3 * n);
         run.src_rgb16 = Some((index, v16));
-        log(&format!("[lapstack] retouch source {index} loaded ({:.0} ms)", now() - t0));
         let o = js_sys::Object::new();
         set(&o, "index", index as u32);
         set(&o, "w", w as u32);
@@ -637,84 +665,51 @@ impl Engine {
         Ok(o.into())
     }
 
-    /// Index of the source frame currently loaded by `load_source`, or -1.
+    /// Index of the source frame held on the CPU as the retouch brush source, or -1.
     pub fn source_index(&self) -> i32 {
         self.run.as_ref().and_then(|r| r.src_rgb16.as_ref()).map_or(-1, |(i, _)| *i as i32)
     }
 
-    /// The loaded source frame rendered as the "In focus" layer: every pixel is
-    /// darkened by how far, in frames, the full-resolution depth map puts it from
-    /// that frame — weight w = clamp((w1 − |depth − index|) / (w1 − w0), 0, 1),
-    /// full inside ±w0 frames, none beyond ±w1 — and the out-of-focus part keeps
-    /// its outlines: out = rgb·(w + (1 − w)·dim) + (1 − w)·soft(tex·|luma − box(luma)|),
+    /// Index of the source frame currently warped into `cur[0]` on the GPU, or -1.
+    pub fn source_gpu_index(&self) -> i32 {
+        self.run.as_ref().and_then(|r| r.src_gpu).map_or(-1, |i| i as i32)
+    }
+
+    /// The GPU-resident source frame rendered as the "In focus" layer: every
+    /// pixel is darkened by how far, in frames, the full-resolution depth map
+    /// (`en2`, a frame index per pixel) puts it from that frame — weight
+    /// w = clamp((w1 − |depth − index|) / (w1 − w0), 0, 1), full inside ±w0
+    /// frames, none beyond ±w1 — and the out-of-focus part keeps its outlines:
+    /// out = rgb·(w + (1 − w)·dim) + (1 − w)·soft(tex·|luma − box(luma)|),
     /// the box being (2r+1)² with r = w/1000 px and soft(t) = cap·(1 − e^(−t/cap)),
-    /// cap = 0.4, so hard edges stay light grey. Returns {index, w, h, rgba}.
-    pub fn source_focus(&self, dim: f32, w0: f32, w1: f32, tex: f32) -> Result<JsValue, JsValue> {
+    /// cap = 0.4, so hard edges stay light grey. Three kernels (luma, its row
+    /// sums, the `focus_out` combine) and one RGBA8 readback; `en` and
+    /// `tmp_full` are scratch. Returns {index, w, h, rgba}.
+    pub async fn source_focus(&self, dim: f32, w0: f32, w1: f32, tex: f32) -> Result<JsValue, JsValue> {
+        let t0 = now();
+        let g = &self.gpu;
         let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no run"))?;
-        let (index, src) = run.src_rgb16.as_ref().ok_or_else(|| JsValue::from_str("no source loaded"))?;
-        let depth = run.depth_full.as_ref().ok_or_else(|| JsValue::from_str("no depth-from-focus result"))?;
+        let index = run.src_gpu.ok_or_else(|| JsValue::from_str("no source loaded"))?;
+        if run.fused_rgb16.is_none() {
+            return Err(JsValue::from_str("finish the run first"));
+        }
         let (w, h, n) = (run.w, run.h, run.w * run.h);
-        let k = (run.count.max(2) - 1) as f32 / 65535.0;
-        let span = (w1 - w0).max(1e-3);
-        let ix = *index as f32;
-        let r = (w / 1000).max(1);
-        // luma as u8, box-blurred horizontally into `hb`; the vertical pass runs
-        // inside the output loop with a sliding column sum, so no third plane
-        let luma: Vec<u8> = (0..n)
-            .map(|i| ((0.299 * src[3 * i] as f32 + 0.587 * src[3 * i + 1] as f32 + 0.114 * src[3 * i + 2] as f32) / 257.0 + 0.5) as u8)
-            .collect();
-        let mut hb = vec![0u8; n];
-        for y in 0..h {
-            let row = &luma[y * w..(y + 1) * w];
-            let mut sum: u32 = row[..(r + 1).min(w)].iter().map(|&v| v as u32).sum();
-            for x in 0..w {
-                let lo = x.saturating_sub(r);
-                let hi = (x + r).min(w - 1);
-                hb[y * w + x] = ((sum + (hi - lo + 1) as u32 / 2) / (hi - lo + 1) as u32) as u8;
-                if x + r + 1 < w {
-                    sum += row[x + r + 1] as u32;
-                }
-                if x >= r {
-                    sum -= row[x - r] as u32;
-                }
-            }
-        }
-        let mut col = vec![0u32; w];
-        for y in 0..(r + 1).min(h) {
-            for x in 0..w {
-                col[x] += hb[y * w + x] as u32;
-            }
-        }
-        let mut rgba = vec![255u8; n * 4];
-        for y in 0..h {
-            let lo = y.saturating_sub(r);
-            let hi = (y + r).min(h - 1);
-            let cnt = (hi - lo + 1) as f32;
-            for x in 0..w {
-                let i = y * w + x;
-                let wgt = ((w1 - (depth[i] as f32 * k - ix).abs()) / span).clamp(0.0, 1.0);
-                let hp = (luma[i] as f32 - col[x] as f32 / cnt).abs() / 255.0;
-                let gain = (wgt + (1.0 - wgt) * dim) / 257.0;
-                let add = (1.0 - wgt) * 0.4 * (1.0 - (-tex * hp / 0.4).exp()) * 255.0;
-                for c in 0..3 {
-                    rgba[4 * i + c] = (src[3 * i + c] as f32 * gain + add + 0.5).min(255.0) as u8;
-                }
-            }
-            if y + r + 1 < h {
-                let nr = &hb[(y + r + 1) * w..(y + r + 2) * w];
-                for x in 0..w {
-                    col[x] += nr[x] as u32;
-                }
-            }
-            if y >= r {
-                let orow = &hb[(y - r) * w..(y - r + 1) * w];
-                for x in 0..w {
-                    col[x] -= orow[x] as u32;
-                }
-            }
-        }
+        let r = (w / 1000).max(1) as u32;
+        let pw = P { w: w as u32, h: h as u32, ..Default::default() };
+        let mut rec = g.rec();
+        rec.dispatch("luma_f32", [Some(&run.cur[0]), None, Some(&run.en), None, None, None], pw, grid1(n));
+        rec.dispatch("box_h", [Some(&run.en), Some(&run.tmp_full), None, None, None, None], P { klen: r, ..pw }, grid2(w, h));
+        rec.dispatch(
+            "focus_out",
+            [Some(&run.cur[0]), Some(&run.tmp_full), Some(&run.en), None, Some(&run.en2), None],
+            P { klen: r, off_in: index as u32, f0: dim, f1: w0, f2: w1, f3: tex, ..pw },
+            grid2(w, h),
+        );
+        rec.submit();
+        let rgba = g.read(&run.en, (n * 4) as u64).await.map_err(|e| JsValue::from_str(&e))?;
+        log(&format!("[lapstack] In focus {index} rendered ({:.0} ms)", now() - t0));
         let o = js_sys::Object::new();
-        set(&o, "index", *index as u32);
+        set(&o, "index", index as u32);
         set(&o, "w", w as u32);
         set(&o, "h", h as u32);
         set(&o, "rgba", js_sys::Uint8Array::from(&rgba[..]));
@@ -991,6 +986,7 @@ impl Engine {
             render_count: 0,
             dmap_rgb16: None,
             src_rgb16: None,
+            src_gpu: None,
             undo: Vec::new(),
             redo: Vec::new(),
             undo_bytes: 0,
