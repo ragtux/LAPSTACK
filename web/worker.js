@@ -65,14 +65,28 @@ function readAhead(f) { const p = f.arrayBuffer(); p.catch(() => {}); return p; 
 // runs through one promise chain; only cancel/clear are handled immediately.
 let chain = Promise.resolve();
 const enqueue = (fn) => { chain = chain.then(fn).catch((e) => post({ type: 'error', text: (e && e.message) ? e.message : String(e) })); };
+// Requests carrying an `rid` are remote calls from the page (see call() there): the reply
+// echoes the rid, and a failure answers that call instead of surfacing as a run error.
+const rpc = (m, fn) => enqueue(async () => {
+  try { await fn(); } catch (e) { post({ type: 'rpc-error', rid: m.rid, text: (e && e.message) ? e.message : String(e) }); }
+});
 
 self.onmessage = (ev) => {
   const m = ev.data;
   if (m.type === 'cancel') { cancelled = true; return; }
   if (m.type === 'clear') { thumbGen++; thumbJob = null; return; }
   if (m.type === 'load_source') sourceGen = Math.max(sourceGen, m.gen);
-  enqueue(() => handle(m));
+  if (m.rid) rpc(m, () => handleCall(m)); else enqueue(() => handle(m));
 };
+
+// ---------- remote calls (Save step) ----------
+// The page names and saves the files; the engine encodes them.
+async function handleCall(m) {
+  if (m.type === 'save') {
+    const bytes = engine.encode(m.kind, m.format || 'png', m.quality || 90);
+    post({ type: 'png', rid: m.rid, kind: m.kind, format: m.format || 'png', bytes: bytes.buffer }, [bytes.buffer]);
+  } else throw new Error('unknown call ' + m.type);
+}
 
 async function handle(m) {
   try {

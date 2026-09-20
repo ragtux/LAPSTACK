@@ -198,7 +198,8 @@ Chrome/Edge on Windows/macOS have WebGPU on by default; Firefox needs
 
 The UI follows the workflow as two steps in the top bar:
 **1 Stack** (add frames, set parameters, run, inspect and retouch the
-result) and **2 Save** (format, file name, depth map). Keys 1/2 switch steps.
+result) and **2 Save** (a file list of everything the run can produce and
+the file names it builds). Keys 1/2 switch steps.
 
 *Stack* is the workbench: a filmstrip (thumbnails arrive as frames are
 added, with each frame's registration once aligned), a parameter panel (all
@@ -220,10 +221,17 @@ works. Added frames are decoded and downscaled in the worker straight away
 are populated before a run; after the run the Source view shows the aligned
 screen-resolution proxies produced during it — full frames are not retained.
 
-*Save* writes the (retouched) image as PNG at the input bit depth, 8-bit
-PNG or JPEG with a quality slider, under a chosen file name, and the depth
-map as an 8-bit gray PNG (min–max scaled) or a 16-bit PNG with a fixed
-scale (65535 = last frame, the same encoding as the CLI's `--depth-raw`).
+*Save* takes over the whole window: one card with a file list (a checkbox,
+a thumbnail and the exact file name per output) and the settings: the
+(retouched) LAP and DFR images as PNG at the input bit depth, 8-bit PNG
+or JPEG with a quality slider; the depth map as an 8-bit gray PNG (min–max
+scaled) or a 16-bit PNG with a fixed scale (65535 = last frame, the same
+encoding as the CLI's `--depth-raw`); the winner map.
+File names are built from tokens joined with `_`, lower case: `lapstack`,
+the EXIF date/time of the first frame (read from the JPEG APP1 / TIFF /
+PNG eXIf structure), a date/time found in the first frame's name, the
+current date/time, a custom text, and the layer name (`lap`, `dfr`, `depth`,
+`depth16`, `winner`).
 
 **Depth map**: every run ends with the **depth from focus** pass — the
 pipeline of `crates/lapstack-core/src/depth.rs` as WGSL kernels

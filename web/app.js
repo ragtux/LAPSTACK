@@ -123,6 +123,7 @@ runLabel();
 const worker = new Worker('./worker.js?t=' + Date.now(), { type: 'module' });
 worker.onmessage = (ev) => {
   const m = ev.data;
+  if (m.rid && onReply(m)) return;
   switch (m.type) {
     case 'ready': {
       $('status').textContent = 'ready'; $('progress').className = '';
@@ -146,7 +147,6 @@ worker.onmessage = (ev) => {
     case 'render-cancelled': endRun('cancelled (depth-map render)'); log('[lapstack] depth-map render cancelled; the LAP result is kept'); finishRun(); break;
     case 'cancelled': endRun('cancelled'); log('[lapstack] cancelled'); break;
     case 'error': endRun('error'); log('[lapstack] error: ' + m.text); toast(/no WebGPU adapter/i.test(m.text) ? 'No WebGPU adapter. ' + gpuHint() : m.text, 0); break;
-    case 'png': download(m); break;
     case 'debug': log('[worker] ' + m.text); break;
   }
 };
@@ -235,7 +235,7 @@ function thumbEl(i) {
 }
 $('add').addEventListener('click', () => $('file').click());
 $('file').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
-$('clear').addEventListener('click', () => { if (st.running) return; setPick(false); worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); st.step = 'stack'; gotoStep('stack'); renderFilmstrip(); updateTabs(); setView('source'); });
+$('clear').addEventListener('click', () => { if (st.running || SV.exporting) return; setPick(false); worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); st.step = 'stack'; gotoStep('stack'); renderFilmstrip(); updateTabs(); setView('source'); });
 document.addEventListener('dragover', (e) => { e.preventDefault(); document.body.classList.add('drop'); });
 document.addEventListener('dragleave', () => document.body.classList.remove('drop'));
 document.addEventListener('drop', (e) => { e.preventDefault(); document.body.classList.remove('drop'); if (!st.running) addFiles(e.dataTransfer.files); });
@@ -246,7 +246,7 @@ function setProgress(text, done, total) {
   $('fill').style.width = total ? `${(100 * done / total).toFixed(1)}%` : '100%';   // no total = indeterminate: full pole
 }
 $('run').addEventListener('click', () => {
-  if (st.running || !st.files.length) return;
+  if (st.running || SV.exporting || !st.files.length) return;
   st.running = true; setPick(false); st.frames = st.frames.map((f) => (f ? { name: f.name, thumb: f.thumb, proxy: f.proxy, strip: f.strip, w: f.w, h: f.h, bits: f.bits } : f)); st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); if (st.step !== 'stack') gotoStep('stack');
   runLabel(); $('runwrap').hidden = true; $('runmenu').hidden = true; $('cancel').hidden = false; $('clear').disabled = true;
   setProgress('starting', 0, st.files.length);
@@ -302,21 +302,203 @@ function finishRun() {
   setView('fused');
   window.__app_done = JSON.stringify({ ok: true, w: st.result?.w, h: st.result?.h, frames: st.frameCount, dmap: !!(st.result && st.result.dmap), secs: ((performance.now() - st.t0) / 1000).toFixed(1) });
 }
-// ---------- save step ----------
-$('sv-format').addEventListener('change', () => { const j = $('sv-format').value === 'jpeg'; $('sv-qrow').hidden = !j; $('sv-quality').hidden = !j; });
-$('sv-quality').addEventListener('input', (e) => { $('sv-qval').textContent = e.target.value; });
-$('sv-image').addEventListener('click', () => worker.postMessage({ type: 'save', kind: $('sv-which').value, format: $('sv-format').value, quality: Number($('sv-quality').value) }));
-$('sv-depth').addEventListener('click', () => worker.postMessage({ type: 'save', kind: 'depth', format: 'png' }));
-$('sv-depth16').addEventListener('click', () => worker.postMessage({ type: 'save', kind: 'depth16', format: 'png' }));
-$('sv-winner').addEventListener('click', () => worker.postMessage({ type: 'save', kind: 'winner', format: 'png' }));
-function download(m) {
-  const jpeg = m.format === 'jpeg';
-  const blob = new Blob([m.bytes], { type: jpeg ? 'image/jpeg' : 'image/png' });
-  const base = ($('sv-name').value || 'stacked').replace(/[^\w.-]+/g, '_');
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${base}${m.kind === 'fused' ? '' : '_' + (m.kind === 'dmap' ? 'dfr' : m.kind)}.${jpeg ? 'jpg' : 'png'}`; a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-  log(`[lapstack] saved ${a.download} (${(blob.size / 1e6).toFixed(1)} MB)`);
+// ---------- worker calls ----------
+// Requests with a reply: the worker echoes `rid` on the answer (or rpc-error), see handleCall there.
+const calls = { n: 0, pending: new Map() };
+function call(msg, transfer) {
+  return new Promise((res, rej) => { const rid = ++calls.n; calls.pending.set(rid, { res, rej }); worker.postMessage({ ...msg, rid }, transfer || []); });
 }
+function onReply(m) {
+  const p = calls.pending.get(m.rid); if (!p) return false;
+  calls.pending.delete(m.rid);
+  if (m.type === 'rpc-error') p.rej(new Error(m.text)); else p.res(m);
+  return true;
+}
+
+// ---------- save step ----------
+// One row per output the run can produce: the engine encodes it, the page names it and
+// hands it to the browser. `token` is the layer part of the file name.
+const OUTPUTS = [
+  { id: 'lap', token: 'lap', kind: 'fused', name: 'LAP stack', desc: 'the fused image', avail: () => !!st.result },
+  { id: 'dfr', token: 'dfr', kind: 'dmap', name: 'DFR stack', desc: 'rendered from the depth map', avail: () => haveDmap() },
+  { id: 'depth', token: 'depth', kind: 'depth', name: 'Depth map', desc: '8-bit gray PNG, min–max scaled', ext: 'png', avail: () => !!st.result },
+  { id: 'depth16', token: 'depth16', kind: 'depth16', name: 'Depth map, 16-bit', desc: '16-bit gray PNG, 65535 = last frame', ext: 'png', avail: () => !!st.result },
+  { id: 'winner', token: 'winner', kind: 'winner', name: 'Winner map', desc: '8-bit gray PNG, LAP winner index', ext: 'png', avail: () => !!st.result },
+];
+const SV = { sel: new Set(['lap']), exif: null, exifFor: null, exporting: false };
+const SK = 'lapstack.save';
+const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality'];
+function saveSaveSettings() {
+  const o = { sel: [...SV.sel] };
+  for (const id of svIds) { const el = $(id); o[id] = el.type === 'checkbox' ? el.checked : el.value; }
+  try { localStorage.setItem(SK, JSON.stringify(o)); } catch {}
+}
+try {
+  const o = JSON.parse(localStorage.getItem(SK));
+  if (o) {
+    for (const id of svIds) if (id in o) { const el = $(id); if (el.type === 'checkbox') el.checked = !!o[id]; else el.value = o[id]; }
+    if (Array.isArray(o.sel)) SV.sel = new Set(o.sel);
+  }
+} catch {}
+// file-name tokens: joined with "_", lower case, anything else becomes "_"
+const pad2 = (n) => String(n).padStart(2, '0');
+const stamp = (d) => `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
+const clean = (t) => t.toLowerCase().replace(/[^a-z0-9.-]+/g, '_').replace(/^_+|_+$/g, '');
+// "20260911_123456", "2026-09-11 12.34.56", "IMG_20260911T123456" … in a file name; time is optional
+function nameDate(name) {
+  const m = /(20\d{2})[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])(?:[-_.T ]?([01]\d|2[0-3])[-_.:]?([0-5]\d)[-_.:]?([0-5]\d)?)?/.exec(name);
+  if (!m) return null;
+  return `${m[1]}${m[2]}${m[3]}` + (m[4] ? `-${m[4]}${m[5]}${m[6] || '00'}` : '');
+}
+// EXIF DateTimeOriginal of a file: the TIFF structure inside a JPEG APP1, a TIFF, or a PNG eXIf chunk
+async function exifDate(file) {
+  try {
+    const u8 = new Uint8Array(await file.arrayBuffer()); const dv = new DataView(u8.buffer);
+    let t = -1;
+    if (u8[0] === 0xFF && u8[1] === 0xD8) {
+      for (let p = 2; p + 4 < u8.length && u8[p] === 0xFF;) {
+        const mk = u8[p + 1], len = dv.getUint16(p + 2);
+        if (mk === 0xE1 && u8[p + 4] === 0x45 && u8[p + 5] === 0x78 && u8[p + 6] === 0x69 && u8[p + 7] === 0x66) { t = p + 10; break; }
+        if (mk === 0xDA) break;
+        p += 2 + len;
+      }
+    } else if ((u8[0] === 0x49 && u8[1] === 0x49 && u8[2] === 42) || (u8[0] === 0x4D && u8[1] === 0x4D && u8[3] === 42)) t = 0;
+    else if (u8[0] === 0x89 && u8[1] === 0x50) {
+      for (let p = 8; p + 8 <= u8.length;) {
+        const len = dv.getUint32(p), type = String.fromCharCode(u8[p + 4], u8[p + 5], u8[p + 6], u8[p + 7]);
+        if (type === 'eXIf') { t = p + 8; break; }
+        if (type === 'IEND') break;
+        p += 12 + len;
+      }
+    }
+    if (t < 0) return null;
+    const le = u8[t] === 0x49; const g16 = (o) => dv.getUint16(t + o, le), g32 = (o) => dv.getUint32(t + o, le);
+    const ifd = (off, want) => {
+      const out = {}; if (t + off + 2 > u8.length) return out;
+      const n = g16(off);
+      for (let i = 0; i < n; i++) {
+        const e = off + 2 + 12 * i; if (t + e + 12 > u8.length) break;
+        const tag = g16(e), type = g16(e + 2), cnt = g32(e + 4);
+        if (!want.includes(tag)) continue;
+        if (type === 2) { const p = cnt <= 4 ? e + 8 : g32(e + 8); out[tag] = String.fromCharCode(...u8.subarray(t + p, t + p + Math.min(cnt, 40))).replace(/\0[\s\S]*$/, ''); }
+        else out[tag] = type === 3 ? g16(e + 8) : g32(e + 8);
+      }
+      return out;
+    };
+    const ifd0 = ifd(g32(4), [0x0132, 0x8769]);
+    let dt = null;
+    if (ifd0[0x8769]) { const ex = ifd(ifd0[0x8769], [0x9003, 0x9004]); dt = ex[0x9003] || ex[0x9004]; }
+    dt = dt || ifd0[0x0132];
+    const m = dt && /^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(dt);
+    return m ? `${m[1]}${m[2]}${m[3]}-${m[4]}${m[5]}${m[6]}` : null;
+  } catch { return null; }
+}
+window.__svTest = { exifDate, nameDate };   // tests
+function svExt(o) { return o.ext || ($('sv-format').value === 'jpeg' ? 'jpg' : 'png'); }
+function svName(o, now = new Date()) {
+  const parts = [];
+  if ($('fn-app').checked) parts.push('lapstack');
+  if ($('fn-exif').checked && SV.exif) parts.push(SV.exif);
+  if ($('fn-fname').checked && st.files[0]) { const d = nameDate(st.files[0].name); if (d) parts.push(d); }
+  if ($('fn-now').checked) parts.push(stamp(now));
+  const custom = clean($('sv-name').value); if (custom) parts.push(custom);
+  if ($('fn-layer').checked) parts.push(o.token);
+  return (parts.join('_') || 'stacked') + '.' + svExt(o);
+}
+const fmtMB = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB` : `${Math.round(b / 1e3)} KB`;
+async function renderSave() {
+  if (st.step !== 'save' || !st.result) return;
+  const strokes = R.undo;
+  $('sv-info').textContent = `${st.result.w}×${st.result.h}, ${st.result.bits}-bit input, ${st.files.length} frames` + (strokes ? `, ${strokes} retouch stroke${strokes > 1 ? 's' : ''}` : '');
+  // tokens: EXIF is read once per first frame (async: the name preview refreshes when it lands)
+  const f0 = st.files[0];
+  if (f0 && SV.exifFor !== f0) { SV.exifFor = f0; SV.exif = null; exifDate(f0).then((d) => { if (SV.exifFor === f0) { SV.exif = d; renderSave(); } }); }
+  $('fn-exif-val').textContent = SV.exif || (f0 ? 'none found' : '—'); $('fn-exif').disabled = !SV.exif;
+  const nd = f0 ? nameDate(f0.name) : null; $('fn-fname-val').textContent = nd || 'none found'; $('fn-fname').disabled = !nd;
+  $('fn-now-val').textContent = stamp(new Date());
+  const j = $('sv-format').value === 'jpeg'; $('sv-qrow').hidden = !j; $('sv-quality').hidden = !j;
+  $('fn-preview').textContent = svName(OUTPUTS[0]);
+  // the file list
+  const list = $('sv-files'); list.innerHTML = '';
+  const avail = OUTPUTS.filter((o) => o.avail());
+  for (const o of OUTPUTS) {
+    const ok = o.avail(), on = ok && SV.sel.has(o.id);
+    const row = document.createElement('div'); row.className = 'svf' + (on ? ' on' : '') + (ok ? '' : ' off'); row.dataset.id = o.id;
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = on; cb.disabled = !ok;
+    const th = document.createElement('canvas'); th.width = 192; th.height = 128;
+    const meta = document.createElement('div');
+    const nm = document.createElement('div'); nm.className = 'fname'; nm.textContent = ok ? svName(o) : `${o.name.toLowerCase()} — not available`; nm.title = nm.textContent;
+    const ds = document.createElement('div'); ds.className = 'desc'; ds.textContent = `${o.name} · ${o.desc}`;
+    meta.append(nm, ds);
+    const state = document.createElement('span'); state.className = 'state'; state.textContent = ok ? svExt(o).toUpperCase() : '';
+    row.append(cb, th, meta, state);
+    if (ok) row.addEventListener('click', (e) => { if (e.target !== cb) cb.checked = !cb.checked; if (cb.checked) SV.sel.add(o.id); else SV.sel.delete(o.id); row.classList.toggle('on', cb.checked); saveSaveSettings(); updateSaveButtons(); });
+    list.appendChild(row);
+    if (ok) thumbInto(o, th).catch(() => {});
+    else if (o.id === 'dfr') nm.textContent = 'dfr — run with DFR (Run ▾) to render it';
+  }
+  $('sv-all').checked = avail.length > 0 && avail.every((o) => SV.sel.has(o.id));
+  updateSaveButtons();
+}
+function updateSaveButtons() {
+  const n = OUTPUTS.filter((o) => o.avail() && SV.sel.has(o.id)).length;
+  $('sv-go').textContent = n ? `Save ${n} file${n > 1 ? 's' : ''}` : 'Save'; $('sv-go').disabled = !n || SV.exporting;
+}
+// a small preview of an output: the layer as the viewer shows it
+async function thumbInto(o, cv) {
+  const c = cv.getContext('2d'); c.fillStyle = '#111'; c.fillRect(0, 0, cv.width, cv.height);
+  const r = st.result; if (!r) return;
+  const fit = (bmp, pixelated = false) => {
+    const s = Math.min(cv.width / r.w, cv.height / r.h), w = r.w * s, h = r.h * s;
+    c.imageSmoothingEnabled = !pixelated; c.drawImage(bmp, (cv.width - w) / 2, (cv.height - h) / 2, w, h);
+  };
+  if (o.kind === 'fused' || o.kind === 'dmap') fit(r[o.kind]);
+  else if (o.kind === 'depth' || o.kind === 'depth16') fit(await depthBitmap(false), true);
+  else if (o.kind === 'winner') fit(await winnerBitmap(), true);
+}
+async function winnerBitmap() {
+  if (st.depthBmp.has('winner')) return st.depthBmp.get('winner');
+  const { winner: d, ww: w, wh: h } = st.result;
+  let lo = Infinity, hi = -Infinity; for (const v of d) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  const k = 255 / Math.max(hi - lo, 1e-6), px = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) { const g = (d[i] - lo) * k; px[4 * i] = g; px[4 * i + 1] = g; px[4 * i + 2] = g; px[4 * i + 3] = 255; }
+  const bmp = await createImageBitmap(new ImageData(px, w, h)); st.depthBmp.set('winner', bmp); return bmp;
+}
+for (const id of svIds) $(id).addEventListener(id === 'sv-quality' || id === 'sv-name' ? 'input' : 'change', () => { $('sv-qval').textContent = $('sv-quality').value; saveSaveSettings(); renderSave(); });
+$('sv-all').addEventListener('change', (e) => { for (const o of OUTPUTS) if (o.avail()) { if (e.target.checked) SV.sel.add(o.id); else SV.sel.delete(o.id); } saveSaveSettings(); renderSave(); });
+function downloadBlob(blob, name) {
+  if (window.__saveHook) { window.__saveHook(blob, name); return; }   // tests collect the files instead of downloading
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  log(`[lapstack] saved ${name} (${fmtMB(blob.size)})`);
+}
+async function saveSelected() {
+  if (SV.exporting || !st.result || st.running) return;
+  const items = OUTPUTS.filter((o) => o.avail() && SV.sel.has(o.id));
+  if (!items.length) return;
+  SV.exporting = true; updateSaveButtons(); $('run').disabled = true; $('clear').disabled = true;
+  const now = new Date(), fmt = $('sv-format').value, q = Number($('sv-quality').value);
+  const setState = (o, t) => { const row = $('sv-files').querySelector(`[data-id="${o.id}"] .state`); if (row) row.textContent = t; };
+  const prog = (t, done, total) => { $('sv-progress').textContent = t; setProgress(t, done, total); };
+  let status = 'saved';
+  try {
+    for (const o of items) {
+      const name = svName(o, now);
+      prog(`encoding ${name}`, 0, 0); setState(o, 'encoding…');
+      const f = o.ext ? 'png' : fmt;
+      const r = await call({ type: 'save', kind: o.kind, format: f, quality: q });
+      const blob = new Blob([r.bytes], { type: f === 'jpeg' ? 'image/jpeg' : 'image/png' });
+      downloadBlob(blob, name); setState(o, `saved · ${fmtMB(blob.size)}`);
+    }
+  } catch (e) {
+    status = 'error';
+    log('[lapstack] save failed: ' + e.message); toast('Save failed: ' + e.message, 0);
+  }
+  SV.exporting = false; $('run').disabled = !st.files.length; $('clear').disabled = false;
+  $('progress').className = status === 'saved' ? 'done' : 'error'; $('fill').style.width = '0'; $('status').textContent = status;
+  $('sv-progress').textContent = ''; updateSaveButtons();
+}
+$('sv-go').addEventListener('click', saveSelected);
 
 // ---------- depth LUT ----------
 function turbo(t) { // Google Turbo colormap, polynomial fit
@@ -902,7 +1084,6 @@ function updateTabs() {
   $('tab-source').disabled = !st.files.length; $('tab-stack').disabled = !have; $('tab-depth').disabled = !have; $('ab').disabled = !have || st.step !== 'stack';
   if (!haveDmap() && st.view === 'dmap') st.view = 'fused';
   if (!haveDmap() && lastIn.stack === 'dmap') lastIn.stack = 'fused';
-  $('sv-which-row').hidden = !haveDmap(); if (!haveDmap()) $('sv-which').value = 'fused';
   $('cm-swipe').classList.toggle('on', st.cmpMode !== 'split'); $('cm-split').classList.toggle('on', st.cmpMode === 'split');
   document.querySelectorAll('#steps button').forEach((b) => { if (b.dataset.step !== 'stack') b.disabled = !have; });
   const group = groupOf(st.view);
@@ -973,10 +1154,7 @@ function gotoStep(step) {
   if (step === 'save') { leaveRetouch(false); st.view = 'fused'; st.compare = false; }
   document.querySelectorAll('#steps button').forEach((b) => b.classList.toggle('on', b.dataset.step === step));
   $('params').hidden = step !== 'stack'; $('savepage').hidden = step !== 'save'; document.body.classList.toggle('step-save', step === 'save');
-  if (step === 'save' && st.result) {
-    const strokes = R.undo;
-    $('sv-info').textContent = `${st.result.w}×${st.result.h}, ${st.result.bits}-bit input, ${st.files.length} frames` + (strokes ? `, ${strokes} retouch stroke${strokes > 1 ? 's' : ''}` : '');
-  }
+  if (step === 'save') renderSave();
   updateTabs(); renderFilmstrip(); draw();
 }
 document.querySelectorAll('#steps button').forEach((b) => b.addEventListener('click', () => gotoStep(b.dataset.step)));

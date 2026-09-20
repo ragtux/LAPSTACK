@@ -152,17 +152,28 @@
     <div id="savecard" class="panel">
       <h2>Save</h2>
       <div id="sv-info" class="dim">—</div>
-      <div class="section">Image</div>
-      <label id="sv-which-row" hidden>result <select id="sv-which"><option value="fused">LAP</option><option value="dmap">DFR (depth-map render)</option></select></label>
+      <!-- file names are built from tokens joined with "_", all lower case; the row under the
+           tokens previews the stacked image's name (renderSave) -->
+      <div class="section">File name</div>
+      <div id="fn-tokens">
+        <label class="check"><input type="checkbox" id="fn-app" checked> <span>lapstack</span></label>
+        <label class="check"><input type="checkbox" id="fn-exif"> <span>EXIF date/time of the first frame</span><span class="dim small" id="fn-exif-val">—</span></label>
+        <label class="check"><input type="checkbox" id="fn-fname"> <span>date/time in the first frame's name</span><span class="dim small" id="fn-fname-val">—</span></label>
+        <label class="check"><input type="checkbox" id="fn-now"> <span>current date/time</span><span class="dim small" id="fn-now-val">—</span></label>
+        <label class="check"><input type="checkbox" id="fn-layer" checked> <span>layer / algorithm (lap, dfr, depth…)</span></label>
+      </div>
+      <label>custom text <input type="text" id="sv-name" value="" placeholder="optional"></label>
+      <div class="dim small" id="fn-preview"></div>
+      <!-- the file list: one row per output the run can produce, with a checkbox, a thumbnail
+           and the exact name it will be saved as -->
+      <div class="section sv-head"><span>Files</span><label class="check small"><input type="checkbox" id="sv-all"> <span>all</span></label></div>
+      <div id="sv-files"></div>
+      <div class="section">Image format</div>
       <label>format <select id="sv-format"><option value="png">PNG, input bit depth</option><option value="png8">PNG, 8-bit</option><option value="jpeg">JPEG</option></select></label>
       <label id="sv-qrow" hidden>quality <span class="val" id="sv-qval">92</span></label>
       <input type="range" id="sv-quality" min="50" max="100" value="92" hidden>
-      <label>file name <input type="text" id="sv-name" value="stacked"></label>
-      <div class="row"><button id="sv-image" class="accent">Save image</button></div>
-      <div class="section">Depth map</div>
-      <div class="row"><button id="sv-depth">Save depth map</button><span class="dim small">8-bit gray PNG, min–max scaled</span></div>
-      <div class="row"><button id="sv-depth16">Save depth map (16-bit)</button><span class="dim small">65535 = last frame</span></div>
-      <div class="row"><button id="sv-winner">Save winner map</button><span class="dim small">8-bit gray PNG, LAP winner index</span></div>
+      <div class="dim small">Depth and winner maps are always PNG.</div>
+      <div class="row" id="sv-actions"><button id="sv-go" class="accent">Save selected</button><span id="sv-progress" class="dim small"></span></div>
     </div>
   </div>
 </div>

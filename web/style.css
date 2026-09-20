@@ -217,10 +217,29 @@ body.log-collapsed #toasts { bottom: 46px; }
 body.step-save #left, body.step-save #center, body.step-save #logwrap { display: none; }
 body.step-save #toasts { bottom: 16px; }
 #savepage { flex: 1; min-width: 0; overflow-y: auto; display: flex; justify-content: center; align-items: flex-start; padding: 48px 24px; }
-#savecard { flex: none; width: min(100%, 560px); overflow: visible; border: 1px solid var(--border); border-radius: 10px; padding: 24px 28px 28px; box-shadow: 0 8px 32px rgba(0,0,0,.35); }
+#savecard { flex: none; width: min(100%, 720px); overflow: visible; border: 1px solid var(--border); border-radius: 10px; padding: 24px 28px 28px; box-shadow: 0 8px 32px rgba(0,0,0,.35); }
 #savecard h2 { margin: 0 0 4px; font-size: var(--fs-xl); font-weight: 600; line-height: 1.2; }
 #savecard .section { margin-top: 22px; }
 #savecard label { min-height: 30px; }
 #savecard input[type=text], #savecard select { width: 240px; height: 26px; }
 #savecard .row { min-height: 30px; }
 #savecard #sv-image { padding: 6px 18px; }
+#savecard .check { display: flex; justify-content: flex-start; gap: 8px; }
+#savecard .check > input { order: 0; justify-self: start; }
+#savecard .check > span:last-child:not(:nth-child(2)) { margin-left: auto; }
+#fn-tokens { display: flex; flex-direction: column; }
+#fn-preview { min-height: 18px; font-family: ui-monospace, monospace; }
+#savecard .sv-head { display: flex; justify-content: space-between; align-items: center; }
+#savecard .sv-head .check { min-height: 0; font-weight: 400; }
+/* the file list: [checkbox][thumb][name + description][state] */
+#sv-files { display: flex; flex-direction: column; gap: 4px; }
+.svf { display: grid; grid-template-columns: auto 96px minmax(0, 1fr) auto; align-items: center; column-gap: 12px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--widget); cursor: pointer; }
+.svf.on { border-color: var(--accent); }
+.svf.off { opacity: .45; cursor: default; }
+.svf input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
+.svf canvas { width: 96px; height: 64px; display: block; background: #111; border-radius: 3px; }
+.svf .fname { font-family: ui-monospace, monospace; font-size: var(--fs-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.svf .desc { font-size: var(--fs-xs); color: var(--dim); margin-top: 2px; }
+.svf .state { font-size: var(--fs-xs); color: var(--dim); white-space: nowrap; }
+#sv-actions { margin-top: 18px; }
+#sv-progress { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
