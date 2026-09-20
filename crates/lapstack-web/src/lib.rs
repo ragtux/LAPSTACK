@@ -304,7 +304,7 @@ impl Engine {
             )));
         }
         let (w, h, n) = (run.w, run.h, run.w * run.h);
-        g.queue.write_buffer(&run.up, 0, bytemuck::cast_slice(&frame.rgb));
+        g.upload(&run.up, bytemuck::cast_slice(&frame.rgb)).await.map_err(|e| JsValue::from_str(&e))?;
         drop(frame);
 
         // ---- align: luma pyramid of the new frame, NM search against the previous (warped) frame

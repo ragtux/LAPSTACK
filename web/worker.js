@@ -32,7 +32,8 @@ async function thumbLoop() {
       const bytes = new Uint8Array(await f.arrayBuffer());
       if (job.gen !== thumbGen) return;
       const t = thumbnail(bytes, job.edge);
-      post({ type: 'thumb', index: i, name: f.name, w: t.w, h: t.h, bits: t.bits, proxy_w: t.proxy_w, proxy_h: t.proxy_h, proxy: t.proxy.buffer }, [t.proxy.buffer]);
+      const [proxy, strip] = await proxyBitmaps(t.proxy.buffer, t.proxy_w, t.proxy_h);
+      post({ type: 'thumb', index: i, name: f.name, w: t.w, h: t.h, bits: t.bits, proxy, strip }, [proxy, strip]);
     } catch (e) {
       post({ type: 'thumb-error', index: i, name: f.name, text: (e && e.message) ? e.message : String(e) });
     }
@@ -42,6 +43,15 @@ async function thumbLoop() {
 }
 
 function post(msg, transfer) { self.postMessage(msg, transfer || []); }
+// A proxy's bitmaps, made here rather than on the page: the full one for the view and a
+// strip-sized one for its thumb. Both are transferable, and on the page each frame's
+// createImageBitmap pair cost ~15 ms of main thread, a dropped frame per fused frame.
+const STRIP_W = 160, STRIP_H = 100;
+async function proxyBitmaps(rgba, w, h) {
+  const img = new ImageData(new Uint8ClampedArray(rgba), w, h);
+  const s = Math.min(STRIP_W / w, STRIP_H / h);
+  return Promise.all([createImageBitmap(img), createImageBitmap(img, { resizeWidth: Math.max(1, Math.round(w * s)), resizeHeight: Math.max(1, Math.round(h * s)), resizeQuality: 'medium' })]);
+}
 // Start reading a frame's bytes. A File read only progresses while this thread's
 // event loop is idle, which it is while a push awaits the GPU, so the next frame's
 // read is started before the current push and is usually complete by the time
@@ -110,11 +120,11 @@ async function handle(m) {
         const bytes = new Uint8Array(await next);
         next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
         const r = await engine.push(bytes, params);
-        const proxy = r.proxy, peak = r.peak;
-        post({ type: 'frame', index: r.index, name: f.name, w: r.w, h: r.h, bits: r.bits,
-               proxy_w: r.proxy_w, proxy_h: r.proxy_h, proxy: proxy.buffer,
+        const peak = r.peak;
+        const [proxy, strip] = await proxyBitmaps(r.proxy.buffer, r.proxy_w, r.proxy_h);
+        post({ type: 'frame', index: r.index, name: f.name, w: r.w, h: r.h, bits: r.bits, proxy, strip,
                peak_w: r.peak_w, peak_h: r.peak_h, peak: peak.buffer, sim: r.sim, ms: r.ms,
-               done: i + 1, total: m.files.length }, [proxy.buffer, peak.buffer]);
+               done: i + 1, total: m.files.length }, [proxy, strip, peak.buffer]);
       }
       if (cancelled) { engine.reset(); post({ type: 'cancelled' }); running = false; return; }
       post({ type: 'stage', text: 'collapsing', done: m.files.length, total: m.files.length });

@@ -7,7 +7,8 @@
 const $ = (id) => document.getElementById(id);
 const logEl = $('log');
 function log(s) {
-  logEl.textContent += s + '\n';
+  // one block per line: text appended to a single block re-lays out every line of the log
+  const d = document.createElement('div'); d.textContent = s || '\n'; logEl.append(d);
   if (!document.body.classList.contains('log-collapsed')) logEl.scrollTop = logEl.scrollHeight;
 }
 
@@ -36,11 +37,11 @@ try { if (localStorage.getItem('lapstack.keys') === '0') setKeysCollapsed(true);
 $('log-copy').onclick = async () => {
   const b = $('log-copy');
   try {
-    await navigator.clipboard.writeText(logEl.textContent);
+    await navigator.clipboard.writeText(logEl.innerText);
   } catch {
     // clipboard API needs a secure context; fall back to a scratch selection
     const ta = document.createElement('textarea');
-    ta.value = logEl.textContent; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    ta.value = logEl.innerText; ta.style.position = 'fixed'; ta.style.opacity = '0';
     document.body.appendChild(ta); ta.select();
     try { document.execCommand('copy'); } catch {}
     ta.remove();
@@ -178,13 +179,16 @@ function addFiles(list) {
   const indices = files.map((f) => st.files.indexOf(f));
   worker.postMessage({ type: 'thumbs', files, indices, edge: readParams().proxy_edge });
 }
-async function onThumb(m) {
+// A proxy arrives as two bitmaps made by the worker (see proxyBitmaps there): full size for
+// the view, and a strip-sized one for its thumb. Drawing the full proxy into the 160x100
+// thumb canvas would cost ~30 ms of main thread per frame when the canvas is flushed.
+const STRIP_W = 160, STRIP_H = 100;
+function onThumb(m) {
   if (!st.files[m.index] || st.files[m.index].name !== m.name) return; // stale (cleared)
   const cur = st.frames[m.index];
   if (cur && cur.proxy && cur.sim) return; // the run already supplied an aligned proxy
-  const bmp = await createImageBitmap(new ImageData(new Uint8ClampedArray(m.proxy), m.proxy_w, m.proxy_h));
-  st.frames[m.index] = { ...(cur || {}), name: m.name, w: m.w, h: m.h, bits: m.bits, proxy: bmp };
-  renderFilmstrip();
+  st.frames[m.index] = { ...(cur || {}), name: m.name, w: m.w, h: m.h, bits: m.bits, proxy: m.proxy, strip: m.strip };
+  renderThumb(m.index);
   if (st.view === 'source' && st.selected === m.index) draw();
 }
 async function makeThumb(f) {
@@ -193,32 +197,41 @@ async function makeThumb(f) {
     const bmp = await createImageBitmap(f, { resizeWidth: 320, resizeQuality: 'medium' });
     const i = st.files.indexOf(f); if (i < 0) return;
     st.frames[i] = st.frames[i] || { name: f.name };
-    if (!st.frames[i].proxy) { st.frames[i].thumb = bmp; renderFilmstrip(); if (st.view === 'source' && st.selected === i) draw(); }
+    if (!st.frames[i].proxy) { st.frames[i].thumb = bmp; renderThumb(i); if (st.view === 'source' && st.selected === i) draw(); }
   } catch {}
 }
 function renderFilmstrip() {
   const fs = $('filmstrip'); fs.innerHTML = '';
   if (!st.files.length) { fs.innerHTML = '<div class="empty dim">Add frames, or drop them here.</div>'; return; }
-  st.files.forEach((f, i) => {
-    const d = document.createElement('div'); d.className = 'thumb' + (i === st.selected && scrubbable() ? ' sel' : '');
-    const fr = st.frames[i];
-    const bmp = fr && (fr.proxy || fr.thumb);
-    if (bmp) {
-      const c = document.createElement('canvas'); c.width = 160; c.height = 100;
-      const s = Math.min(160 / bmp.width, 100 / bmp.height);
-      const g = c.getContext('2d'); const r = [(160 - bmp.width * s) / 2, (100 - bmp.height * s) / 2, bmp.width * s, bmp.height * s];
-      const peaking = st.peak.strip && fr.peak;   // with preview peaking on, the thumb is the dimmed frame under its magenta in-focus band
-      if (peaking) g.filter = 'grayscale(1) brightness(0.6)';
-      g.drawImage(bmp, ...r);
-      if (peaking) { g.filter = 'none'; g.drawImage(peakThumb(fr, Math.round(r[2]), Math.round(r[3])), r[0], r[1]); }
-      d.appendChild(c);
-    } else { const ph = document.createElement('div'); ph.className = 'ph'; ph.textContent = fr ? '…' : String(i); d.appendChild(ph); }
-    const n = document.createElement('div'); n.className = 'name'; n.textContent = f.name; d.appendChild(n);
-    if (fr && fr.sim) { const s = document.createElement('div'); s.className = 'sim'; s.textContent = `${fr.sim[0].toFixed(1)}, ${fr.sim[1].toFixed(1)} px · ×${fr.sim[2].toFixed(4)} · ${fr.sim[3].toFixed(2)}°`; d.appendChild(s); }
-    if (st.peak.strip && fr && fr.peak) { const s = document.createElement('div'); s.className = 'sim pct'; s.textContent = `${peakPercent(fr).toFixed(1)} % in focus`; d.appendChild(s); }
-    d.addEventListener('click', () => { st.selected = i; if (!scrubbable()) st.view = 'source'; updateTabs(); renderFilmstrip(); draw(); });
-    fs.appendChild(d);
-  });
+  st.files.forEach((f, i) => fs.appendChild(thumbEl(i)));
+}
+// redraw one frame's thumb in place (a run delivers one frame at a time; rebuilding the whole strip
+// each time costs a drawImage per frame on the main thread, which stutters with a long stack)
+function renderThumb(i) {
+  const fs = $('filmstrip');
+  if (fs.children.length !== st.files.length || !fs.children[i]) return renderFilmstrip();
+  fs.replaceChild(thumbEl(i), fs.children[i]);
+}
+function thumbEl(i) {
+  const f = st.files[i];
+  const d = document.createElement('div'); d.className = 'thumb' + (i === st.selected && scrubbable() ? ' sel' : '');
+  const fr = st.frames[i];
+  const bmp = fr && (fr.strip || fr.thumb);
+  if (bmp) {
+    const c = document.createElement('canvas'); c.width = STRIP_W; c.height = STRIP_H;
+    const s = Math.min(STRIP_W / bmp.width, STRIP_H / bmp.height);
+    const g = c.getContext('2d'); const r = [(STRIP_W - bmp.width * s) / 2, (STRIP_H - bmp.height * s) / 2, bmp.width * s, bmp.height * s];
+    const peaking = st.peak.strip && fr.peak;   // with preview peaking on, the thumb is the dimmed frame under its magenta in-focus band
+    if (peaking) g.filter = 'grayscale(1) brightness(0.6)';
+    g.drawImage(bmp, ...r);
+    if (peaking) { g.filter = 'none'; g.drawImage(peakThumb(fr, Math.round(r[2]), Math.round(r[3])), r[0], r[1]); }
+    d.appendChild(c);
+  } else { const ph = document.createElement('div'); ph.className = 'ph'; ph.textContent = fr ? '…' : String(i); d.appendChild(ph); }
+  const n = document.createElement('div'); n.className = 'name'; n.textContent = f.name; d.appendChild(n);
+  if (fr && fr.sim) { const s = document.createElement('div'); s.className = 'sim'; s.textContent = `${fr.sim[0].toFixed(1)}, ${fr.sim[1].toFixed(1)} px · ×${fr.sim[2].toFixed(4)} · ${fr.sim[3].toFixed(2)}°`; d.appendChild(s); }
+  if (st.peak.strip && fr && fr.peak) { const s = document.createElement('div'); s.className = 'sim pct'; s.textContent = `${peakPercent(fr).toFixed(1)} % in focus`; d.appendChild(s); }
+  d.addEventListener('click', () => { st.selected = i; if (!scrubbable()) st.view = 'source'; updateTabs(); renderFilmstrip(); draw(); });
+  return d;
 }
 $('add').addEventListener('click', () => $('file').click());
 $('file').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
@@ -234,7 +247,7 @@ function setProgress(text, done, total) {
 }
 $('run').addEventListener('click', () => {
   if (st.running || !st.files.length) return;
-  st.running = true; setPick(false); st.frames = st.frames.map((f) => (f ? { name: f.name, thumb: f.thumb, proxy: f.proxy, w: f.w, h: f.h, bits: f.bits } : f)); st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); if (st.step !== 'stack') gotoStep('stack');
+  st.running = true; setPick(false); st.frames = st.frames.map((f) => (f ? { name: f.name, thumb: f.thumb, proxy: f.proxy, strip: f.strip, w: f.w, h: f.h, bits: f.bits } : f)); st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); if (st.step !== 'stack') gotoStep('stack');
   runLabel(); $('runwrap').hidden = true; $('runmenu').hidden = true; $('cancel').hidden = false; $('clear').disabled = true;
   setProgress('starting', 0, st.files.length);
   const params = readParams(); delete params.turbo;
@@ -248,15 +261,13 @@ function endRun(status) {
   $('progress').className = status.startsWith('done') ? 'done' : 'error'; $('fill').style.width = '0';
   $('run').disabled = !st.files.length; $('status').textContent = status; updateTabs();
 }
-async function onFrame(m) {
-  const img = new ImageData(new Uint8ClampedArray(m.proxy), m.proxy_w, m.proxy_h);
-  const bmp = await createImageBitmap(img);
+function onFrame(m) {
   const peak = { w: m.peak_w, h: m.peak_h, data: new Float32Array(m.peak), bmp: null, bmpThr: -1, pct: null, pctThr: -1 };
   st.peak.pixmax = null;
-  st.frames[m.index] = { name: m.name, w: m.w, h: m.h, bits: m.bits, proxy: bmp, sim: m.sim, peak };
+  st.frames[m.index] = { name: m.name, w: m.w, h: m.h, bits: m.bits, proxy: m.proxy, strip: m.strip, sim: m.sim, peak };
   setProgress('fusing', m.done, m.total);
   log(`[lapstack]   frame ${String(m.index).padStart(3)}: dx=${m.sim[0].toFixed(2)}px dy=${m.sim[1].toFixed(2)}px scale=${m.sim[2].toFixed(5)} rot=${m.sim[3].toFixed(3)}°  (${m.ms.toFixed(0)} ms)`);
-  renderFilmstrip();
+  renderThumb(m.index);
   if (st.view === 'source' && st.selected === m.index) draw();
 }
 async function onDone(m) {

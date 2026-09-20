@@ -3,6 +3,7 @@
 //! async buffer readbacks.
 
 use futures_channel::oneshot;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
@@ -25,6 +26,10 @@ pub struct P {
 }
 
 const SLOT: u64 = 256;
+/// Frame uploads and readbacks move through the browser in slices of this
+/// size (see `Gpu::upload` and `Gpu::read_at`); the upload ring has this many slots.
+const XFER_SLICE: usize = 16 << 20;
+const UPLOAD_SLOTS: usize = 4;
 const SLOTS: usize = 2048;
 const KERNELS: [&str; 48] = [
     "red_h", "red_v", "exp_h", "exp_v", "energy", "win_h", "win_v", "sel", "clamp01", "copy_plane",
@@ -47,6 +52,23 @@ pub struct Gpu {
     pipes: HashMap<&'static str, wgpu::ComputePipeline>,
     uni: wgpu::Buffer,
     dummies: Vec<wgpu::Buffer>,
+    /// upload staging ring (see `upload`), and each slot's pending map, if any
+    ring: RefCell<Vec<wgpu::Buffer>>,
+    ring_maps: RefCell<Vec<Option<oneshot::Receiver<Result<(), wgpu::BufferAsyncError>>>>>,
+}
+
+/// Yield to the event loop: a task, not a microtask, since the browser flushes
+/// queued GPU commands and runs other work only between tasks. A message port
+/// rather than setTimeout(0), which is clamped to 4 ms once timers nest.
+pub async fn yield_now() {
+    thread_local! { static CHAN: web_sys::MessageChannel = web_sys::MessageChannel::new().unwrap(); }
+    let p = js_sys::Promise::new(&mut |resolve, _| {
+        CHAN.with(|c| {
+            c.port1().set_onmessage(Some(&resolve));
+            let _ = c.port2().post_message(&wasm_bindgen::JsValue::NULL);
+        });
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(p).await;
 }
 
 pub fn ceil_div(a: u32, b: u32) -> u32 {
@@ -177,7 +199,20 @@ impl Gpu {
                 })
             })
             .collect();
-        Ok(Gpu { device, queue, limits, info, bgl, pipes, uni, dummies })
+        let ring = (0..UPLOAD_SLOTS)
+            .map(|_| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("upload ring"),
+                    size: XFER_SLICE as u64,
+                    usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: true,
+                })
+            })
+            .collect();
+        Ok(Gpu {
+            device, queue, limits, info, bgl, pipes, uni, dummies,
+            ring: RefCell::new(ring), ring_maps: RefCell::new((0..UPLOAD_SLOTS).map(|_| None).collect()),
+        })
     }
 
     pub fn buffer(&self, label: &str, bytes: u64) -> wgpu::Buffer {
@@ -211,21 +246,44 @@ impl Gpu {
         Rec { gpu: self, enc: Some(self.device.create_command_encoder(&Default::default())), n: 0, keep: Vec::new() }
     }
 
+    /// Upload a whole frame. One writeBuffer of a full 16-bit frame (274 MB at
+    /// 45 MP) is copied by Chrome's GPU process on the thread that also composites
+    /// the page, and every animation and scroll stalls for the duration (~150 ms);
+    /// smaller writeBuffer calls each pay for a fresh shared-memory block. So the
+    /// frame goes through a ring of persistently mapped staging buffers: each slice
+    /// is written into a mapped slot, unmapped, copied to `dst` on the GPU, and the
+    /// slot mapped again for its next turn. The copies are short, and waiting for
+    /// a slot's map yields the event loop.
+    pub async fn upload(&self, dst: &wgpu::Buffer, data: &[u8]) -> Result<(), String> {
+        let ring = self.ring.borrow();
+        let mut maps = self.ring_maps.borrow_mut();
+        for (i, chunk) in data.chunks(XFER_SLICE).enumerate() {
+            let slot = i % ring.len();
+            if let Some(rx) = maps[slot].take() {
+                rx.await.map_err(|_| "map callback dropped".to_string())?.map_err(|e| format!("map: {e:?}"))?;
+            }
+            let len = chunk.len();
+            let st = &ring[slot];
+            {
+                let mut view = st.slice(..(len.div_ceil(8) * 8) as u64).get_mapped_range_mut().map_err(|e| format!("{e:?}"))?;
+                view.slice(..len).copy_from_slice(chunk);
+            }
+            st.unmap();
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            enc.copy_buffer_to_buffer(st, 0, dst, (i * XFER_SLICE) as u64, (len.div_ceil(4) * 4) as u64);
+            self.queue.submit([enc.finish()]);
+            let (tx, rx) = oneshot::channel();
+            st.slice(..).map_async(wgpu::MapMode::Write, move |r| {
+                let _ = tx.send(r);
+            });
+            let _ = self.device.poll(wgpu::PollType::Poll);
+            maps[slot] = Some(rx);
+        }
+        Ok(())
+    }
     /// Read `bytes` from `src` (offset 0) into a Vec, via a staging buffer.
     pub async fn read(&self, src: &wgpu::Buffer, bytes: u64) -> Result<Vec<u8>, String> {
-        let st = self.staging(bytes);
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        enc.copy_buffer_to_buffer(src, 0, &st, 0, bytes.div_ceil(4) * 4);
-        self.queue.submit([enc.finish()]);
-        let (tx, rx) = oneshot::channel();
-        st.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        let _ = self.device.poll(wgpu::PollType::Poll);
-        rx.await.map_err(|_| "map callback dropped".to_string())?.map_err(|e| format!("map: {e:?}"))?;
-        let out = st.slice(..).get_mapped_range().map_err(|e| format!("{e:?}"))?[..bytes as usize].to_vec();
-        st.unmap();
-        Ok(out)
+        self.read_at(src, 0, bytes).await
     }
     pub async fn read_f32(&self, src: &wgpu::Buffer, n: usize) -> Result<Vec<f32>, String> {
         let b = self.read(src, n as u64 * 4).await?;
@@ -233,19 +291,36 @@ impl Gpu {
     }
     /// Read `n` floats starting at element `from`.
     pub async fn read_range_f32(&self, src: &wgpu::Buffer, from: usize, n: usize) -> Result<Vec<f32>, String> {
-        let bytes = n as u64 * 4;
-        let st = self.staging(bytes);
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        enc.copy_buffer_to_buffer(src, from as u64 * 4, &st, 0, bytes);
-        self.queue.submit([enc.finish()]);
-        let (tx, rx) = oneshot::channel();
-        st.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        let _ = self.device.poll(wgpu::PollType::Poll);
-        rx.await.map_err(|_| "map callback dropped".to_string())?.map_err(|e| format!("map: {e:?}"))?;
-        let out = bytemuck::cast_slice(&st.slice(..).get_mapped_range().map_err(|e| format!("{e:?}"))?[..bytes as usize]).to_vec();
-        st.unmap();
+        let b = self.read_at(src, from as u64 * 4, n as u64 * 4).await?;
+        Ok(bytemuck::cast_slice(&b).to_vec())
+    }
+    /// Read `bytes` from `src` at byte offset `from`. In slices, with the event
+    /// loop yielded between them, for the same reason `upload` writes in slices:
+    /// a mapped range's bytes are copied out by Chrome's GPU process, and a full
+    /// frame's worth in one go stalls the compositor.
+    async fn read_at(&self, src: &wgpu::Buffer, from: u64, bytes: u64) -> Result<Vec<u8>, String> {
+        const SLICE: u64 = XFER_SLICE as u64;
+        let st = self.staging(bytes.min(SLICE));
+        let mut out = Vec::with_capacity(bytes as usize);
+        let mut off = 0;
+        while off < bytes {
+            let len = (bytes - off).min(SLICE);
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            enc.copy_buffer_to_buffer(src, from + off, &st, 0, len.div_ceil(4) * 4);
+            self.queue.submit([enc.finish()]);
+            let (tx, rx) = oneshot::channel();
+            st.slice(..len.div_ceil(4) * 4).map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            let _ = self.device.poll(wgpu::PollType::Poll);
+            rx.await.map_err(|_| "map callback dropped".to_string())?.map_err(|e| format!("map: {e:?}"))?;
+            out.extend_from_slice(&st.slice(..len.div_ceil(4) * 4).get_mapped_range().map_err(|e| format!("{e:?}"))?[..len as usize]);
+            st.unmap();
+            off += len;
+            if off < bytes {
+                yield_now().await;
+            }
+        }
         Ok(out)
     }
 }
