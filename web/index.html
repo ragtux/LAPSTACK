@@ -146,20 +146,24 @@
     <div class="section">GPU</div>
     <div id="gpuinfo" class="dim small">—</div>
   </div>
-  <div id="savepanel" class="panel" hidden>
-    <div class="section">Image</div>
-    <label id="sv-which-row" hidden>result <select id="sv-which"><option value="fused">LAP</option><option value="dmap">DFR (depth-map render)</option></select></label>
-    <label>format <select id="sv-format"><option value="png">PNG, input bit depth</option><option value="png8">PNG, 8-bit</option><option value="jpeg">JPEG</option></select></label>
-    <label id="sv-qrow" hidden>quality <span class="val" id="sv-qval">92</span></label>
-    <input type="range" id="sv-quality" min="50" max="100" value="92" hidden>
-    <label>file name <input type="text" id="sv-name" value="stacked"></label>
-    <div class="row"><button id="sv-image" class="accent">Save image</button></div>
-    <div class="section">Depth map</div>
-    <div class="row"><button id="sv-depth">Save depth map</button><span class="dim small">8-bit gray PNG, min–max scaled</span></div>
-    <div class="row"><button id="sv-depth16">Save depth map (16-bit)</button><span class="dim small">65535 = last frame</span></div>
-    <div class="row"><button id="sv-winner">Save winner map</button><span class="dim small">8-bit gray PNG, LAP winner index</span></div>
-    <div class="section">Result</div>
-    <div id="sv-info" class="dim small">—</div>
+  <!-- Save step: the whole main area is one centred card (the filmstrip, canvas, panel and log
+       are hidden by body.step-save), so nothing competes with the save settings -->
+  <div id="savepage" hidden>
+    <div id="savecard" class="panel">
+      <h2>Save</h2>
+      <div id="sv-info" class="dim">—</div>
+      <div class="section">Image</div>
+      <label id="sv-which-row" hidden>result <select id="sv-which"><option value="fused">LAP</option><option value="dmap">DFR (depth-map render)</option></select></label>
+      <label>format <select id="sv-format"><option value="png">PNG, input bit depth</option><option value="png8">PNG, 8-bit</option><option value="jpeg">JPEG</option></select></label>
+      <label id="sv-qrow" hidden>quality <span class="val" id="sv-qval">92</span></label>
+      <input type="range" id="sv-quality" min="50" max="100" value="92" hidden>
+      <label>file name <input type="text" id="sv-name" value="stacked"></label>
+      <div class="row"><button id="sv-image" class="accent">Save image</button></div>
+      <div class="section">Depth map</div>
+      <div class="row"><button id="sv-depth">Save depth map</button><span class="dim small">8-bit gray PNG, min–max scaled</span></div>
+      <div class="row"><button id="sv-depth16">Save depth map (16-bit)</button><span class="dim small">65535 = last frame</span></div>
+      <div class="row"><button id="sv-winner">Save winner map</button><span class="dim small">8-bit gray PNG, LAP winner index</span></div>
+    </div>
   </div>
 </div>
 <!-- log strip: a thin vertical toolbar on the left (collapse, copy) beside the log itself -->

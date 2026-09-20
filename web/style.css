@@ -212,3 +212,15 @@ body.log-collapsed #toasts { bottom: 46px; }
 .panel .row button { flex: none; white-space: nowrap; }
 .panel .row .small { min-width: 0; }
 .panel .val { color: var(--text); }
+/* Save step: body.step-save hides the filmstrip, canvas, panel and log; #savepage fills #main
+   and centres one card that reuses the panel's row grid at a wider measure */
+body.step-save #left, body.step-save #center, body.step-save #logwrap { display: none; }
+body.step-save #toasts { bottom: 16px; }
+#savepage { flex: 1; min-width: 0; overflow-y: auto; display: flex; justify-content: center; align-items: flex-start; padding: 48px 24px; }
+#savecard { flex: none; width: min(100%, 560px); overflow: visible; border: 1px solid var(--border); border-radius: 10px; padding: 24px 28px 28px; box-shadow: 0 8px 32px rgba(0,0,0,.35); }
+#savecard h2 { margin: 0 0 4px; font-size: var(--fs-xl); font-weight: 600; line-height: 1.2; }
+#savecard .section { margin-top: 22px; }
+#savecard label { min-height: 30px; }
+#savecard input[type=text], #savecard select { width: 240px; height: 26px; }
+#savecard .row { min-height: 30px; }
+#savecard #sv-image { padding: 6px 18px; }

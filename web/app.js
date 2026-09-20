@@ -972,7 +972,7 @@ function gotoStep(step) {
   st.step = step;
   if (step === 'save') { leaveRetouch(false); st.view = 'fused'; st.compare = false; }
   document.querySelectorAll('#steps button').forEach((b) => b.classList.toggle('on', b.dataset.step === step));
-  $('params').hidden = step !== 'stack'; $('savepanel').hidden = step !== 'save';
+  $('params').hidden = step !== 'stack'; $('savepage').hidden = step !== 'save'; document.body.classList.toggle('step-save', step === 'save');
   if (step === 'save' && st.result) {
     const strokes = R.undo;
     $('sv-info').textContent = `${st.result.w}×${st.result.h}, ${st.result.bits}-bit input, ${st.files.length} frames` + (strokes ? `, ${strokes} retouch stroke${strokes > 1 ? 's' : ''}` : '');
