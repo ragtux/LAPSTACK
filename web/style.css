@@ -5,10 +5,12 @@
 @font-face { font-family: 'Fira Sans'; font-style: normal; font-weight: 600; font-display: swap; src: url(fonts/fira-sans-600.woff2) format('woff2'); }
 @font-face { font-family: 'Fira Sans'; font-style: normal; font-weight: 700; font-display: swap; src: url(fonts/fira-sans-700.woff2) format('woff2'); }
 @font-face { font-family: 'Fira Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url(fonts/fira-mono-400.woff2) format('woff2'); }
-/* type scale: xs captions/headings/log, sm secondary chrome, md body + panels, lg canvas
-   overlays (chips, zoom bar, pane labels), xl display numbers (frame counter, progress mark) */
-:root { --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px; --fs-lg: 15px; --fs-xl: 22px; --font: 'Fira Sans', system-ui, sans-serif; --font-logo: var(--font); --font-mono: 'Fira Mono', ui-monospace, monospace;
-  --bg:#1e1e22; --panel:#26262b; --border:#3a3a42; --widget:#34343c; --accent:#3b82f6; --pop:#ff7a30; --c-source:#f0862a; --c-stack:#3b82f6; --c-depth:#22a55a; --text:#e6e6e6; --dim:#9a9aa3; --glass:rgba(20,20,22,.75); --glass-border:rgba(255,255,255,.12); }
+/* type scale: xs uppercase section headings + log, sm captions and secondary chrome, md body,
+   row the panel and save-card rows (the densest reading in the app, so a step up from body),
+   lg canvas overlays (chips, zoom bar, pane labels), xl display numbers (frame counter,
+   progress mark) */
+:root { --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px; --fs-row: 14px; --fs-lg: 15px; --fs-xl: 22px; --font: 'Fira Sans', system-ui, sans-serif; --font-logo: var(--font); --font-mono: 'Fira Mono', ui-monospace, monospace;
+  --bg:#1e1e22; --panel:#26262b; --border:#3a3a42; --widget:#34343c; --accent:#3b82f6; --pop:#ff7a30; --c-source:#f0862a; --c-stack:#3b82f6; --c-depth:#22a55a; --text:#e6e6e6; --dim:#9a9aa3; --head:#b9b9c4; --glass:rgba(20,20,22,.75); --glass-border:rgba(255,255,255,.12); }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font-family: var(--font); font-size: var(--fs-md); overflow: hidden; }
@@ -118,22 +120,25 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #vhead button, #vhead label { white-space: nowrap; }
 #vhead .ctx { display: inline-flex; align-items: center; gap: 8px; }
 /* step panels: every row is [label text | control] on one grid so checkboxes, steppers,
-   selects and values share a single right edge; rows are a fixed 26px so the rhythm does not
-   depend on the control. Section headings sit closer to their own rows than to the section
-   above, and the first one flush with the top of the panel. */
-.panel { width: 288px; flex: none; overflow-y: auto; background: var(--panel); border-left: 1px solid var(--border); padding: 12px 12px; display: flex; flex-direction: column; gap: 2px; }
-.panel .section { font-size: var(--fs-sm); font-weight: 600; color: var(--dim); margin: 16px 0 4px; }
-.panel > .section:first-child, #brush > .section:first-child, #brush[hidden] + .section { margin-top: 0; }
+   selects and values share a single right edge; rows are a fixed 28px so the rhythm does not
+   depend on the control. Section headings ride a hairline that divides the groups, and sit
+   closer to their own rows than to the group above; the first one is flush with the top. */
+.panel { width: 288px; flex: none; overflow-y: auto; background: var(--panel); border-left: 1px solid var(--border); padding: 12px 12px; display: flex; flex-direction: column; gap: 3px; }
+.panel label, .panel .row { font-size: var(--fs-row); }
+.panel .small { font-size: var(--fs-sm); line-height: 1.45; }
+.panel .section { font-size: var(--fs-xs); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--head); margin: 14px 0 4px; padding-top: 10px; border-top: 1px solid var(--border); }
+.panel > .section:first-child, #brush > .section:first-child, #brush[hidden] + .section { margin-top: 0; padding-top: 0; border-top: 0; }
 /* the brush block joins the panel's column while retouch mode is on */
 #brush { display: flex; flex-direction: column; gap: 2px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 #brush[hidden] { display: none; }
-.panel label { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 8px; min-height: 26px; }
+.panel label { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 8px; min-height: 28px; }
 .panel label > input, .panel label > select, .panel label > span { justify-self: end; order: 1; }
-.panel label > input[type=checkbox] { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
+.panel label > input[type=checkbox] { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
 .panel label.stepper > span { display: inline-flex; align-items: center; gap: 4px; }
-.panel label.stepper > span > span { min-width: 36px; text-align: center; font-variant-numeric: tabular-nums; }
-.panel .stepper button { padding: 0 8px; height: 22px; }
-.panel select { height: 22px; padding: 0 4px; }
+.panel label.stepper > span > span { min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }
+.panel .stepper button { padding: 0 8px; height: 24px; background: transparent; border-color: rgba(255,255,255,.09); color: var(--dim); }
+.panel .stepper button:hover:not(:disabled) { background: var(--widget); border-color: var(--border); color: var(--text); }
+.panel select { height: 24px; padding: 0 4px; }
 /* log strip: [vertical toolbar][log]; collapsed leaves just the toolbar */
 #logwrap { flex: none; display: flex; align-items: stretch; background: #151518; border-top: 1px solid var(--border); }
 #logbar { flex: none; display: flex; flex-direction: column; gap: 4px; padding: 5px 5px; border-right: 1px solid var(--border); }
@@ -238,7 +243,7 @@ body.step-save #toasts { bottom: 16px; }
 #fn-tokens { display: flex; flex-direction: column; }
 #fn-preview { min-height: 18px; font-family: var(--font-mono); }
 #savecard .sv-head { display: flex; justify-content: space-between; align-items: center; }
-#savecard .sv-head .check { min-height: 0; font-weight: 400; }
+#savecard .sv-head .check { min-height: 0; font-weight: 400; text-transform: none; letter-spacing: normal; }
 /* the file list: [checkbox][thumb][name + description][state] */
 #sv-files { display: flex; flex-direction: column; gap: 4px; }
 .svf { display: grid; grid-template-columns: auto 96px minmax(0, 1fr) auto; align-items: center; column-gap: 12px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--widget); cursor: pointer; }
@@ -246,9 +251,9 @@ body.step-save #toasts { bottom: 16px; }
 .svf.off { opacity: .45; cursor: default; }
 .svf input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
 .svf canvas { width: 96px; height: 64px; display: block; background: #111; border-radius: 3px; }
-.svf .fname { font-family: var(--font-mono); font-size: var(--fs-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.svf .desc { font-size: var(--fs-xs); color: var(--dim); margin-top: 2px; }
-.svf .state { font-size: var(--fs-xs); color: var(--dim); white-space: nowrap; }
+.svf .fname { font-family: var(--font-mono); font-size: var(--fs-md); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.svf .desc { font-size: var(--fs-sm); color: var(--dim); margin-top: 3px; }
+.svf .state { font-size: var(--fs-sm); color: var(--dim); white-space: nowrap; }
 #an-info.warn { color: #e88; }
 #savecard a { color: var(--accent); }
 #sv-actions { margin-top: 18px; }
