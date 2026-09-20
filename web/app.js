@@ -316,20 +316,25 @@ function onReply(m) {
 }
 
 // ---------- save step ----------
-// One row per output the run can produce: the engine encodes it, the page names it and
-// hands it to the browser. `token` is the layer part of the file name.
+// One row per output the run can produce. Stills come from the engine's encoder; the
+// animations are composed here frame by frame (the layer as the viewer draws it, at the
+// chosen size) and quantised + LZW-encoded by the worker (gif.rs), the bytes streaming
+// back so the file is assembled as a Blob. `token` is the layer part of the file name.
 const OUTPUTS = [
   { id: 'lap', token: 'lap', kind: 'fused', name: 'LAP stack', desc: 'the fused image', avail: () => !!st.result },
   { id: 'dfr', token: 'dfr', kind: 'dmap', name: 'DFR stack', desc: 'rendered from the depth map', avail: () => haveDmap() },
   { id: 'depth', token: 'depth', kind: 'depth', name: 'Depth map', desc: '8-bit gray PNG, min–max scaled', ext: 'png', avail: () => !!st.result },
   { id: 'depth16', token: 'depth16', kind: 'depth16', name: 'Depth map, 16-bit', desc: '16-bit gray PNG, 65535 = last frame', ext: 'png', avail: () => !!st.result },
   { id: 'winner', token: 'winner', kind: 'winner', name: 'Winner map', desc: '8-bit gray PNG, LAP winner index', ext: 'png', avail: () => !!st.result },
+  { id: 'anim-depth', token: 'depth-slice', anim: true, name: 'Focus depth, Turbo, slice sweeping', desc: 'animated GIF: the depth map with the magenta slice moving through the frames', ext: 'gif', avail: () => !!st.result && st.files.length > 1 },
+  { id: 'anim-focus', token: 'infocus', anim: true, name: 'In focus sweep', desc: 'animated GIF: each frame\'s in-focus plane lit, the rest dimmed to outlines', ext: 'gif', avail: () => !!st.result && st.files.length > 1 },
+  { id: 'anim-peak', token: 'peaking', anim: true, name: 'Source with focus peaking', desc: 'animated GIF: the aligned frames under their magenta peaking band', ext: 'gif', avail: () => !!st.result && st.files.length > 1 && st.frames.some((f) => f && f.peak) },
 ];
-const SV = { sel: new Set(['lap']), exif: null, exifFor: null, exporting: false };
+const SV = { sel: new Set(['lap']), exif: null, exifFor: null, exporting: false, cancel: false };
 const SK = 'lapstack.save';
-const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality'];
+const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'an-edge', 'an-fps', 'an-loop'];
 function saveSaveSettings() {
-  const o = { sel: [...SV.sel] };
+  const o = { sel: [...SV.sel], 'an-step': Number($('an-step').textContent) };
   for (const id of svIds) { const el = $(id); o[id] = el.type === 'checkbox' ? el.checked : el.value; }
   try { localStorage.setItem(SK, JSON.stringify(o)); } catch {}
 }
@@ -337,6 +342,7 @@ try {
   const o = JSON.parse(localStorage.getItem(SK));
   if (o) {
     for (const id of svIds) if (id in o) { const el = $(id); if (el.type === 'checkbox') el.checked = !!o[id]; else el.value = o[id]; }
+    if (o['an-step']) setStep('an-step', Number(o['an-step']));
     if (Array.isArray(o.sel)) SV.sel = new Set(o.sel);
   }
 } catch {}
@@ -405,6 +411,17 @@ function svName(o, now = new Date()) {
   if ($('fn-layer').checked) parts.push(o.token);
   return (parts.join('_') || 'stacked') + '.' + svExt(o);
 }
+// the animation's frame order (every Nth frame, last frame always in; back and forth or forward), size and delay
+function animPlan() {
+  const [W, H] = imageDims(); const edge = Number($('an-edge').value), step = Math.max(1, Number($('an-step').textContent));
+  const s = edge ? Math.min(1, edge / Math.max(W, H)) : 1;
+  const ow = Math.max(1, Math.round(W * s)), oh = Math.max(1, Math.round(H * s));
+  const n = st.files.length, fwd = [];
+  for (let i = 0; i < n; i += step) fwd.push(i);
+  if (n && fwd[fwd.length - 1] !== n - 1) fwd.push(n - 1);
+  const seq = $('an-loop').value === 'pingpong' && fwd.length > 2 ? fwd.concat(fwd.slice(1, -1).reverse()) : fwd;
+  return { ow, oh, seq, delay: Math.max(2, Math.round(100 / Number($('an-fps').value))) };
+}
 const fmtMB = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB` : `${Math.round(b / 1e3)} KB`;
 async function renderSave() {
   if (st.step !== 'save' || !st.result) return;
@@ -430,24 +447,33 @@ async function renderSave() {
     const nm = document.createElement('div'); nm.className = 'fname'; nm.textContent = ok ? svName(o) : `${o.name.toLowerCase()} — not available`; nm.title = nm.textContent;
     const ds = document.createElement('div'); ds.className = 'desc'; ds.textContent = `${o.name} · ${o.desc}`;
     meta.append(nm, ds);
-    const state = document.createElement('span'); state.className = 'state'; state.textContent = ok ? svExt(o).toUpperCase() : '';
+    const state = document.createElement('span'); state.className = 'state'; state.textContent = ok ? (o.anim ? 'GIF' : svExt(o).toUpperCase()) : '';
     row.append(cb, th, meta, state);
     if (ok) row.addEventListener('click', (e) => { if (e.target !== cb) cb.checked = !cb.checked; if (cb.checked) SV.sel.add(o.id); else SV.sel.delete(o.id); row.classList.toggle('on', cb.checked); saveSaveSettings(); updateSaveButtons(); });
     list.appendChild(row);
     if (ok) thumbInto(o, th).catch(() => {});
     else if (o.id === 'dfr') nm.textContent = 'dfr — run with DFR (Run ▾) to render it';
+    else if (o.id === 'anim-peak') nm.textContent = 'peaking — no peaking data for these frames';
   }
   $('sv-all').checked = avail.length > 0 && avail.every((o) => SV.sel.has(o.id));
+  const plan = animPlan();
+  const anims = avail.filter((o) => o.anim && SV.sel.has(o.id));
+  const est = anims.reduce((b, o) => b + plan.seq.length * plan.ow * plan.oh * (o.id === 'anim-depth' ? 0.15 : 0.7), 0);
+  $('an-info').textContent = `${plan.seq.length} frames of ${plan.ow}×${plan.oh}` + (anims.length ? ` · roughly ${fmtMB(est)} for the ${anims.length} selected animation${anims.length > 1 ? 's' : ''}` : '') +
+    (est > 1e9 ? ' — a GIF that large may exhaust the browser: use a smaller long edge or a larger frame step.' : '');
+  $('an-info').classList.toggle('warn', est > 1e9);
   updateSaveButtons();
 }
 function updateSaveButtons() {
   const n = OUTPUTS.filter((o) => o.avail() && SV.sel.has(o.id)).length;
   $('sv-go').textContent = n ? `Save ${n} file${n > 1 ? 's' : ''}` : 'Save'; $('sv-go').disabled = !n || SV.exporting;
+  $('sv-cancel').hidden = !SV.exporting;
 }
-// a small preview of an output: the layer as the viewer shows it
+// a small preview of an output: the layer as the viewer shows it, the animations at their middle frame
 async function thumbInto(o, cv) {
   const c = cv.getContext('2d'); c.fillStyle = '#111'; c.fillRect(0, 0, cv.width, cv.height);
   const r = st.result; if (!r) return;
+  const mid = Math.floor((st.files.length - 1) / 2);
   const fit = (bmp, pixelated = false) => {
     const s = Math.min(cv.width / r.w, cv.height / r.h), w = r.w * s, h = r.h * s;
     c.imageSmoothingEnabled = !pixelated; c.drawImage(bmp, (cv.width - w) / 2, (cv.height - h) / 2, w, h);
@@ -455,6 +481,9 @@ async function thumbInto(o, cv) {
   if (o.kind === 'fused' || o.kind === 'dmap') fit(r[o.kind]);
   else if (o.kind === 'depth' || o.kind === 'depth16') fit(await depthBitmap(false), true);
   else if (o.kind === 'winner') fit(await winnerBitmap(), true);
+  else if (o.id === 'anim-depth') { fit(await depthBitmap(true), true); const ov = await sliceBitmap(mid); if (ov) fit(ov, true); }
+  else if (o.id === 'anim-focus') { const b = await focusBitmap(mid); if (b) fit(b); else { const f = st.frames[mid]; if (f && (f.proxy || f.thumb)) fit(f.proxy || f.thumb); } }
+  else if (o.id === 'anim-peak') { const f = st.frames[mid]; if (f && (f.proxy || f.thumb)) fit(f.proxy || f.thumb); if (f && f.peak) fit(await peakBitmap(f)); }
 }
 async function winnerBitmap() {
   if (st.depthBmp.has('winner')) return st.depthBmp.get('winner');
@@ -465,6 +494,7 @@ async function winnerBitmap() {
   const bmp = await createImageBitmap(new ImageData(px, w, h)); st.depthBmp.set('winner', bmp); return bmp;
 }
 for (const id of svIds) $(id).addEventListener(id === 'sv-quality' || id === 'sv-name' ? 'input' : 'change', () => { $('sv-qval').textContent = $('sv-quality').value; saveSaveSettings(); renderSave(); });
+document.querySelectorAll('#savecard [data-step]').forEach((b) => b.addEventListener('click', () => { setStep('an-step', Number($('an-step').textContent) + Number(b.dataset.d)); saveSaveSettings(); renderSave(); }));
 $('sv-all').addEventListener('change', (e) => { for (const o of OUTPUTS) if (o.avail()) { if (e.target.checked) SV.sel.add(o.id); else SV.sel.delete(o.id); } saveSaveSettings(); renderSave(); });
 function downloadBlob(blob, name) {
   if (window.__saveHook) { window.__saveHook(blob, name); return; }   // tests collect the files instead of downloading
@@ -472,11 +502,47 @@ function downloadBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 60000);
   log(`[lapstack] saved ${name} (${fmtMB(blob.size)})`);
 }
+// one animation: frames composed here at the output size, encoded by the worker, streamed back
+async function renderAnim(o, progress) {
+  const { ow, oh, seq, delay } = animPlan();
+  const oc = new OffscreenCanvas(ow, oh), c = oc.getContext('2d', { willReadFrequently: true });
+  await call({ type: 'gif_begin', w: ow, h: oh, loop: true, dither: true });
+  const chunks = [];
+  try {
+    for (let k = 0; k < seq.length; k++) {
+      if (SV.cancel) throw new Error('cancelled');
+      progress(k, seq.length);
+      await drawAnimFrame(o.id, seq[k], c, ow, oh);
+      const img = c.getImageData(0, 0, ow, oh);
+      const r = await call({ type: 'gif_frame', rgba: img.data.buffer, delay }, [img.data.buffer]);
+      if (r.bytes.byteLength) chunks.push(r.bytes);
+    }
+    const r = await call({ type: 'gif_end' }); chunks.push(r.bytes);
+  } catch (e) { await call({ type: 'gif_abort' }).catch(() => {}); throw e; }
+  finally { if (o.id !== 'anim-depth') { R.gpuIndex = -1; R.wasmIndex = -1; } }   // the worker's source frame is whatever we exported last
+  return new Blob(chunks, { type: 'image/gif' });
+}
+async function drawAnimFrame(id, i, c, ow, oh) {
+  if (id === 'anim-depth') {
+    c.imageSmoothingEnabled = false;
+    c.drawImage(await depthBitmap(true), 0, 0, ow, oh);
+    const ov = await sliceBitmap(i); if (ov) c.drawImage(ov, 0, 0, ow, oh);
+    return;
+  }
+  // the aligned full-res frame, plain or In focus, from the engine (a decode + warp per frame)
+  const bytes = await st.files[i].arrayBuffer();
+  const r = await call({ type: 'export_source', index: i, bytes, focus: id === 'anim-focus' ? focusParams() : null }, [bytes]);
+  const img = new ImageData(new Uint8ClampedArray(r.rgba), r.w, r.h);
+  c.imageSmoothingEnabled = true;
+  if (r.w === ow && r.h === oh) c.putImageData(img, 0, 0);
+  else { const bmp = await createImageBitmap(img); c.drawImage(bmp, 0, 0, ow, oh); bmp.close(); }
+  if (id === 'anim-peak') { const f = st.frames[i]; if (f && f.peak) c.drawImage(await peakBitmap(f), 0, 0, ow, oh); }
+}
 async function saveSelected() {
   if (SV.exporting || !st.result || st.running) return;
   const items = OUTPUTS.filter((o) => o.avail() && SV.sel.has(o.id));
   if (!items.length) return;
-  SV.exporting = true; updateSaveButtons(); $('run').disabled = true; $('clear').disabled = true;
+  SV.exporting = true; SV.cancel = false; updateSaveButtons(); $('run').disabled = true; $('clear').disabled = true;
   const now = new Date(), fmt = $('sv-format').value, q = Number($('sv-quality').value);
   const setState = (o, t) => { const row = $('sv-files').querySelector(`[data-id="${o.id}"] .state`); if (row) row.textContent = t; };
   const prog = (t, done, total) => { $('sv-progress').textContent = t; setProgress(t, done, total); };
@@ -484,21 +550,30 @@ async function saveSelected() {
   try {
     for (const o of items) {
       const name = svName(o, now);
-      prog(`encoding ${name}`, 0, 0); setState(o, 'encoding…');
-      const f = o.ext ? 'png' : fmt;
-      const r = await call({ type: 'save', kind: o.kind, format: f, quality: q });
-      const blob = new Blob([r.bytes], { type: f === 'jpeg' ? 'image/jpeg' : 'image/png' });
+      let blob, mime;
+      if (o.anim) {
+        setState(o, 'rendering…');
+        blob = await renderAnim(o, (k, n) => { prog(`${o.name}: frame ${k + 1}/${n}`, k, n); setState(o, `${k + 1}/${n}`); });
+        mime = 'image/gif';
+      } else {
+        prog(`encoding ${name}`, 0, 0); setState(o, 'encoding…');
+        const f = o.ext ? 'png' : fmt;
+        const r = await call({ type: 'save', kind: o.kind, format: f, quality: q });
+        mime = f === 'jpeg' ? 'image/jpeg' : 'image/png'; blob = new Blob([r.bytes], { type: mime });
+      }
       downloadBlob(blob, name); setState(o, `saved · ${fmtMB(blob.size)}`);
     }
   } catch (e) {
-    status = 'error';
-    log('[lapstack] save failed: ' + e.message); toast('Save failed: ' + e.message, 0);
+    status = SV.cancel ? 'cancelled' : 'error';
+    if (!SV.cancel) { log('[lapstack] save failed: ' + e.message); toast('Save failed: ' + e.message, 0); }
+    else log('[lapstack] save cancelled');
   }
   SV.exporting = false; $('run').disabled = !st.files.length; $('clear').disabled = false;
   $('progress').className = status === 'saved' ? 'done' : 'error'; $('fill').style.width = '0'; $('status').textContent = status;
   $('sv-progress').textContent = ''; updateSaveButtons();
 }
 $('sv-go').addEventListener('click', saveSelected);
+$('sv-cancel').addEventListener('click', () => { SV.cancel = true; });
 
 // ---------- depth LUT ----------
 function turbo(t) { // Google Turbo colormap, polynomial fit

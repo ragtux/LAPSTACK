@@ -21,3 +21,5 @@ serde_json = "1"
 console_error_panic_hook = "0.1"
 futures-channel = "0.3"
 getrandom = { version = "0.3", features = ["wasm_js"] }
+# animated GIF export (gif.rs): LZW only, the quantiser is our own
+gif = { version = "0.14", default-features = false, features = ["std"] }

@@ -256,6 +256,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "weezl",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -343,6 +352,7 @@ dependencies = [
  "console_error_panic_hook",
  "futures-channel",
  "getrandom",
+ "gif",
  "image",
  "js-sys",
  "lapstack-core",

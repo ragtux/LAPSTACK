@@ -11,6 +11,7 @@
 mod align;
 mod decode;
 mod depth;
+mod gif;
 mod gpu;
 
 use align::{Aligner, LumaPyr, Sim, affine_inv};

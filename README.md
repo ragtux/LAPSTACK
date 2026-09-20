@@ -198,8 +198,8 @@ Chrome/Edge on Windows/macOS have WebGPU on by default; Firefox needs
 
 The UI follows the workflow as two steps in the top bar:
 **1 Stack** (add frames, set parameters, run, inspect and retouch the
-result) and **2 Save** (a file list of everything the run can produce and
-the file names it builds). Keys 1/2 switch steps.
+result) and **2 Save** (a file list of everything the run can produce, file
+names, animations). Keys 1/2 switch steps.
 
 *Stack* is the workbench: a filmstrip (thumbnails arrive as frames are
 added, with each frame's registration once aligned), a parameter panel (all
@@ -222,16 +222,26 @@ are populated before a run; after the run the Source view shows the aligned
 screen-resolution proxies produced during it — full frames are not retained.
 
 *Save* takes over the whole window: one card with a file list (a checkbox,
-a thumbnail and the exact file name per output) and the settings: the
-(retouched) LAP and DFR images as PNG at the input bit depth, 8-bit PNG
+a thumbnail and the exact file name per output) and the settings. Stills:
+the (retouched) LAP and DFR images as PNG at the input bit depth, 8-bit PNG
 or JPEG with a quality slider; the depth map as an 8-bit gray PNG (min–max
 scaled) or a 16-bit PNG with a fixed scale (65535 = last frame, the same
-encoding as the CLI's `--depth-raw`); the winner map.
+encoding as the CLI's `--depth-raw`); the winner map. Animations, as GIF:
+**Focus depth** in Turbo with the slice sweeping through the frames, the
+**In focus** sweep, and the aligned **Source** frames under their peaking
+band, each frame rendered like the viewer shows it (the Source and In focus
+frames are decoded and re-aligned at full resolution by the engine, then
+scaled to the chosen *long edge*); *every Nth frame*, speed and loop
+(back and forth or forward) are settings, and the card estimates the size —
+a full-resolution GIF of a long 45 MP stack runs to gigabytes, so pick a
+long edge or a frame step for those. Frames are quantised (median cut,
+Floyd–Steinberg) and LZW-encoded in the worker (`crates/lapstack-web/src/gif.rs`),
+the bytes streaming back so the file never sits in wasm memory whole.
 File names are built from tokens joined with `_`, lower case: `lapstack`,
 the EXIF date/time of the first frame (read from the JPEG APP1 / TIFF /
 PNG eXIf structure), a date/time found in the first frame's name, the
 current date/time, a custom text, and the layer name (`lap`, `dfr`, `depth`,
-`depth16`, `winner`).
+`depth16`, `winner`, `depth-slice`, `infocus`, `peaking`).
 
 **Depth map**: every run ends with the **depth from focus** pass — the
 pipeline of `crates/lapstack-core/src/depth.rs` as WGSL kernels

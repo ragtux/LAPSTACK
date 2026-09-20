@@ -172,8 +172,14 @@
       <label>format <select id="sv-format"><option value="png">PNG, input bit depth</option><option value="png8">PNG, 8-bit</option><option value="jpeg">JPEG</option></select></label>
       <label id="sv-qrow" hidden>quality <span class="val" id="sv-qval">92</span></label>
       <input type="range" id="sv-quality" min="50" max="100" value="92" hidden>
-      <div class="dim small">Depth and winner maps are always PNG.</div>
-      <div class="row" id="sv-actions"><button id="sv-go" class="accent">Save selected</button><span id="sv-progress" class="dim small"></span></div>
+      <div class="dim small">Depth and winner maps are always PNG; animations are GIF.</div>
+      <div class="section">Animations</div>
+      <label>long edge <select id="an-edge"><option value="0">full resolution</option><option value="4000">4000 px</option><option value="3000">3000 px</option><option value="2000">2000 px</option><option value="1600">1600 px</option><option value="1200">1200 px</option><option value="800">800 px</option></select></label>
+      <label class="stepper">every Nth frame <span><button data-step="an-step" data-d="-1">−</button><span id="an-step" data-min="1" data-max="50">1</span><button data-step="an-step" data-d="1">+</button></span></label>
+      <label>speed <select id="an-fps"><option value="5">5 fps</option><option value="10" selected>10 fps</option><option value="15">15 fps</option><option value="25">25 fps</option></select></label>
+      <label>loop <select id="an-loop"><option value="pingpong">back and forth</option><option value="forward">forward</option></select></label>
+      <div class="dim small" id="an-info">—</div>
+      <div class="row" id="sv-actions"><button id="sv-go" class="accent">Save selected</button><button id="sv-cancel" hidden>Cancel</button><span id="sv-progress" class="dim small"></span></div>
     </div>
   </div>
 </div>

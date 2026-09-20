@@ -7,14 +7,15 @@
 // await: that would suspend the script before onmessage is installed and the
 // page's first message would be lost.
 const V = Date.now();
-let init = null, create_engine = null, thumbnail = null;
+let init = null, create_engine = null, thumbnail = null, GifWriter = null;
 async function loadWasm() {
   if (init) return;
   const mod = await import(`./pkg/lapstack_web.js?t=${V}`);
-  ({ default: init, create_engine, thumbnail } = mod);
+  ({ default: init, create_engine, thumbnail, GifWriter = null } = mod);
 }
 
 let engine = null;
+let gifw = null;          // the animated GIF being written (gif_begin … gif_end), see gif.rs
 let cancelled = false;
 let running = false;
 let thumbJob = null;      // {files, indices, edge, gen} being decoded in the background
@@ -80,11 +81,39 @@ self.onmessage = (ev) => {
 };
 
 // ---------- remote calls (Save step) ----------
-// The page names and saves the files; the engine encodes them.
+// The page composes export frames itself and only needs the engine for what it cannot
+// do: full-resolution aligned frames (plain or In focus), GIF quantisation + LZW, and
+// image encoding.
 async function handleCall(m) {
   if (m.type === 'save') {
     const bytes = engine.encode(m.kind, m.format || 'png', m.quality || 90);
     post({ type: 'png', rid: m.rid, kind: m.kind, format: m.format || 'png', bytes: bytes.buffer }, [bytes.buffer]);
+  } else if (m.type === 'export_source') {
+    // the aligned full-res frame (or its In focus rendering, m.focus = focusParams), like load_source
+    // without the scrub bookkeeping; the page passes the file bytes it has already read
+    if (running) throw new Error('a run is in progress');
+    const held = engine.source_gpu_index() === m.index;
+    let r = null;
+    if (!held) r = await engine.load_source(m.index, new Uint8Array(m.bytes || await m.file.arrayBuffer()), !m.focus);
+    if (m.focus) r = await engine.source_focus(m.focus.dim, m.focus.w0, m.focus.w1, m.focus.tex);
+    else if (held) r = await engine.source_readback();
+    post({ type: 'export_source', rid: m.rid, index: r.index, w: r.w, h: r.h, rgba: r.rgba.buffer }, [r.rgba.buffer]);
+  } else if (m.type === 'gif_begin') {
+    if (!GifWriter) throw new Error('this build has no GIF writer (rebuild web/pkg)');
+    if (gifw) { gifw.free(); gifw = null; }
+    gifw = new GifWriter(m.w, m.h, m.loop !== false, m.dither !== false);
+    post({ type: 'gif', rid: m.rid });
+  } else if (m.type === 'gif_frame') {
+    if (!gifw) throw new Error('no GIF in progress');
+    const bytes = gifw.push(new Uint8Array(m.rgba), m.delay);
+    post({ type: 'gif', rid: m.rid, bytes: bytes.buffer }, [bytes.buffer]);
+  } else if (m.type === 'gif_end') {
+    if (!gifw) throw new Error('no GIF in progress');
+    const bytes = gifw.finish(); gifw.free(); gifw = null;
+    post({ type: 'gif', rid: m.rid, bytes: bytes.buffer, done: true }, [bytes.buffer]);
+  } else if (m.type === 'gif_abort') {
+    if (gifw) { gifw.free(); gifw = null; }
+    post({ type: 'gif', rid: m.rid });
   } else throw new Error('unknown call ' + m.type);
 }
 
