@@ -114,8 +114,8 @@ const runLabel = () => { $('run').textContent = $('p-dmap').checked ? 'Run LAP +
 $('p-dmap').addEventListener('change', () => { saveParams(); runLabel(); });
 $('run-more').addEventListener('click', (e) => { e.stopPropagation(); $('runmenu').hidden = !$('runmenu').hidden; });
 $('runmenu').addEventListener('click', (e) => e.stopPropagation());
-document.addEventListener('click', () => { $('runmenu').hidden = true; });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('runmenu').hidden = true; if (st.pick) setPick(false); else exitRetouch(); } });
+document.addEventListener('click', () => { $('runmenu').hidden = true; $('cmp-menu').hidden = true; });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('runmenu').hidden = true; $('cmp-menu').hidden = true; if (st.pick) setPick(false); else exitRetouch(); } });
 runLabel();
 
 // ---------- worker ----------
@@ -742,6 +742,9 @@ function showLabel(el, text, kind, pos) {
   if (!text) return;
   el.textContent = text;
   el.className = 'plab' + (kind ? ' ' + kind : '');
+  // the chip takes its layer's group colour (kind 'a' = the view, 'b' = the compare partner)
+  const g = kind === 'a' ? groupOf(st.view) : kind === 'b' ? groupOf(st.cmp) : null;
+  if (g) el.dataset.group = g; else delete el.dataset.group;
   el.style.left = pos.left || 'auto';
   el.style.right = pos.right || 'auto';
   el.style.transform = pos.transform || 'none';
@@ -919,12 +922,14 @@ function updateTabs() {
   const subs = (GROUPS[group] || []).filter((t) => t !== 'dmap' || haveDmap());
   $('subseg').hidden = st.step !== 'stack' || subs.length < 2;
   document.querySelectorAll('#subseg button').forEach((b) => { b.hidden = !subs.includes(b.dataset.tab); b.classList.toggle('on', b.dataset.tab === st.view); });
+  if (group) $('subseg').dataset.group = group; else delete $('subseg').dataset.group;
   // compare partner: any layer but the current view
-  const sel = $('cmp-sel'); sel.innerHTML = '';
-  for (const [id, name] of LAYERS) { if (id === st.view) continue; if (id === 'source' && !st.files.length) continue; if (id === 'dmap' && !haveDmap()) continue; const o = document.createElement('option'); o.value = id; o.textContent = name; sel.appendChild(o); }
-  if (![...sel.options].some((o) => o.value === st.cmp)) st.cmp = sel.options[0] ? sel.options[0].value : 'depth';
-  sel.value = st.cmp;
-  $('ab').checked = st.compare; $('ctx-compare').hidden = !(st.compare && have); $('cmp-sel').disabled = retouch; $('cmpbar').hidden = $('ctx-compare').hidden || retouch;
+  const choices = LAYERS.filter(([id]) => id !== st.view && (id !== 'source' || st.files.length) && (id !== 'dmap' || haveDmap()));
+  if (!choices.some(([id]) => id === st.cmp)) st.cmp = choices[0] ? choices[0][0] : 'depth';
+  const menu = $('cmp-menu'); menu.innerHTML = '';
+  for (const [id, name] of choices) { const b = document.createElement('button'); b.textContent = name; b.dataset.value = id; b.dataset.group = groupOf(id); b.classList.toggle('on', id === st.cmp); menu.appendChild(b); }
+  $('cmp-name').textContent = layerName(st.cmp); $('cmp-sel').dataset.group = groupOf(st.cmp);
+  $('ab').checked = st.compare; $('ctx-compare').hidden = !(st.compare && have); $('cmp-btn').disabled = retouch; $('cmpbar').hidden = $('ctx-compare').hidden || retouch;
   const depthShown = isDepthLayer(st.view) || (st.compare && isDepthLayer(st.cmp));
   // put each context group next to the layer it acts on: the shown layer (left) or the compare partner (after "vs")
   const place = (el, onView, onPartner) => { const slot = (!onView && onPartner) ? $('cmp-ctx') : $('view-ctx'); if (el.parentElement !== slot) slot.appendChild(el); };
@@ -977,7 +982,9 @@ function gotoStep(step) {
 document.querySelectorAll('#steps button').forEach((b) => b.addEventListener('click', () => gotoStep(b.dataset.step)));
 document.querySelectorAll('#viewseg button').forEach((b) => b.addEventListener('click', () => { const g = b.dataset.group; setView(g === 'source' ? 'source' : lastIn[g]); }));
 document.querySelectorAll('#subseg button').forEach((b) => b.addEventListener('click', () => setView(b.dataset.tab)));
-$('cmp-sel').addEventListener('change', (e) => { st.cmp = e.target.value; updateTabs(); draw(); });
+// compare partner picker: the chip opens its list; a row picks; any click elsewhere or Esc closes it
+$('cmp-btn').addEventListener('click', (e) => { e.stopPropagation(); $('cmp-menu').hidden = !$('cmp-menu').hidden; });
+$('cmp-menu').addEventListener('click', (e) => { e.stopPropagation(); const b = e.target.closest('button'); if (!b) return; $('cmp-menu').hidden = true; st.cmp = b.dataset.value; updateTabs(); draw(); });
 $('cm-swipe').addEventListener('click', () => { st.cmpMode = 'swipe'; saveParams(); updateTabs(); draw(); });
 $('cm-split').addEventListener('click', () => { st.cmpMode = 'split'; saveParams(); updateTabs(); draw(); });
 $('ab').addEventListener('change', (e) => { if (R.on) leaveRetouch(false); st.compare = e.target.checked; if (st.compare && st.view === 'source') st.view = 'fused'; updateTabs(); draw(); });

@@ -1,7 +1,7 @@
 /* type scale: xs captions/headings/log, sm secondary chrome, md body + panels, lg canvas
    overlays (chips, zoom bar, pane labels), xl display numbers (frame counter, progress mark) */
 :root { --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px; --fs-lg: 15px; --fs-xl: 22px; --font: system-ui, sans-serif;
-  --bg:#1e1e22; --panel:#26262b; --border:#3a3a42; --widget:#34343c; --accent:#3b82f6; --pop:#ff7a30; --text:#e6e6e6; --dim:#9a9aa3; --glass:rgba(20,20,22,.75); --glass-border:rgba(255,255,255,.12); }
+  --bg:#1e1e22; --panel:#26262b; --border:#3a3a42; --widget:#34343c; --accent:#3b82f6; --pop:#ff7a30; --c-source:#f0862a; --c-stack:#3b82f6; --c-depth:#22a55a; --text:#e6e6e6; --dim:#9a9aa3; --glass:rgba(20,20,22,.75); --glass-border:rgba(255,255,255,.12); }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font-family: var(--font); font-size: var(--fs-md); overflow: hidden; }
@@ -71,12 +71,25 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 /* the movable context groups and the compare group flow as individual items so the columns wrap cleanly */
 #vhead #view-ctx, #vhead #cmp-ctx, #vhead #ctx-compare { display: contents; }
 /* every chip in the header is 34px tall on the same glass */
-#vhead .seg, #vhead .tog, #vhead select, #vhead .stepper { height: 34px; background: var(--glass); border: 1px solid var(--glass-border); border-radius: 8px; backdrop-filter: blur(4px); }
+#vhead .seg, #vhead .tog, #vhead .stepper { height: 34px; background: var(--glass); border: 1px solid var(--glass-border); border-radius: 8px; backdrop-filter: blur(4px); }
 #vhead .seg button { background: transparent; padding: 0 14px; font-size: var(--fs-lg); border-right-color: var(--glass-border); }
-#vhead .seg button.on { background: var(--accent); }
+#vhead .seg button.on { background: var(--gc, var(--accent)); }
+/* layer groups are colour-coded so what is on screen reads at a glance: Source orange, Stack blue,
+   Depth green. data-group on a chip (or a container of chips) picks the group colour; it tints the
+   selected button, the chip border and the toggle box, and the pane labels below */
+[data-group=source] { --gc: var(--c-source); } [data-group=stack] { --gc: var(--c-stack); } [data-group=depth] { --gc: var(--c-depth); }
+#vhead .seg[data-group], #vhead [data-group] .seg, #vhead [data-group] .tog, #vhead [data-group] .stepper { border-color: color-mix(in srgb, var(--gc) 65%, var(--glass-border)); }
+#vhead #viewseg button:not(.on):not(:disabled), #vhead .drop[data-group] > button { color: var(--gc); }
+/* the compare partner picker is a chip with its own drop-down list (a native select cannot colour
+   its rows: Chrome paints the popup's hover/selected rows with the system highlight), each row in
+   its layer's colour, the hovered and current rows filled with it */
+#vhead .drop { position: relative; overflow: visible; }
+#vhead .drop > .menu { left: 0; width: max-content; min-width: 100%; padding: 4px; gap: 2px; }
+#vhead .drop .menu button { background: transparent; border: 0; border-radius: 5px; text-align: left; padding: 6px 12px; font-size: var(--fs-lg); color: var(--gc, var(--text)); white-space: nowrap; }
+#vhead .drop .menu button:hover, #vhead .drop .menu button.on { background: var(--gc, var(--accent)); color: #fff; }
+#vhead [data-group] .tog:has(input:checked) { border-color: var(--gc); } #vhead [data-group] .tog input { accent-color: var(--gc); }
 #vhead .seg.sub button { padding: 0 11px; }
 #vhead .tog { padding: 0 11px; gap: 7px; } #vhead .tog input { width: 15px; height: 15px; }
-#vhead select { padding: 0 8px; }
 #vhead .stepper { gap: 0; } #vhead .stepper button { height: 100%; padding: 0 11px; background: transparent; border: 0; }
 #vhead #peakthr { min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
 /* the Retouch button sits at the right end of the right column, whatever else is in it */
@@ -165,8 +178,7 @@ body.log-collapsed #toasts { bottom: 46px; }
    them below the header row */
 #panelabels { position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; overflow: hidden; z-index: 2; }
 .plab { position: absolute; top: 8px; padding: 4px 12px; border-radius: 6px; font-size: var(--fs-lg); font-weight: 600; line-height: 1.5; color: #fff; background: rgba(20,20,22,.82); border: 1px solid rgba(255,255,255,.18); white-space: nowrap; box-shadow: 0 1px 6px rgba(0,0,0,.55); }
-.plab.a { background: var(--accent); border-color: rgba(255,255,255,.3); }
-.plab.b { background: var(--pop); border-color: rgba(255,255,255,.3); color: #16161a; }
+.plab.a, .plab.b { background: var(--gc, var(--accent)); border-color: rgba(255,255,255,.3); }
 /* frame scrubber: vertical slider overlaid on the canvas, centred on its left edge; frame 1
    at the top like the filmstrip, so wheel-down and slider-down both advance. The frame
    counter (e.g. 49/100) is the more useful readout, so it gets its own large box directly

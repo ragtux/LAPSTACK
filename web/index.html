@@ -79,20 +79,20 @@
           <button data-group="depth" id="tab-depth" disabled>Depth</button>
         </div>
         <div class="seg sub" id="subseg" hidden>
-          <button data-tab="fused" title="Laplacian-pyramid fusion">LAP</button>
-          <button data-tab="dmap" title="rendered from the depth map: each pixel blends the frames nearest its depth">DFR</button>
-          <button data-tab="depth" title="depth from focus (working grid)">Focus depth</button>
-          <button data-tab="focus" title="the scrubbed frame's own pixels, dimmed where it is out of focus: scrub to sweep the plane of focus">In focus</button>
+          <button data-tab="fused" data-group="stack" title="Laplacian-pyramid fusion">LAP</button>
+          <button data-tab="dmap" data-group="stack" title="rendered from the depth map: each pixel blends the frames nearest its depth">DFR</button>
+          <button data-tab="depth" data-group="depth" title="depth from focus (working grid)">Focus depth</button>
+          <button data-tab="focus" data-group="depth" title="the scrubbed frame's own pixels, dimmed where it is out of focus: scrub to sweep the plane of focus">In focus</button>
         </div>
         <span class="sep"></span>
         <!-- layer-specific controls; each lives in #view-ctx when it applies to the
              shown layer and moves into #cmp-ctx when it applies to the compare partner -->
         <span id="view-ctx" class="ctx">
-          <span id="ctx-source" class="ctx" hidden>
+          <span id="ctx-source" class="ctx" data-group="source" hidden>
             <label class="tog"><input type="checkbox" id="peak"> peaking</label>
             <span id="peakstep" class="stepper" hidden><button id="peak-minus">−</button><span id="peakthr">0.50</span><button id="peak-plus">+</button></span>
           </span>
-          <span id="ctx-depth" class="ctx" hidden>
+          <span id="ctx-depth" class="ctx" data-group="depth" hidden>
             <div class="seg"><button id="lut-gray">Gray</button><button id="lut-turbo">Turbo</button></div>
             <label class="tog"><input type="checkbox" id="slice"> slice</label>
           </span>
@@ -102,7 +102,7 @@
         <label class="vs" title="compare with another layer: swipe or side by side"><input type="checkbox" id="ab" disabled><span>vs</span></label>
         <div id="vh-right">
           <span id="ctx-compare" class="ctx" hidden>
-            <select id="cmp-sel"></select><span id="cmp-ctx" class="ctx"></span>
+            <span class="seg drop" id="cmp-sel"><button id="cmp-btn" aria-haspopup="listbox"><span id="cmp-name"></span> ▾</button><div id="cmp-menu" class="menu" role="listbox" hidden></div></span><span id="cmp-ctx" class="ctx"></span>
           </span>
           <!-- retouch mode: shown whenever LAP or DFR is on screen; on = paint the scrubbed source
                frame (right pane) into the stacked image (left pane) -->
