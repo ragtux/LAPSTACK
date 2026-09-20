@@ -88,54 +88,54 @@
     </div>
   </div>
   <div id="params" class="panel">
-    <div class="section">ALIGNMENT</div>
+    <div class="section">Alignment</div>
     <label><input type="checkbox" id="p-align" checked> align frames</label>
     <label><input type="checkbox" id="p-shift" checked> shift</label>
     <label><input type="checkbox" id="p-scale" checked> scale</label>
     <label><input type="checkbox" id="p-rotation" checked> rotation</label>
     <label class="stepper">align coarsen <span><button data-step="p-coarsen" data-d="-1">−</button><span id="p-coarsen" data-min="0" data-max="5">2</span><button data-step="p-coarsen" data-d="1">+</button></span></label>
-    <div class="section">FUSION</div>
+    <div class="section">Fusion</div>
     <label class="stepper">levels <span><button data-step="p-levels" data-d="-1">−</button><span id="p-levels" data-min="0" data-max="12" data-zero="auto">0</span><button data-step="p-levels" data-d="1">+</button></span></label>
     <label class="stepper">energy radius <span><button data-step="p-energy" data-d="-1">−</button><span id="p-energy" data-min="0" data-max="4">1</span><button data-step="p-energy" data-d="1">+</button></span></label>
     <label>top rule <select id="p-top"><option value="de">deviation + entropy</option><option value="dev">deviation</option><option value="avg">average</option></select></label>
     <label class="stepper">top radius <span><button data-step="p-topr" data-d="-1">−</button><span id="p-topr" data-min="1" data-max="6">2</span><button data-step="p-topr" data-d="1">+</button></span></label>
     <label><input type="checkbox" id="p-chroma"> use chroma</label>
-    <div class="section">DEPTH MAP</div>
+    <div class="section">Depth map</div>
     <label class="stepper" title="depth from focus works on a grid of 1/2^N the frame size">grid 1/2^N <span><button data-step="p-depthscale" data-d="-1">−</button><span id="p-depthscale" data-min="1" data-max="4">2</span><button data-step="p-depthscale" data-d="1">+</button></span></label>
     <label class="stepper" title="pyramid level the winner map (ctrl+G pixel lookup, Save winner map) is read from (0 = full resolution, noisy where the scene is flat)">winner map level <span><button data-step="p-depthlevel" data-d="-1">−</button><span id="p-depthlevel" data-min="0" data-max="6">2</span><button data-step="p-depthlevel" data-d="1">+</button></span></label>
-    <div class="section">VIEW</div>
+    <div class="section">View</div>
     <label class="stepper">proxy edge px <span><button data-step="p-proxy" data-d="-200">−</button><span id="p-proxy" data-min="400" data-max="3000">1400</span><button data-step="p-proxy" data-d="200">+</button></span></label>
     <div class="section">GPU</div>
     <div id="gpuinfo" class="dim small">—</div>
   </div>
   <div id="brushpanel" class="panel" hidden>
-    <div class="section">BRUSH</div>
+    <div class="section">Brush</div>
     <label>size <span class="val" id="br-size">100</span></label>
     <input type="range" id="br-size-in" min="0" max="100" value="50" title="[ / ]">
     <label>hardness <span class="val" id="br-hard">0.50</span></label>
     <input type="range" id="br-hard-in" min="0" max="95" value="50">
-    <div class="section" id="br-target-sec" hidden>TARGET</div>
+    <div class="section" id="br-target-sec" hidden>Target</div>
     <label id="br-target-row" hidden>paint into <select id="br-target"><option value="fused">LAP result</option><option value="dmap">DFR result</option></select></label>
-    <div class="section">SOURCE</div>
+    <div class="section">Source</div>
     <div class="dim small">Pick the frame to paint from in the filmstrip, with ←/→ or the slider. It is decoded and re-aligned on demand (~1 s at 45 MP).</div>
-    <div class="section">HISTORY</div>
+    <div class="section">History</div>
     <div class="row"><button id="undo" title="ctrl+z" disabled>undo</button><button id="redo" title="ctrl+shift+z" disabled>redo</button><span id="hist" class="dim small"></span></div>
-    <div class="section">HOW TO</div>
+    <div class="section">How to</div>
     <div class="dim small">Left pane: source · right pane: result. Drag on either pane to paint the source into the result; shift+drag pans; wheel zooms; double-click fits / 100 %.</div>
   </div>
   <div id="savepanel" class="panel" hidden>
-    <div class="section">IMAGE</div>
+    <div class="section">Image</div>
     <label id="sv-which-row" hidden>result <select id="sv-which"><option value="fused">LAP</option><option value="dmap">DFR (depth-map render)</option></select></label>
     <label>format <select id="sv-format"><option value="png">PNG, input bit depth</option><option value="png8">PNG, 8-bit</option><option value="jpeg">JPEG</option></select></label>
     <label id="sv-qrow" hidden>quality <span class="val" id="sv-qval">92</span></label>
     <input type="range" id="sv-quality" min="50" max="100" value="92" hidden>
     <label>file name <input type="text" id="sv-name" value="stacked"></label>
     <div class="row"><button id="sv-image" class="accent">Save image</button></div>
-    <div class="section">DEPTH MAP</div>
+    <div class="section">Depth map</div>
     <div class="row"><button id="sv-depth">Save depth map</button><span class="dim small">8-bit gray PNG, min–max scaled</span></div>
     <div class="row"><button id="sv-depth16">Save depth map (16-bit)</button><span class="dim small">65535 = last frame</span></div>
     <div class="row"><button id="sv-winner">Save winner map</button><span class="dim small">8-bit gray PNG, LAP winner index</span></div>
-    <div class="section">RESULT</div>
+    <div class="section">Result</div>
     <div id="sv-info" class="dim small">—</div>
   </div>
 </div>
