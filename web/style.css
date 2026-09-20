@@ -1,6 +1,13 @@
+/* Interface face: Fira Sans — a humanist sans drawn for OS UI, so it holds up at the 11–13px
+   of the panels and the log. Self-hosted (latin subset, web/fonts) so the app needs no network;
+   the system stack stays behind it as the fallback. SIL OFL 1.1. */
+@font-face { font-family: 'Fira Sans'; font-style: normal; font-weight: 400; font-display: swap; src: url(fonts/fira-sans-400.woff2) format('woff2'); }
+@font-face { font-family: 'Fira Sans'; font-style: normal; font-weight: 600; font-display: swap; src: url(fonts/fira-sans-600.woff2) format('woff2'); }
+@font-face { font-family: 'Fira Sans'; font-style: normal; font-weight: 700; font-display: swap; src: url(fonts/fira-sans-700.woff2) format('woff2'); }
+@font-face { font-family: 'Fira Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url(fonts/fira-mono-400.woff2) format('woff2'); }
 /* type scale: xs captions/headings/log, sm secondary chrome, md body + panels, lg canvas
    overlays (chips, zoom bar, pane labels), xl display numbers (frame counter, progress mark) */
-:root { --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px; --fs-lg: 15px; --fs-xl: 22px; --font: system-ui, sans-serif;
+:root { --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px; --fs-lg: 15px; --fs-xl: 22px; --font: 'Fira Sans', system-ui, sans-serif; --font-logo: var(--font); --font-mono: 'Fira Mono', ui-monospace, monospace;
   --bg:#1e1e22; --panel:#26262b; --border:#3a3a42; --widget:#34343c; --accent:#3b82f6; --pop:#ff7a30; --c-source:#f0862a; --c-stack:#3b82f6; --c-depth:#22a55a; --text:#e6e6e6; --dim:#9a9aa3; --glass:rgba(20,20,22,.75); --glass-border:rgba(255,255,255,.12); }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -14,7 +21,8 @@ input { font: inherit; }
 select { background: var(--widget); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font: inherit; }
 .dim { color: var(--dim); } .small { font-size: var(--fs-xs); } .spacer { flex: 1; } .sep { width: 12px; display: inline-block; }
 #toolbar { align-items: center; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--border); }
-#toolbar .title { font-size: var(--fs-lg); padding-right: 8px; }
+/* wordmark: all caps, tracked out, and the one place the display font is used */
+#toolbar .title { font-family: var(--font-logo); font-size: 21px; font-weight: 600; line-height: 1; text-transform: uppercase; letter-spacing: .13em; padding-right: 14px; }
 /* toolbar: [file + run + status bar] [steps] [ ]; equal outer columns keep the steps centred */
 #toolbar { display: grid; grid-template-columns: minmax(max-content, 1fr) auto minmax(0, 1fr); column-gap: 10px; }
 #toolbar button { white-space: nowrap; }
@@ -131,7 +139,7 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #logbar { flex: none; display: flex; flex-direction: column; gap: 4px; padding: 5px 5px; border-right: 1px solid var(--border); }
 #logbar button { padding: 1px 6px; font-size: var(--fs-sm); line-height: 1.3; color: var(--dim); background: transparent; }
 #logbar button:hover:not(:disabled) { color: var(--text); background: var(--widget); }
-#log { flex: 1; min-width: 0; height: 120px; margin: 0; padding: 6px 10px; overflow-y: auto; font: var(--fs-xs) ui-monospace, monospace; color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; }
+#log { flex: 1; min-width: 0; height: 120px; margin: 0; padding: 6px 10px; overflow-y: auto; font: var(--fs-xs) var(--font-mono); color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; }
 #log { scrollbar-width: none; }
 #log::-webkit-scrollbar { display: none; }
 body.log-collapsed #log { display: none; }
@@ -228,7 +236,7 @@ body.step-save #toasts { bottom: 16px; }
 #savecard .check > input { order: 0; justify-self: start; }
 #savecard .check > span:last-child:not(:nth-child(2)) { margin-left: auto; }
 #fn-tokens { display: flex; flex-direction: column; }
-#fn-preview { min-height: 18px; font-family: ui-monospace, monospace; }
+#fn-preview { min-height: 18px; font-family: var(--font-mono); }
 #savecard .sv-head { display: flex; justify-content: space-between; align-items: center; }
 #savecard .sv-head .check { min-height: 0; font-weight: 400; }
 /* the file list: [checkbox][thumb][name + description][state] */
@@ -238,7 +246,7 @@ body.step-save #toasts { bottom: 16px; }
 .svf.off { opacity: .45; cursor: default; }
 .svf input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
 .svf canvas { width: 96px; height: 64px; display: block; background: #111; border-radius: 3px; }
-.svf .fname { font-family: ui-monospace, monospace; font-size: var(--fs-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.svf .fname { font-family: var(--font-mono); font-size: var(--fs-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .svf .desc { font-size: var(--fs-xs); color: var(--dim); margin-top: 2px; }
 .svf .state { font-size: var(--fs-xs); color: var(--dim); white-space: nowrap; }
 #an-info.warn { color: #e88; }
