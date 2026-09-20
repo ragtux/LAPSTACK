@@ -19,6 +19,7 @@ let cancelled = false;
 let running = false;
 let thumbJob = null;      // {files, indices, edge, gen} being decoded in the background
 let thumbGen = 0;
+let sourceGen = -1;       // newest 'load_source' request seen; older ones still queued are skipped
 
 // Decode + downscale added frames one by one (yielding between frames so a
 // 'run' or 'cancel' message can interleave); a run pauses this until it ends.
@@ -52,6 +53,7 @@ self.onmessage = (ev) => {
   const m = ev.data;
   if (m.type === 'cancel') { cancelled = true; return; }
   if (m.type === 'clear') { thumbGen++; thumbJob = null; return; }
+  if (m.type === 'load_source') sourceGen = Math.max(sourceGen, m.gen);
   enqueue(() => handle(m));
 };
 
@@ -128,20 +130,24 @@ async function handle(m) {
       running = false;
     } else if (m.type === 'load_source') {
       // m.focus = {dim, w0, w1, tex}: the In focus rendering of the frame instead of the
-      // plain frame. The decode + warp is skipped when the engine already holds that
-      // frame on the GPU; the plain frame also needs the CPU readback (the retouch
-      // brush source).
+      // plain frame. A request the page has since superseded (the user scrubbed on
+      // while this one waited behind another) is skipped: each costs a full decode.
+      // The decode + warp is skipped when the engine already holds that frame on the
+      // GPU; the plain frame also needs the CPU readback (the retouch brush source).
+      // m.bytes: the file, read by the page so the read overlapped our previous decode
+      // (a read issued here would wait for it); without them the File is read here.
       if (running) return;
+      if (m.gen < sourceGen) { post({ type: 'source-skipped', index: m.index, gen: m.gen, focus: !!m.focus }); return; }
       const held = engine.source_gpu_index() === m.index;
       let r = null;
       if (!held) {
-        const bytes = new Uint8Array(await m.file.arrayBuffer());
+        const bytes = new Uint8Array(m.bytes || await m.file.arrayBuffer());
         r = await engine.load_source(m.index, bytes, !m.focus);
       }
       if (m.focus) r = await engine.source_focus(m.focus.dim, m.focus.w0, m.focus.w1, m.focus.tex);
       else if (held) r = await engine.source_readback();
       const rgba = r.rgba;
-      post({ type: 'source', index: r.index, w: r.w, h: r.h, rgba: rgba.buffer, gen: m.gen, focus: !!m.focus }, [rgba.buffer]);
+      post({ type: 'source', index: r.index, w: r.w, h: r.h, rgba: rgba.buffer, gen: m.gen, focus: !!m.focus, prefetch: !!m.prefetch }, [rgba.buffer]);
     } else if (m.type === 'stroke' || m.type === 'undo' || m.type === 'redo') {
       const r = m.type === 'stroke' ? engine.stroke(m.dabs, m.target || 'fused') : m.type === 'undo' ? engine.undo() : engine.redo();
       const hist = engine.history();

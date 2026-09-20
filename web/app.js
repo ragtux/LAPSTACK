@@ -65,7 +65,8 @@ const st = {
   pick: false,          // ctrl+G: the next canvas click jumps to the frame that won that pixel
   running: false,
   retouch: { size: 100, hard: 0.5, painting: false, dabs: [], last: null, cursor: null, target: 'fused',
-             wasmIndex: -1, loading: -1, gen: 0, genMin: 0, undo: 0, redo: 0 },
+             wasmIndex: -1, loading: -1, gen: 0, genMin: 0, undo: 0, redo: 0,
+             gpuIndex: -1, prefetch: -1, ahead: null, dir: 1, lastSel: -1 },   // see ensureSource(): the frame the worker holds on the GPU, the one being prefetched, the read-ahead slot, the scrub direction
 };
 window.__st = st; window.__draw = () => draw();
 const dpr = () => window.devicePixelRatio || 1;
@@ -136,6 +137,7 @@ worker.onmessage = (ev) => {
     case 'frame': onFrame(m); break;
     case 'thumb': onThumb(m); break;
     case 'source': onSource(m); break;
+    case 'source-skipped': onSourceSkipped(m); break;
     case 'patch': onPatch(m); break;
     case 'thumb-error': log(`[lapstack] cannot decode ${m.name}: ${m.text}`); break;
     case 'done': onDone(m); break;
@@ -507,7 +509,7 @@ function srcPut(i, cv) {
 }
 function srcClear() { for (const cv of srcCache.values()) cv.width = 1; srcCache.clear(); }
 window.__srcCache = srcCache; window.__srcBudget = (b) => { SRC_BUDGET = b; };
-function resetRetouch() { srcClear(); R.wasmIndex = -1; R.loading = -1; R.gen++; R.genMin = R.gen; R.undo = 0; R.redo = 0; R.painting = false; R.dabs = []; }
+function resetRetouch() { srcClear(); R.wasmIndex = -1; R.gpuIndex = -1; R.loading = -1; R.prefetch = -1; R.ahead = null; R.gen++; R.genMin = R.gen; R.undo = 0; R.redo = 0; R.painting = false; R.dabs = []; }
 let srcTimer = null;
 // The Source and In focus layers are drawn from the proxy (proxy_edge px long
 // side) until the full-res aligned frame arrives, so a run's result is never
@@ -516,24 +518,63 @@ let srcTimer = null;
 const usesSource = (t) => t === 'source' || t === 'focus';
 const shown = (t) => st.view === t || (st.compare && st.cmp === t);
 const sourceShown = () => shown('source') || shown('focus');
+// Frame bytes are read here, on the main thread, not in the worker: a File read
+// only progresses while its thread's event loop is free, so a read issued in the
+// worker waits behind the decode running there, while one issued here overlaps
+// it. One read runs ahead, for the frame the scrub direction predicts next; the
+// worker needs no bytes for the frame it still holds warped on the GPU.
+function readBytes(i) {
+  const f = st.files[i];
+  if (R.ahead && R.ahead.file === f) { const p = R.ahead.p; R.ahead = null; return p; }
+  return f.arrayBuffer();
+}
+function readAhead(i) {
+  const f = st.files[i];
+  if (!f || (R.ahead && R.ahead.file === f)) return;
+  R.ahead = { file: f, p: f.arrayBuffer() };
+}
+// ask the worker for frame `index`: `focus` = the In focus rendering (focusParams()) or null for the plain frame
+function requestSource(index, focus, prefetch) {
+  const gen = ++R.gen, file = st.files[index];
+  const post = (bytes) => {
+    if (!st.result || gen < R.genMin || st.files[index] !== file) return;   // cleared or re-run while the bytes were read
+    worker.postMessage({ type: 'load_source', index, file, bytes, gen, focus, prefetch }, bytes ? [bytes] : []);
+  };
+  if (R.gpuIndex === index) post(null); else readBytes(index).then(post, () => post(null));   // on a read error the worker reads the File itself
+  if (srcLimit() >= 2) readAhead(index + R.dir);
+}
 function ensureSource() {
   if (!st.result || !st.files[st.selected]) return;
+  if (st.selected !== R.lastSel) { R.dir = st.selected < R.lastSel ? -1 : 1; R.lastSel = st.selected; }
   const forPaint = st.view === 'retouch';                      // strokes copy from the worker's own 16-bit copy
   // the plain frame first (Source, retouch), then the In focus rendering; one request at a time
   const needPlain = () => (forPaint && R.wasmIndex !== st.selected) || (shown('source') && !srcCache.has(st.selected));
   const needFocus = () => shown('focus') && !srcCache.has(`focus:${st.selected}`);
-  if (!(needPlain() || needFocus()) || R.loading === st.selected) return;
-  clearTimeout(srcTimer);
-  srcTimer = setTimeout(() => {
-    if (!(needPlain() || needFocus()) || R.loading === st.selected || st.running) return;
-    R.loading = st.selected; R.gen++;
-    worker.postMessage({ type: 'load_source', index: st.selected, file: st.files[st.selected], gen: R.gen, focus: needPlain() ? null : focusParams() });
-    updateTabs();
-  }, 250);
+  if (needPlain() || needFocus()) {
+    if (R.loading === st.selected) return;
+    clearTimeout(srcTimer);
+    srcTimer = setTimeout(() => {
+      if (!(needPlain() || needFocus()) || R.loading === st.selected || st.running) return;
+      R.loading = st.selected;
+      requestSource(st.selected, needPlain() ? null : focusParams(), false);
+      updateTabs();
+    }, 250);
+    return;
+  }
+  // This frame is on screen at full res and the worker is idle: warm the cache with
+  // the frame the scrub direction predicts next (one ahead; the cache keeps at least
+  // two frames for this to help). A real request supersedes a queued prefetch.
+  if (forPaint || R.loading >= 0 || R.prefetch >= 0 || st.running || srcLimit() < 2 || !sourceShown()) return;
+  const n = st.selected + R.dir; if (!st.files[n]) return;
+  const focus = !shown('source');   // Source shown (alone or beside In focus): the plain frame, as needPlain() will ask first
+  if (srcCache.has(focus ? `focus:${n}` : n)) return;
+  R.prefetch = n; requestSource(n, focus ? focusParams() : null, true);
 }
 async function onSource(m) {
   if (R.loading === m.index) R.loading = -1;
+  if (R.prefetch === m.index) R.prefetch = -1;
   if (!st.result || m.gen < R.genMin) return;   // aligned against a run that is gone
+  R.gpuIndex = m.index;         // the worker has this frame warped on the GPU now
   const cv = new OffscreenCanvas(m.w, m.h);
   cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(m.rgba), m.w, m.h), 0, 0);
   srcPut(m.focus ? `focus:${m.index}` : m.index, cv);   // keep it even if the user has scrubbed on: that is what the cache is for
@@ -542,6 +583,8 @@ async function onSource(m) {
   ensureSource();               // the other rendering of this frame, or the frame scrubbed to meanwhile
   updateTabs(); draw();
 }
+// the worker dropped a request that a newer one had superseded; ask again for what is on screen now
+function onSourceSkipped(m) { if (R.loading === m.index) R.loading = -1; if (R.prefetch === m.index) R.prefetch = -1; ensureSource(); updateTabs(); }
 const targetCanvas = () => (R.target === 'dmap' && st.result && st.result.dmap) ? st.result.dmap : st.result && st.result.fused;
 function onPatch(m) {
   R.undo = m.undo; R.redo = m.redo; updateTabs();
