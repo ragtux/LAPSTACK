@@ -12,7 +12,12 @@ function log(s) {
   if (!document.body.classList.contains('log-collapsed')) logEl.scrollTop = logEl.scrollHeight;
 }
 
-// log strip toolbar: collapse to just the toolbar, and copy the whole log
+// status bar (the foot of the log strip's toolbar): with the log open it is a square showing
+// only the barber pole / check / cross, so the stage text lives in its tooltip; collapsed it
+// stretches to the full bar and shows the text as well
+const setStatus = (s) => { $('status').textContent = s; $('progress').title = s; };
+
+// log strip toolbar: collapse to just the toolbar row + the status bar, and copy the whole log
 const setLogCollapsed = (on) => {
   document.body.classList.toggle('log-collapsed', on);
   const b = $('log-toggle');
@@ -126,7 +131,7 @@ worker.onmessage = (ev) => {
   if (m.rid && onReply(m)) return;
   switch (m.type) {
     case 'ready': {
-      $('status').textContent = 'ready'; $('progress').className = '';
+      setStatus('ready'); $('progress').className = '';
       const name = [m.info.vendor, m.info.architecture, m.info.description].filter(Boolean).join(' ') || 'WebGPU adapter';
       $('gpuinfo').textContent = `${name} · buffers ≤ ${m.info.max_buffer_mb} MB, bindings ≤ ${m.info.max_storage_mb} MB`;
       log(`[lapstack] WebGPU ready: ${JSON.stringify(m.info)}`);
@@ -242,7 +247,7 @@ document.addEventListener('drop', (e) => { e.preventDefault(); document.body.cla
 
 // ---------- run ----------
 function setProgress(text, done, total) {
-  $('progress').className = 'running'; $('status').textContent = `${text} ${total ? `${done}/${total}` : ''}`;
+  $('progress').className = 'running'; setStatus(`${text} ${total ? `${done}/${total}` : ''}`);
   $('fill').style.width = total ? `${(100 * done / total).toFixed(1)}%` : '100%';   // no total = indeterminate: full pole
 }
 $('run').addEventListener('click', () => {
@@ -259,7 +264,7 @@ $('cancel').addEventListener('click', () => worker.postMessage({ type: 'cancel' 
 function endRun(status) {
   st.running = false; $('runwrap').hidden = false; $('cancel').hidden = true; $('clear').disabled = false;
   $('progress').className = status.startsWith('done') ? 'done' : 'error'; $('fill').style.width = '0';
-  $('run').disabled = !st.files.length; $('status').textContent = status; updateTabs();
+  $('run').disabled = !st.files.length; setStatus(status); updateTabs();
 }
 function onFrame(m) {
   const peak = { w: m.peak_w, h: m.peak_h, data: new Float32Array(m.peak), bmp: null, bmpThr: -1, pct: null, pctThr: -1 };
@@ -600,7 +605,7 @@ async function saveSelected() {
     else log('[lapstack] save cancelled');
   }
   SV.exporting = false; $('run').disabled = !st.files.length; $('clear').disabled = false;
-  $('progress').className = status === 'saved' ? 'done' : 'error'; $('fill').style.width = '0'; $('status').textContent = status;
+  $('progress').className = status === 'saved' ? 'done' : 'error'; $('fill').style.width = '0'; setStatus(status);
   $('sv-progress').textContent = ''; updateSaveButtons();
 }
 $('sv-go').addEventListener('click', saveSelected);

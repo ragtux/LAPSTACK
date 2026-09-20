@@ -22,9 +22,6 @@
       </div>
     </span>
     <button id="cancel" hidden>Cancel</button>
-    <!-- fixed-size status bar: the stage text lives inside it, so the toolbar never reflows;
-         barber pole while running, green check when done -->
-    <span id="progress"><span id="fill"></span><span id="mark"></span><span id="status">starting…</span></span>
   </div>
   <div class="seg steps" id="steps">
     <button data-step="stack" class="on"><b>1</b> Stack</button>
@@ -187,11 +184,16 @@
     </div>
   </div>
 </div>
-<!-- log strip: a thin vertical toolbar on the left (collapse, copy) beside the log itself -->
+<!-- log strip: a thin vertical toolbar on the left (collapse, copy, and the status bar at its
+     foot) beside the log itself. The status bar shows the run state as a barber pole while
+     running, a green check when done and a red cross on error; with the log open it is a square
+     in the bottom-left corner with its stage text in the tooltip, and collapsed it stretches to
+     the full bar with the text inside, at the right end of the empty strip. -->
 <div id="logwrap">
   <div id="logbar">
     <button id="log-toggle" title="collapse log" aria-expanded="true" aria-controls="log">▾</button>
     <button id="log-copy" title="copy log to clipboard">⧉</button>
+    <span id="progress" title="starting…"><span id="fill"></span><span id="mark"></span><span id="status">starting…</span></span>
   </div>
   <pre id="log"></pre>
 </div>

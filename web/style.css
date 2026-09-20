@@ -25,7 +25,7 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #toolbar { align-items: center; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--border); }
 /* wordmark: all caps, tracked out, and the one place the display font is used */
 #toolbar .title { font-family: var(--font-logo); font-size: 21px; font-weight: 600; line-height: 1; text-transform: uppercase; letter-spacing: .13em; padding-right: 14px; }
-/* toolbar: [file + run + status bar] [steps] [ ]; equal outer columns keep the steps centred */
+/* toolbar: [file + run] [steps] [ ]; equal outer columns keep the steps centred */
 #toolbar { display: grid; grid-template-columns: minmax(max-content, 1fr) auto minmax(0, 1fr); column-gap: 10px; }
 #toolbar button { white-space: nowrap; }
 #tb-left, #tb-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -35,17 +35,6 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #cancel { min-width: 96px; }
 .menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 20; width: 320px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.5); display: flex; flex-direction: column; gap: 6px; }
 .menu .tog { justify-content: flex-start; }
-/* status bar: fixed size, text inside; .running = red/white barber pole fill, .done = green check, .error = red cross */
-#progress { position: relative; flex: none; width: 240px; height: 26px; border-radius: 7px; background: var(--widget); border: 1px solid var(--border); overflow: hidden; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
-#fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; opacity: 0; transition: width .15s linear; }
-#progress.running #fill { opacity: 1; background: repeating-linear-gradient(-45deg, #e23b3b 0 10px, #f4f4f4 10px 20px); background-size: 28.3px 28.3px; animation: pole .5s linear infinite; }
-@keyframes pole { to { background-position: 28.3px 0; } }
-#mark { position: relative; z-index: 1; display: none; font-size: var(--fs-xl); font-weight: 700; line-height: 1; }
-#progress.done #mark { display: inline; color: #2ecc71; } #progress.done #mark::before { content: "✓"; }
-#progress.error #mark { display: inline; color: #e23b3b; } #progress.error #mark::before { content: "✕"; }
-#status { position: relative; z-index: 1; font-size: var(--fs-sm); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; padding: 0 8px; }
-#progress.running #status { color: #fff; font-weight: 600; text-shadow: 0 0 3px #000, 0 0 3px #000, 0 1px 2px #000; }
-#progress.done #status { color: var(--text); }
 #main { flex: 1; display: flex; min-height: 0; }
 #left { width: 176px; flex: none; display: flex; flex-direction: column; min-height: 0; background: var(--panel); border-right: 1px solid var(--border); }
 #filmstrip { flex: 1; min-height: 0; overflow-y: auto; padding: 6px; display: flex; flex-direction: column; gap: 6px; }
@@ -139,8 +128,9 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 .panel .stepper button { padding: 0 8px; height: 24px; background: transparent; border-color: rgba(255,255,255,.09); color: var(--dim); }
 .panel .stepper button:hover:not(:disabled) { background: var(--widget); border-color: var(--border); color: var(--text); }
 .panel select { height: 24px; padding: 0 4px; }
-/* log strip: [vertical toolbar][log]; the strip is panel gray like the rest of the chrome and
-   the log itself keeps its black well; collapsed leaves just the toolbar, so all gray */
+/* log strip: [vertical toolbar + status bar][log]; the strip is panel gray like the rest of the
+   chrome and the log itself keeps its black well; collapsed leaves just the toolbar row, so all
+   gray, and the status bar stretches out along it */
 #logwrap { flex: none; display: flex; align-items: stretch; background: var(--panel); border-top: 1px solid var(--border); }
 #logbar { flex: none; display: flex; flex-direction: column; gap: 4px; padding: 5px 5px; border-right: 1px solid var(--border); }
 #logbar button { padding: 1px 6px; font-size: var(--fs-sm); line-height: 1.3; color: var(--dim); background: transparent; }
@@ -150,6 +140,31 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #log::-webkit-scrollbar { display: none; }
 body.log-collapsed #log { display: none; }
 body.log-collapsed #logbar { flex-direction: row; border-right: 0; }
+/* status bar: it shares the log strip with the log, so it takes whatever shape the strip leaves
+   free. With the log open the well wants the whole width, so the status bar is a square at the
+   foot of the left toolbar (the bottom-left corner of the window) showing only the barber pole /
+   check / cross, its stage text in the tooltip (setStatus). Collapsed, the strip is an empty row,
+   so it stretches to the full bar with the text inside, anchored to the right end.
+   .running = red/white barber pole fill, .done = green check, .error = red cross. */
+#progress { position: relative; flex: none; width: 24px; height: 24px; margin-top: auto; border-radius: 6px; background: var(--widget); border: 1px solid var(--border); overflow: hidden; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+#fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; opacity: 0; transition: width .15s linear; }
+/* the square is too small for the full bar's 10px stripes: half the period, so a few stripes
+   read as a pole rather than one diagonal */
+#progress.running #fill { opacity: 1; background: repeating-linear-gradient(-45deg, #e23b3b 0 5px, #f4f4f4 5px 10px); background-size: 14.14px 14.14px; animation: pole-sm .3s linear infinite; }
+@keyframes pole-sm { to { background-position: 14.14px 0; } }
+#mark { position: relative; z-index: 1; display: none; font-size: var(--fs-lg); font-weight: 700; line-height: 1; }
+#progress.done #mark { display: inline; color: #2ecc71; } #progress.done #mark::before { content: "✓"; }
+#progress.error #mark { display: inline; color: #e23b3b; } #progress.error #mark::before { content: "✕"; }
+#status { display: none; position: relative; z-index: 1; font-size: var(--fs-sm); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; padding: 0 8px; }
+#progress.running #status { color: #fff; font-weight: 600; text-shadow: 0 0 3px #000, 0 0 3px #000, 0 1px 2px #000; }
+#progress.done #status { color: var(--text); }
+/* collapsed: the toolbar takes the whole width so the auto margin can push the bar to the right */
+body.log-collapsed #logbar { flex: 1; }
+body.log-collapsed #progress { width: 240px; height: 26px; margin: 0 0 0 auto; border-radius: 7px; }
+body.log-collapsed #status { display: inline; }
+body.log-collapsed #mark { font-size: var(--fs-xl); }
+body.log-collapsed #progress.running #fill { background: repeating-linear-gradient(-45deg, #e23b3b 0 10px, #f4f4f4 10px 20px); background-size: 28.3px 28.3px; animation: pole .5s linear infinite; }
+@keyframes pole { to { background-position: 28.3px 0; } }
 .drop #main { outline: 2px dashed var(--accent); outline-offset: -4px; }
 #toasts { position: fixed; right: 16px; bottom: 136px; transition: bottom .1s linear; display: flex; flex-direction: column; gap: 8px; max-width: 460px; z-index: 10; }
 body.log-collapsed #toasts { bottom: 46px; }
