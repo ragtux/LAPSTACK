@@ -39,6 +39,22 @@ const setKeysCollapsed = (on) => {
 const toggleKeys = () => setKeysCollapsed(!$('keys').classList.contains('collapsed'));
 $('keys-toggle').onclick = toggleKeys;
 try { if (localStorage.getItem('lapstack.keys') === '0') setKeysCollapsed(true); } catch {}
+
+// parameter panel: each section heading collapses the rows under it (the .sec-body that follows),
+// so a short window can be cut down to the groups in use; the collapsed set is remembered
+const collapsedSecs = new Set((() => { try { return JSON.parse(localStorage.getItem('lapstack.sections') || '[]'); } catch { return []; } })());
+for (const h of document.querySelectorAll('#params button.section')) {
+  const set = (on) => {
+    h.classList.toggle('collapsed', on); h.setAttribute('aria-expanded', String(!on));
+    h.title = on ? `show ${h.textContent.toLowerCase()}` : `hide ${h.textContent.toLowerCase()}`;
+    collapsedSecs[on ? 'add' : 'delete'](h.dataset.sec);
+  };
+  set(collapsedSecs.has(h.dataset.sec));
+  h.onclick = () => {
+    set(!h.classList.contains('collapsed'));
+    try { localStorage.setItem('lapstack.sections', JSON.stringify([...collapsedSecs])); } catch {}
+  };
+}
 $('log-copy').onclick = async () => {
   const b = $('log-copy');
   try {

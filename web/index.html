@@ -108,40 +108,60 @@
       </div>
     </div>
   </div>
+  <!-- run parameters: each section heading is a toggle for the .sec-body under it, so a short
+       window can be cut down to the groups in use (the collapsed set is remembered) -->
   <div id="params" class="panel">
     <!-- retouch mode: the brush sits above the run parameters while it is on -->
     <div id="brush" hidden>
-      <div class="section">Brush</div>
-      <label>size <span class="val" id="br-size">100</span></label>
-      <input type="range" id="br-size-in" min="0" max="100" value="50" title="[ / ]">
-      <label>hardness <span class="val" id="br-hard">0.50</span></label>
-      <input type="range" id="br-hard-in" min="0" max="95" value="50">
-      <div class="section">Source</div>
-      <div class="dim small">Pick the frame to paint from in the filmstrip, with ←/→ or the slider. It is decoded and re-aligned on demand (~1 s at 45 MP).</div>
-      <div class="section">History</div>
-      <div class="row"><button id="undo" title="ctrl+z" disabled>undo</button><button id="redo" title="ctrl+shift+z" disabled>redo</button><span id="hist" class="dim small"></span></div>
-      <div class="section">How to</div>
-      <div class="dim small">Left pane: the stacked image (LAP or DFR, whichever is selected) · right pane: the source frame. Drag on either pane to paint the source into the stacked image; shift+drag pans; wheel zooms; double-click fits / 100 %. Esc or the Retouch button leaves.</div>
+      <button class="section" type="button" data-sec="brush">Brush</button>
+      <div class="sec-body">
+        <label>size <span class="val" id="br-size">100</span></label>
+        <input type="range" id="br-size-in" min="0" max="100" value="50" title="[ / ]">
+        <label>hardness <span class="val" id="br-hard">0.50</span></label>
+        <input type="range" id="br-hard-in" min="0" max="95" value="50">
+      </div>
+      <button class="section" type="button" data-sec="brush-source">Source</button>
+      <div class="sec-body">
+        <div class="dim small">Pick the frame to paint from in the filmstrip, with ←/→ or the slider. It is decoded and re-aligned on demand (~1 s at 45 MP).</div>
+      </div>
+      <button class="section" type="button" data-sec="brush-history">History</button>
+      <div class="sec-body">
+        <div class="row"><button id="undo" title="ctrl+z" disabled>undo</button><button id="redo" title="ctrl+shift+z" disabled>redo</button><span id="hist" class="dim small"></span></div>
+      </div>
+      <button class="section" type="button" data-sec="brush-howto">How to</button>
+      <div class="sec-body">
+        <div class="dim small">Left pane: the stacked image (LAP or DFR, whichever is selected) · right pane: the source frame. Drag on either pane to paint the source into the stacked image; shift+drag pans; wheel zooms; double-click fits / 100 %. Esc or the Retouch button leaves.</div>
+      </div>
     </div>
-    <div class="section">Alignment</div>
-    <label><input type="checkbox" id="p-align" checked> align frames</label>
-    <label><input type="checkbox" id="p-shift" checked> shift</label>
-    <label><input type="checkbox" id="p-scale" checked> scale</label>
-    <label><input type="checkbox" id="p-rotation" checked> rotation</label>
-    <label class="stepper">align coarsen <span><button data-step="p-coarsen" data-d="-1">−</button><span id="p-coarsen" data-min="0" data-max="5">2</span><button data-step="p-coarsen" data-d="1">+</button></span></label>
-    <div class="section">Fusion</div>
-    <label class="stepper">levels <span><button data-step="p-levels" data-d="-1">−</button><span id="p-levels" data-min="0" data-max="12" data-zero="auto">0</span><button data-step="p-levels" data-d="1">+</button></span></label>
-    <label class="stepper">energy radius <span><button data-step="p-energy" data-d="-1">−</button><span id="p-energy" data-min="0" data-max="4">1</span><button data-step="p-energy" data-d="1">+</button></span></label>
-    <label>top rule <select id="p-top"><option value="de">deviation + entropy</option><option value="dev">deviation</option><option value="avg">average</option></select></label>
-    <label class="stepper">top radius <span><button data-step="p-topr" data-d="-1">−</button><span id="p-topr" data-min="1" data-max="6">2</span><button data-step="p-topr" data-d="1">+</button></span></label>
-    <label><input type="checkbox" id="p-chroma"> use chroma</label>
-    <div class="section">Depth map</div>
-    <label class="stepper" title="depth from focus works on a grid of 1/2^N the frame size">grid 1/2^N <span><button data-step="p-depthscale" data-d="-1">−</button><span id="p-depthscale" data-min="1" data-max="4">2</span><button data-step="p-depthscale" data-d="1">+</button></span></label>
-    <label class="stepper" title="pyramid level the winner map (ctrl+G pixel lookup, Save winner map) is read from (0 = full resolution, noisy where the scene is flat)">winner map level <span><button data-step="p-depthlevel" data-d="-1">−</button><span id="p-depthlevel" data-min="0" data-max="6">2</span><button data-step="p-depthlevel" data-d="1">+</button></span></label>
-    <div class="section">View</div>
-    <label class="stepper">proxy edge px <span><button data-step="p-proxy" data-d="-200">−</button><span id="p-proxy" data-min="400" data-max="3000">1400</span><button data-step="p-proxy" data-d="200">+</button></span></label>
-    <div class="section">GPU</div>
-    <div id="gpuinfo" class="dim small">—</div>
+    <button class="section" type="button" data-sec="alignment">Alignment</button>
+    <div class="sec-body">
+      <label><input type="checkbox" id="p-align" checked> align frames</label>
+      <label><input type="checkbox" id="p-shift" checked> shift</label>
+      <label><input type="checkbox" id="p-scale" checked> scale</label>
+      <label><input type="checkbox" id="p-rotation" checked> rotation</label>
+      <label class="stepper">align coarsen <span><button data-step="p-coarsen" data-d="-1">−</button><span id="p-coarsen" data-min="0" data-max="5">2</span><button data-step="p-coarsen" data-d="1">+</button></span></label>
+    </div>
+    <button class="section" type="button" data-sec="fusion">Fusion</button>
+    <div class="sec-body">
+      <label class="stepper">levels <span><button data-step="p-levels" data-d="-1">−</button><span id="p-levels" data-min="0" data-max="12" data-zero="auto">0</span><button data-step="p-levels" data-d="1">+</button></span></label>
+      <label class="stepper">energy radius <span><button data-step="p-energy" data-d="-1">−</button><span id="p-energy" data-min="0" data-max="4">1</span><button data-step="p-energy" data-d="1">+</button></span></label>
+      <label>top rule <select id="p-top"><option value="de">deviation + entropy</option><option value="dev">deviation</option><option value="avg">average</option></select></label>
+      <label class="stepper">top radius <span><button data-step="p-topr" data-d="-1">−</button><span id="p-topr" data-min="1" data-max="6">2</span><button data-step="p-topr" data-d="1">+</button></span></label>
+      <label><input type="checkbox" id="p-chroma"> use chroma</label>
+    </div>
+    <button class="section" type="button" data-sec="depthmap">Depth map</button>
+    <div class="sec-body">
+      <label class="stepper" title="depth from focus works on a grid of 1/2^N the frame size">grid 1/2^N <span><button data-step="p-depthscale" data-d="-1">−</button><span id="p-depthscale" data-min="1" data-max="4">2</span><button data-step="p-depthscale" data-d="1">+</button></span></label>
+      <label class="stepper" title="pyramid level the winner map (ctrl+G pixel lookup, Save winner map) is read from (0 = full resolution, noisy where the scene is flat)">winner map level <span><button data-step="p-depthlevel" data-d="-1">−</button><span id="p-depthlevel" data-min="0" data-max="6">2</span><button data-step="p-depthlevel" data-d="1">+</button></span></label>
+    </div>
+    <button class="section" type="button" data-sec="view">View</button>
+    <div class="sec-body">
+      <label class="stepper">proxy edge px <span><button data-step="p-proxy" data-d="-200">−</button><span id="p-proxy" data-min="400" data-max="3000">1400</span><button data-step="p-proxy" data-d="200">+</button></span></label>
+    </div>
+    <button class="section" type="button" data-sec="gpu">GPU</button>
+    <div class="sec-body">
+      <div id="gpuinfo" class="dim small">—</div>
+    </div>
   </div>
   <!-- Save step: the whole main area is one centred card (the filmstrip, canvas, panel and log
        are hidden by body.step-save), so nothing competes with the save settings -->
