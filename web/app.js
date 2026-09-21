@@ -958,7 +958,7 @@ function previewDab(x, y) {
 // built at the pane's own scale and cut to the pane, so a brush wider than the window
 // costs what the window costs, not what the brush does.
 function hoverDab(c, d) {
-  if (!R.cursor || R.hold) return;
+  if (!R.cursor || R.hold || shiftHeld) return;
   const [x, y] = R.cursor, [w, h] = imageDims();
   const clip = [Math.max(0, -st.ox / st.zoom), Math.max(0, -st.oy / st.zoom),
                 Math.min(w, (canvas.clientWidth - st.ox) / st.zoom), Math.min(h, (canvas.clientHeight - st.oy) / st.zoom)];
@@ -1074,7 +1074,7 @@ function sizeCanvas(cv, d) {
   if (cv.width !== Math.round(cw * d) || cv.height !== Math.round(ch * d)) { cv.width = Math.round(cw * d); cv.height = Math.round(ch * d); }
 }
 function drawCursor(c, d) {
-  if (!R.cursor) return;
+  if (!R.cursor || shiftHeld) return;
   c.setTransform(st.zoom * d, 0, 0, st.zoom * d, st.ox * d, st.oy * d);
   c.lineWidth = 1.5 / (st.zoom * d); c.strokeStyle = 'rgba(255,255,255,.9)'; c.beginPath(); c.arc(R.cursor[0], R.cursor[1], R.size, 0, 2 * Math.PI); c.stroke();
   c.strokeStyle = 'rgba(0,0,0,.6)'; c.beginPath(); c.arc(R.cursor[0], R.cursor[1], R.size * R.hard, 0, 2 * Math.PI); c.stroke();
@@ -1205,8 +1205,25 @@ function pickAt(cv, e) {
   updateTabs(); renderFilmstrip(); revealSelected(); draw();
   log(`[lapstack] (${Math.round(x)}, ${Math.round(y)}) is sharpest in frame ${i + 1}/${st.files.length}: ${st.files[i].name}`);
 }
+// Shift means pan: it suspends the brush (pointerdown below) and pans instead, so while it is
+// held the pane shows the move cursor in place of grab — and in retouch mode in place of the
+// brush's cursor: none, with the brush ring and its hover preview hidden so the pointer is the
+// only cursor on screen. Pointer events carry the state too: the key may have gone down while
+// another window had focus, and it may come up there (blur).
+let shiftHeld = false;
+function setShift(on) {
+  if (on === shiftHeld || (on && R.painting)) return;   // mid-stroke shift pans nothing: the brush keeps its ring
+  shiftHeld = on;
+  $('vwrap').classList.toggle('shift', on);
+  if (R.on) draw();
+}
+addEventListener('keydown', (e) => setShift(e.shiftKey));
+addEventListener('keyup', (e) => setShift(e.shiftKey));
+addEventListener('blur', () => setShift(false));
+
 for (const cv of [canvas, canvas2]) {
   cv.addEventListener('pointerdown', (e) => {
+    setShift(e.shiftKey);
     if (st.pick && e.button === 0) { e.preventDefault(); pickAt(cv, e); return; }
     const paint = R.on && st.result && e.button === 0 && !e.shiftKey && !(e.buttons & 4);
     try { cv.setPointerCapture(e.pointerId); } catch {}
@@ -1217,6 +1234,7 @@ for (const cv of [canvas, canvas2]) {
     drag = { x: e.clientX, y: e.clientY, ox: st.ox, oy: st.oy }; cv.classList.add('drag');
   });
   cv.addEventListener('pointermove', (e) => {
+    setShift(e.shiftKey);
     if (R.on) { R.cursor = imgXY(cv, e); R.hold = false; }
     if (R.painting) { const [x, y] = imgXY(cv, e); addDab(x, y); drawSoon(); return; }
     if (drag) { st.ox = drag.ox + e.clientX - drag.x; st.oy = drag.oy + e.clientY - drag.y; st.fitted = false; }

@@ -200,6 +200,9 @@ body.log-collapsed #toasts { bottom: 46px; }
 #vwrap.split { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
 #vwrap.split canvas { position: relative; inset: auto; width: 100%; height: 100%; cursor: grab; }
 #vwrap.paint canvas { cursor: none; }
+/* shift is pan (it suspends the brush): the move cursor stands in for grab, and for the
+   brush's own cursor: none — the pick crosshair below still wins over it */
+#vwrap.shift canvas { cursor: move; }
 /* ctrl+G: pick the frame that won a pixel */
 #vwrap.pick canvas { cursor: crosshair; }
 #corner-br { position: absolute; right: 10px; bottom: 10px; z-index: 3; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
