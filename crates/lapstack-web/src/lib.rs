@@ -316,10 +316,26 @@ fn encode_rgb16(v: &[u16], w: u32, h: u32, format: &str, quality: u8, bits16: bo
     Ok(out)
 }
 
+/// A stacked image kept past its run — the LAP or DFR master of an earlier run,
+/// or an image file loaded as one — to view, compare, brush from and save
+/// (`keep`, `keep_file`, `drop_kept`; `stroke` takes `from = "kept:ID"`, `encode`
+/// `kind = "kept:ID"`). Its own crop and metadata go with it, so it saves as it
+/// would have when it was the result. The page owns the ids and the memory budget.
+struct Kept {
+    id: u32,
+    w: usize,
+    h: usize,
+    bits: u32,
+    rgb16: Vec<u16>,
+    crop: Option<Rect>,
+    meta: lapstack_core::meta::Meta,
+}
+
 #[wasm_bindgen]
 pub struct Engine {
     gpu: Gpu,
     run: Option<Run>,
+    kept: Vec<Kept>,
 }
 
 /// Decode a frame on the CPU and area-average it to `edge` px on the long side:
@@ -367,7 +383,7 @@ pub fn thumbnail(bytes: &[u8], edge: usize) -> Result<JsValue, JsValue> {
 pub async fn create_engine() -> Result<Engine, JsValue> {
     console_error_panic_hook::set_once();
     let gpu = Gpu::new().await.map_err(|e| JsValue::from_str(&e))?;
-    Ok(Engine { gpu, run: None })
+    Ok(Engine { gpu, run: None, kept: Vec::new() })
 }
 
 /// The full-resolution depth map (u16, 65535 = last frame): the DFF map, or
@@ -388,6 +404,16 @@ fn set(obj: &js_sys::Object, k: &str, v: impl Into<JsValue>) {
 }
 
 /// {target, x, y, w, h, rgba: Uint8Array} of a bbox of an RGB u16 image.
+/// RGBA8 display copy of an interleaved RGB u16 image of `n` pixels.
+fn rgba8_of(rgb: &[u16], n: usize) -> Vec<u8> {
+    let mut rgba = vec![255u8; n * 4];
+    for i in 0..n {
+        for k in 0..3 {
+            rgba[4 * i + k] = (rgb[3 * i + k] as f32 / 65535.0 * 255.0 + 0.5) as u8;
+        }
+    }
+    rgba
+}
 fn patch_obj(img: &[u16], iw: usize, dmap: bool, x: usize, y: usize, w: usize, h: usize) -> JsValue {
     let mut rgba = vec![0u8; w * h * 4];
     for r in 0..h {
@@ -624,6 +650,49 @@ impl Engine {
 
     pub fn reset(&mut self) {
         self.run = None;
+    }
+
+    /// Keep the run's `kind` (fused | dmap) master under `id`, taking it out of the
+    /// run — one about to be reset, or whose result the page has let go. Returns
+    /// false when there is none to keep.
+    pub fn keep(&mut self, id: u32, kind: &str) -> bool {
+        let Some(run) = self.run.as_mut() else { return false };
+        let Some(rgb16) = (if kind == "dmap" { run.dmap_rgb16.take() } else { run.fused_rgb16.take() }) else { return false };
+        self.kept.retain(|k| k.id != id);
+        self.kept.push(Kept { id, w: run.w, h: run.h, bits: run.bits, rgb16, crop: run.crop, meta: run.meta.clone() });
+        run.view_base = None;
+        true
+    }
+
+    /// Keep an image file (PNG / JPEG / TIFF, 8- or 16-bit) as a result under `id`:
+    /// a saved result of an earlier session, or another program's — to compare
+    /// with and to brush from. Its EXIF / ICC / XMP go with it, and it has no crop.
+    /// Returns {w, h, bits, rgba: Uint8Array (RGBA8)} for the page's display copy.
+    pub fn keep_file(&mut self, id: u32, bytes: &[u8]) -> Result<JsValue, JsValue> {
+        let frame = decode::decode(bytes).map_err(|e| JsValue::from_str(&e))?;
+        let (w, h) = (frame.w, frame.h);
+        let rgba = rgba8_of(&frame.rgb, w * h);
+        self.kept.retain(|k| k.id != id);
+        self.kept.push(Kept { id, w, h, bits: frame.bits, rgb16: frame.rgb, crop: None, meta: lapstack_core::meta::extract(bytes) });
+        let o = js_sys::Object::new();
+        set(&o, "w", w as u32);
+        set(&o, "h", h as u32);
+        set(&o, "bits", frame.bits);
+        set(&o, "rgba", js_sys::Uint8Array::from(&rgba[..]));
+        Ok(o.into())
+    }
+
+    pub fn drop_kept(&mut self, id: u32) {
+        self.kept.retain(|k| k.id != id);
+    }
+
+    pub fn drop_all_kept(&mut self) {
+        self.kept.clear();
+    }
+
+    /// Bytes held by the kept results (the page's budget counts them).
+    pub fn kept_bytes(&self) -> f64 {
+        self.kept.iter().map(|k| (k.rgb16.len() * 2) as f64).sum()
     }
 
     /// Decode, align (chained to frame 0) and fold one frame. The first call
@@ -1206,12 +1275,25 @@ impl Engine {
     /// rendering and back.
     /// Returns the updated bbox as {x, y, w, h, rgba}.
     pub fn stroke(&mut self, dabs: &[f32], target: &str, from: &str) -> Result<JsValue, JsValue> {
-        let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
+        let Engine { run, kept, .. } = self;
+        let run = run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         let (w, h) = (run.w, run.h);
         let dmap = target == "dmap";
         if from == target {
             return Err(JsValue::from_str("the brush source is the paint target"));
         }
+        // a kept result as the source: it has to be the run's size (the same frames, as a rule)
+        let kept_src: Option<&[u16]> = match from.strip_prefix("kept:") {
+            Some(id) => {
+                let id: u32 = id.parse().map_err(|_| JsValue::from_str("bad kept id"))?;
+                let k = kept.iter().find(|k| k.id == id).ok_or_else(|| JsValue::from_str("no such kept result"))?;
+                if (k.w, k.h) != (w, h) {
+                    return Err(JsValue::from_str(&format!("the kept result is {}x{}, the stack {}x{}", k.w, k.h, w, h)));
+                }
+                Some(&k.rgb16)
+            }
+            None => None,
+        };
         run.edits += 1;
         // target and source as one pair per case: they are different fields of the run,
         // which the borrow checker only sees when both are named in the same expression
@@ -1223,6 +1305,8 @@ impl Engine {
         let (fused, src): (&mut Vec<u16>, &[u16]) = match (dmap, from) {
             (false, "dmap") => (run.fused_rgb16.as_mut().ok_or_else(|| err(NO_FUSED))?, run.dmap_rgb16.as_deref().ok_or_else(|| err(NO_DMAP))?),
             (true, "fused") => (run.dmap_rgb16.as_mut().ok_or_else(|| err(NO_DMAP))?, run.fused_rgb16.as_deref().ok_or_else(|| err(NO_FUSED))?),
+            (false, _) if kept_src.is_some() => (run.fused_rgb16.as_mut().ok_or_else(|| err(NO_FUSED))?, kept_src.unwrap()),
+            (true, _) if kept_src.is_some() => (run.dmap_rgb16.as_mut().ok_or_else(|| err(NO_DMAP))?, kept_src.unwrap()),
             (false, "slab") => (run.fused_rgb16.as_mut().ok_or_else(|| err(NO_FUSED))?, &run.slab_rgb16.as_ref().ok_or_else(|| err(NO_SLAB))?.2),
             (true, "slab") => (run.dmap_rgb16.as_mut().ok_or_else(|| err(NO_DMAP))?, &run.slab_rgb16.as_ref().ok_or_else(|| err(NO_SLAB))?.2),
             (false, _) => (run.fused_rgb16.as_mut().ok_or_else(|| err(NO_FUSED))?, &run.src_rgb16.as_ref().ok_or_else(|| err(NO_SRC))?.1),
@@ -1331,6 +1415,22 @@ impl Engine {
     /// image is cut to the area all frames cover (`finish`'s crop). Returns the file bytes.
     pub fn encode(&self, kind: &str, format: &str, quality: u8, metadata: bool, crop: bool) -> Result<js_sys::Uint8Array, JsValue> {
         use image::ImageEncoder;
+        if let Some(id) = kind.strip_prefix("kept:") {
+            let id: u32 = id.parse().map_err(|_| JsValue::from_str("bad kept id"))?;
+            let k = self.kept.iter().find(|k| k.id == id).ok_or_else(|| JsValue::from_str("no such kept result"))?;
+            let (v, w, h): (std::borrow::Cow<'_, [u16]>, u32, u32) = match if crop { k.crop } else { None } {
+                Some(r) => {
+                    let mut out = Vec::with_capacity(r.w * r.h * 3);
+                    for y in r.y..r.y + r.h {
+                        out.extend_from_slice(&k.rgb16[(y * k.w + r.x) * 3..(y * k.w + r.x + r.w) * 3]);
+                    }
+                    (std::borrow::Cow::Owned(out), r.w as u32, r.h as u32)
+                }
+                None => (std::borrow::Cow::Borrowed(&k.rgb16[..k.w * k.h * 3]), k.w as u32, k.h as u32),
+            };
+            let out = encode_rgb16(&v, w, h, format, quality, k.bits == 16).map_err(|e| JsValue::from_str(&e))?;
+            return Ok(js_sys::Uint8Array::from(&if metadata { lapstack_core::meta::embed(out, &k.meta) } else { out }[..]));
+        }
         let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no result"))?;
         let area = if crop { run.crop } else { None };
         // the `r` window of a `ch`-channel interleaved plane `run.w` wide

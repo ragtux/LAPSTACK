@@ -535,7 +535,8 @@ whenever LAP or DFR is on screen. It turns the view into a side-by-side
 compare with one zoom/pan — the stacked image on the left (LAP or DFR,
 whichever is selected: that is the paint target), the brush source on the
 right — and shows the brush controls above the run parameters in the
-panel. The source is the scrubbed source frame; a **slab**; or, after a
+panel. The source is the scrubbed source frame; a **slab**; a **kept result** of
+the run's size (below); or, after a
 *Run LAP + DFR*, the **other stacked result** (the panel's *Source* section,
 or `S` to cycle): DFR while LAP is painted, LAP while DFR is, so the
 pyramid's fine detail can be brushed into the depth-map rendering and its
@@ -574,6 +575,30 @@ the compare that was open before it. While dragging, the stroke is previewed
 on the display copy; on release the worker applies it to the 16-bit master,
 sends back the exact patch, and Save writes the retouched image. Undo
 history is capped at ~600 MB of patches.
+
+**Results** (the panel's *Results* section): a result stays on past its run,
+the way Helicon Focus keeps every run's output in a list. When the next run
+starts — or the frame list changes under the result — its LAP and DFR images
+become *kept results*: the engine takes the 16-bit masters out of the run
+(`keep` in `lapstack-web/src/lib.rs`), the page keeps the display copies, and
+each is named after its run (*run 3 · LAP*, its frames, settings and time in
+the tooltip). A kept result is a layer of the **Stack** group, so two runs
+with different settings can be compared with *vs*, swipe or side by side; a
+kept result of the run's size is a brush source for the retouch (*Result* in
+the brush's *Source* section, `S` cycles to it), the way Zerene retouches
+from any saved output; and each is a row of the Save step, cut to its own
+crop window and carrying its own metadata (`encode` takes `kept:ID`). *Load
+result…* takes a saved result — an earlier session's, the CLI's, another
+program's — as one more (`keep_file`: decoded in the engine, its EXIF / ICC /
+XMP kept, no crop); a file of another size can be viewed and compared but
+not brushed from. The masters are held in wasm memory, so *results kept MB*
+in the section bounds them (default 1536 MB; a 45 MP image is 270 MB; 0
+keeps none): over it, the oldest go first, the newest always stays, and
+each row's ✕ lets one go by hand. Frames apart, kept results are all a
+session holds — *Clear* drops them — and a batch keeps nothing, since its
+stacks are saved as they finish (the result on screen when a batch starts
+is kept). With no run's result on hand the Stack group and the Save step
+still open on the kept ones.
 
 **Depth slice**: with `slice` on, the Depth view (gray or Turbo) paints a
 60 % magenta band over the pixels the depth map assigns to the scrubbed

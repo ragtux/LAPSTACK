@@ -77,6 +77,8 @@ const st = {
   off: [],              // excluded frames, {f, fr, at}: the file, its thumb entry, and the index of st.files it sits before (see frameList)
   frames: [],           // per processed frame: {name, w, h, proxy: ImageBitmap, sim}
   result: null,         // {w, h, bits, fused: OffscreenCanvas, dmap: OffscreenCanvas|null, depth: Float32Array, dw, dh, winner: Float32Array, ww, wh}
+  kept: [],             // results kept past their run, see keepResult: {id, kind, label, w, h, bits, canvas, crop, meta, params, frames, first, last, secs, when}
+  runs: 0,              // runs started this session: a kept result is named after its run
   depthBmp: new Map(),  // 'lut' -> ImageBitmap of the depth map (gray | turbo)
   step: 'stack', view: 'source', selected: 0,
   compare: false, cmp: 'depth', cmpMode: 'swipe', divider: 0.5, flipped: false,
@@ -93,6 +95,8 @@ const st = {
              slab: null, slabLoading: null, slabProgress: null, slabGen: 0, slabGenMin: 0 },   // see ensureSlab(): the slab held ({lo, hi, canvas}), the one being built ({lo, hi, gen}), its progress
 };
 window.__st = st; window.__draw = () => draw();
+// more hooks for the headless harness (web/test/headless.mjs)
+window.__gotoStep = (s) => gotoStep(s); window.__call = (m) => call(m); window.__loadKeptFile = (f) => loadKeptFile(f); window.__setStep = (id, v) => setStep(id, v); window.__updateTabs = () => updateTabs(); window.__imageDims = () => imageDims();
 // The batch: the frame list cut into stacks (stacksOf), run in turn. While one is in hand
 // `all` holds every file and st.files the stack being run; `stacks` keeps each stack's
 // status for the filmstrip's headers (lo/hi index into `all`, or st.files once shown again).
@@ -101,7 +105,7 @@ const dpr = () => window.devicePixelRatio || 1;
 
 // ---------- settings (persisted) ----------
 const PK = 'lapstack.settings';
-const stepDefaults = { 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5, 'p-dslab-size': 10, 'p-dslab-ov': 2, 'p-split-n': 30, 'p-split-gap': 10 };
+const stepDefaults = { 'p-kept': 1536, 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5, 'p-dslab-size': 10, 'p-dslab-ov': 2, 'p-split-n': 30, 'p-split-gap': 10 };
 function readParams() {
   const n = (id) => Number($(id).textContent === 'auto' ? 0 : $(id).textContent);
   return {
@@ -112,7 +116,7 @@ function readParams() {
     render_slabs: $('p-dslabs').checked, slab_size: n('p-dslab-size'), slab_overlap: n('p-dslab-ov'),
     turbo: st.turbo, slice: st.slice, peak_on: st.peak.on, peak_strip: st.peak.strip, peak_thr: st.peak.thr, cmp_mode: st.retouch.on && st.retouch.prev ? st.retouch.prev.cmpMode : st.cmpMode,
     brush_size: st.retouch.size, brush_hard: st.retouch.hard, brush_from: st.retouch.from, brush_slab: n('p-slab'),
-    split: $('p-split').value, split_n: n('p-split-n'), split_gap: n('p-split-gap'),
+    split: $('p-split').value, split_n: n('p-split-n'), split_gap: n('p-split-gap'), kept_mb: n('p-kept'),
   };
 }
 function setStep(id, v) {
@@ -132,6 +136,7 @@ function applyParams(p) {
   st.retouch.size = p.brush_size ?? 100; st.retouch.hard = p.brush_hard ?? 0.5; st.retouch.from = ['stack', 'slab'].includes(p.brush_from) ? p.brush_from : 'source';
   setStep('p-slab', p.brush_slab ?? 5);
   $('p-split').value = ['count', 'gap', 'dir'].includes(p.split) ? p.split : 'none'; setStep('p-split-n', p.split_n ?? 30); setStep('p-split-gap', p.split_gap ?? 10);
+  setStep('p-kept', p.kept_mb ?? 1536);
 }
 function saveParams() { try { localStorage.setItem(PK, JSON.stringify(readParams())); } catch {} }
 try { applyParams(JSON.parse(localStorage.getItem(PK))); } catch {}
@@ -428,7 +433,7 @@ $('add').addEventListener('click', () => $('file').click());
 $('file').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
 $('addf').addEventListener('click', () => $('dir').click());
 $('dir').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
-$('clear').addEventListener('click', () => { if (st.running || SV.exporting) return; setPick(false); worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.off = []; st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); B.all = null; B.frames = null; B.stacks = []; B.done = false; st.step = 'stack'; gotoStep('stack'); renderFilmstrip(); runLabel(); updateTabs(); setView('source'); });
+$('clear').addEventListener('click', () => { if (st.running || SV.exporting) return; setPick(false); worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.off = []; st.result = null; dropAllKept(); st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); B.all = null; B.frames = null; B.stacks = []; B.done = false; st.step = 'stack'; gotoStep('stack'); renderFilmstrip(); runLabel(); updateTabs(); setView('source'); });
 document.addEventListener('dragover', (e) => { if (fsDrag !== null) return; e.preventDefault(); document.body.classList.add('drop'); });
 document.addEventListener('dragleave', () => document.body.classList.remove('drop'));
 document.addEventListener('drop', (e) => { if (fsDrag !== null) return; e.preventDefault(); document.body.classList.remove('drop'); if (!st.running) droppedFiles(e.dataTransfer).then(addFiles); });
@@ -462,12 +467,94 @@ function setFrameList(list) {
 const bareFrame = (f) => (f ? { name: f.name, thumb: f.thumb, proxy: f.proxy, strip: f.strip, w: f.w, h: f.h, bits: f.bits } : f);
 function dropResult(why) {
   if (R.on) leaveRetouch(false);
+  const kept = keepResult(why);
   st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); setPick(false);
   st.frames = st.frames.map(bareFrame);
   for (const o of st.off) o.fr = bareFrame(o.fr);
   st.compare = false; st.view = 'source'; if (st.step !== 'stack') gotoStep('stack');
-  $('progress').className = ''; setStatus('result dropped, run again');
-  log(`[lapstack] ${why}: the result is dropped, run again`);
+  $('progress').className = ''; setStatus(kept.length ? `result kept as ${kept[0].label.split(' · ')[0]}, run again` : 'result dropped, run again');
+  if (!kept.length) log(`[lapstack] ${why}: the result is dropped, run again`);
+}
+// ---------- kept results ----------
+// A result stays on past its run: when the next run starts (or the frame list changes under
+// it), its LAP and DFR images become kept results — the engine takes the 16-bit masters out
+// of the run (`keep`), the page keeps the display canvases — each a layer of the Stack group
+// to view and compare, a brush source for the retouch (a kept result of the run's size), and
+// a row of the Save step. A saved result can be loaded as one too (`keep_file`). The memory
+// budget (View → results kept MB) counts the masters; over it, the oldest go first. A batch
+// keeps nothing: its stacks are saved as they finish.
+let keptSeq = 0;
+const keptId = (k) => `kept:${k.id}`;
+const keptOf = (id) => (typeof id === 'string' && id.startsWith('kept:')) ? st.kept.find((k) => keptId(k) === id) || null : null;
+const keptBytes = (k) => k.w * k.h * 6;
+const keptUsable = (k) => !!st.result && k.w === st.result.w && k.h === st.result.h;   // the brush needs the run's size
+const keptSummary = (k) => k.kind === 'file' ? `${k.name} · ${k.w}×${k.h}, ${k.bits}-bit` : `${k.frames} frame${k.frames === 1 ? '' : 's'} · ${k.secs} s`;
+function keptTip(k) {
+  if (k.kind === 'file') return `${k.name}\n${k.w}×${k.h}, ${k.bits}-bit${k.meta && k.meta.text ? `\n${k.meta.text}` : ''}`;
+  const p = k.params || {};
+  const fus = `levels ${p.levels || 'auto'}, energy radius ${p.energy_radius}, top ${p.top} r${p.top_radius}${p.use_chroma ? ', chroma' : ''}`;
+  const al = p.align ? `aligned (coarsen ${p.coarsen}${!p.shift ? ', no shift' : ''}${!p.scale ? ', no scale' : ''}${!p.rotation ? ', no rotation' : ''})` : 'not aligned';
+  return `run ${k.run}: ${k.frames} frames, ${k.first} .. ${k.last}\n${al}${p.brightness ? ', brightness equalised' : ''}\n${fus}\ndepth scale ${p.depth_scale}${p.render_dmap ? `, DFR${p.render_slabs ? ` from slabs of ${p.slab_size} (overlap ${p.slab_overlap})` : ''}` : ''}\n${k.w}×${k.h}, ${k.bits}-bit, ${k.secs} s, ${k.when.toLocaleTimeString()}`;
+}
+function keepResult(why) {
+  const r = st.result; if (!r || inBatch()) return [];
+  const out = [];
+  for (const kind of ['fused', 'dmap']) {
+    if (!r[kind]) continue;
+    const id = ++keptSeq;
+    const k = { id, kind, run: r.run, label: `run ${r.run} · ${kind === 'dmap' ? 'DFR' : 'LAP'}`, w: r.w, h: r.h, bits: r.bits, canvas: r[kind], crop: r.crop, meta: r.meta, params: r.params, frames: r.frames, first: r.first, last: r.last, secs: r.secs, when: r.when, strokes: R.undo };
+    worker.postMessage({ type: 'keep', id, kind });
+    st.kept.push(k); out.push(k);
+    r[kind] = null;   // the canvas belongs to the kept result now
+  }
+  if (out.length) log(`[lapstack] ${why}: the result stays on as ${out.map((k) => k.label).join(' and ')}`);
+  trimKept(); renderKept();
+  return out;
+}
+function trimKept() {
+  const budget = Number($('p-kept').textContent) * 1e6;
+  let total = st.kept.reduce((b, k) => b + keptBytes(k), 0);
+  // the newest always stays, unless the budget is 0: keep none
+  while (st.kept.length > (budget > 0 ? 1 : 0) && total > budget) { const k = st.kept[0]; total -= keptBytes(k); dropKept(k, `over the ${$('p-kept').textContent} MB kept`); }
+}
+function dropKept(k, why) {
+  const i = st.kept.indexOf(k); if (i < 0) return;
+  st.kept.splice(i, 1); worker.postMessage({ type: 'drop_kept', id: k.id }); k.canvas.width = 1;
+  if (R.from === 'kept' && R.kept === k.id) R.from = 'source';
+  log(`[lapstack] ${k.label} let go${why ? ` (${why})` : ''}`);
+  renderKept(); updateTabs(); draw();
+}
+function dropAllKept() { for (const k of st.kept) k.canvas.width = 1; st.kept = []; worker.postMessage({ type: 'drop_all_kept' }); renderKept(); }
+async function loadKeptFile(f) {
+  if (st.running || SV.exporting) { toast('A result can be loaded once the run or save in progress is done.'); return; }
+  const id = ++keptSeq, name = f.name;
+  log(`[lapstack] loading ${name} as a result …`);
+  try {
+    const r = await call({ type: 'keep_file', id, file: f });
+    const canvas = new OffscreenCanvas(r.w, r.h);
+    canvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.rgba), r.w, r.h), 0, 0);
+    const k = { id, kind: 'file', label: clean(stemOf(name)).slice(0, 24) || 'file', name, w: r.w, h: r.h, bits: r.bits, canvas, crop: null, meta: null, params: null, when: new Date() };
+    st.kept.push(k);
+    log(`[lapstack] ${name} kept as a result: ${r.w}×${r.h}, ${r.bits}-bit${st.result && !keptUsable(k) ? ` (not the stack's ${st.result.w}×${st.result.h}: to view and compare, not to brush from)` : ''}`);
+    trimKept(); renderKept();
+    if (st.step === 'stack') setView(keptId(k)); else { updateTabs(); renderSave(); }
+  } catch (e) { log(`[lapstack] ${name}: ${e.message}`); toast(`${name}: ${e.message}`, 0); }
+}
+$('kept-add').addEventListener('click', () => $('kept-file').click());
+$('kept-file').addEventListener('change', (e) => { for (const f of [...e.target.files]) loadKeptFile(f); e.target.value = ''; });
+document.querySelectorAll('[data-step="p-kept"]').forEach((b) => b.addEventListener('click', () => { trimKept(); renderKept(); }));
+// the Results section's list: a row per kept result, newest first
+function renderKept() {
+  const list = $('kept-list'); list.innerHTML = '';
+  if (!st.kept.length) { list.innerHTML = '<div class="dim small">none yet</div>'; return; }
+  for (const k of [...st.kept].reverse()) {
+    const d = document.createElement('div'); d.className = 'kept' + (st.view === keptId(k) || (st.compare && st.cmp === keptId(k)) ? ' on' : '');
+    const b = document.createElement('button'); b.className = 'kl'; b.textContent = k.label; b.title = `${keptTip(k)}\n\nshow it (the Stack group's layers list it too)`;
+    b.addEventListener('click', () => { if (st.step !== 'stack') gotoStep('stack'); setView(keptId(k)); });
+    const n = document.createElement('span'); n.className = 'kn'; n.textContent = keptSummary(k); n.title = keptTip(k);
+    const x = document.createElement('button'); x.className = 'kx'; x.textContent = '✕'; x.title = 'let this result go (its memory is freed)'; x.addEventListener('click', () => dropKept(k, ''));
+    d.append(b, n, x); list.appendChild(d);
+  }
 }
 // apply `fn` to the merged list (in place; false = nothing to do), keep the selection on its
 // frame, and refresh everything that reads the list
@@ -561,12 +648,14 @@ $('run').addEventListener('click', () => {
   if (stacks.length > 1) runBatch(stacks); else startRun();
 });
 function startRun() {
+  if (st.result) keepResult('new run');   // the result on screen stays on as a kept result
   st.running = true; setPick(false); st.frames = st.frames.map((f) => (f ? { name: f.name, thumb: f.thumb, proxy: f.proxy, strip: f.strip, w: f.w, h: f.h, bits: f.bits } : f)); st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); if (st.step !== 'stack') gotoStep('stack');
   runLabel(); $('runwrap').hidden = true; $('runmenu').hidden = true; $('cancel').hidden = false; $('clear').disabled = true;
   setProgress('starting', 0, st.files.length);
   const params = readParams(); delete params.turbo;
   log(`[lapstack] run: ${st.files.length} frames, ${JSON.stringify(params)}`);
   st.t0 = performance.now(); st.rendering = !!params.render_dmap; window.__app_done = null;
+  st.runNo = ++st.runs; st.runParams = params; st.runFirst = st.files[0] ? st.files[0].name : ''; st.runLast = st.files.length ? st.files[st.files.length - 1].name : '';
   worker.postMessage({ type: 'run', files: st.files, params });
 }
 $('cancel').addEventListener('click', () => { worker.postMessage({ type: 'cancel' }); if (inBatch() && SV.exporting) { SV.cancel = true; worker.postMessage({ type: 'refold_cancel' }); } });
@@ -576,6 +665,7 @@ $('cancel').addEventListener('click', () => { worker.postMessage({ type: 'cancel
 // next starts. The last stack stays on screen; showAll brings every frame back.
 const inBatch = () => !!B.all && !B.done;
 function runBatch(stacks) {
+  if (st.result) keepResult('batch run');   // the result on screen stays on; the batch's own results are saved, not kept
   B.all = st.files; B.frames = st.frames; B.stacks = stacks.map((s) => ({ ...s, status: 'queued', files: [] })); B.k = -1; B.cancelled = false; B.done = false; B.t0 = performance.now();
   window.__batch_done = null;
   // the file names must differ between stacks: the stack number goes in unless a per-stack token is on
@@ -661,6 +751,7 @@ async function onDone(m) {
                 crop: m.crop ? { x: m.crop[0], y: m.crop[1], w: m.crop[2], h: m.crop[3] } : null };            // crop: the window every aligned frame covers, null = all of it
   resetRetouch();
   const secs = ((performance.now() - st.t0) / 1000).toFixed(1);
+  Object.assign(st.result, { run: st.runNo, params: st.runParams, frames: m.frames, first: st.runFirst, last: st.runLast, secs: Number(secs), when: new Date() });   // what a kept result is labelled with
   log(`[lapstack] fused ${m.frames} frames -> ${m.w}x${m.h} ${m.bits}-bit  (${secs}s)`);
   st.frameCount = m.frames;
   if (st.rendering) { setProgress('rendering from depth map', 0, st.files.length); setView('fused'); return; }
@@ -723,6 +814,9 @@ const OUTPUTS = [
   { id: 'anim-peak', token: 'peaking', anim: true, name: 'Source with focus peaking', desc: 'animated GIF: the aligned frames under their magenta peaking band', ext: 'gif', avail: () => !!st.result && st.files.length > 1 && st.frames.some((f) => f && f.peak) },
   { id: 'anim-rock', token: 'rocking', anim: true, rock: true, name: 'Rocking', desc: () => `animated GIF: the stacked image rocking from side to side, ${refolding() ? 'each view folded from the shifted frames' : 'sheared by its depth map'}`, ext: 'gif', avail: () => !!st.result },
 ];
+// the kept results as rows of the Save step, after the run's own outputs
+const keptOutput = (k) => ({ id: keptId(k), token: k.kind === 'file' ? k.label : `run${k.run}-${k.kind === 'dmap' ? 'dfr' : 'lap'}`, kind: keptId(k), name: k.label, desc: `kept result: ${keptSummary(k)}`, avail: () => true, kept: k });
+const saveRows = () => OUTPUTS.concat(st.kept.map(keptOutput));
 const MESH_DESC = { glb: 'glTF binary: the stacked image as a textured relief of its depth map, one file', obj: 'Wavefront OBJ + MTL + texture image: the textured relief as Helicon writes it, three files', stl: 'binary STL: the relief alone, no texture, for printing' };
 const MESH_MIME = { glb: 'model/gltf-binary', obj: 'model/obj', mtl: 'model/mtl', stl: 'model/stl', jpg: 'image/jpeg', png: 'image/png' };
 const SV = { sel: new Set(['lap']), exif: null, exifFor: null, exporting: false, cancel: false, dir: null, lastSaved: [] };   // dir: the folder saved files go to (File System Access), null = downloads
@@ -900,13 +994,14 @@ function animPlan(o) {
 }
 const fmtMB = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB` : `${Math.round(b / 1e3)} KB`;
 async function renderSave() {
-  if (st.step !== 'save' || !st.result) return;
-  const strokes = R.undo;
-  const cr = st.result.crop;
-  $('sv-crop').disabled = !cr;
-  $('sv-crop-info').textContent = cr ? `${cr.w}×${cr.h} of ${st.result.w}×${st.result.h}, from (${cr.x}, ${cr.y}) — the bright window in the viewer` : 'the aligned frames cover the whole image: nothing to cut';
+  if (st.step !== 'save' || !(st.result || st.kept.length)) return;
+  const strokes = R.undo, res = st.result;   // res: null when only kept results are on hand
+  const cr = res && res.crop;
+  $('sv-crop').disabled = !cr && !st.kept.some((k) => k.crop);
+  $('sv-crop-info').textContent = cr ? `${cr.w}×${cr.h} of ${res.w}×${res.h}, from (${cr.x}, ${cr.y}) — the bright window in the viewer` : res ? 'the aligned frames cover the whole image: nothing to cut' : 'no result from a run on hand; a kept result is cut to its own window';
   const [ow, oh] = outDims();
-  $('sv-info').textContent = `${st.result.w}×${st.result.h}, ${st.result.bits}-bit input, ${st.files.length} frames` + (cropArea() ? `, saved as ${ow}×${oh}` : '') + (strokes ? `, ${strokes} retouch stroke${strokes > 1 ? 's' : ''}` : '');
+  $('sv-info').textContent = res ? `${res.w}×${res.h}, ${res.bits}-bit input, ${st.files.length} frames` + (cropArea() ? `, saved as ${ow}×${oh}` : '') + (strokes ? `, ${strokes} retouch stroke${strokes > 1 ? 's' : ''}` : '')
+    : `no result from a run on hand · ${st.kept.length} kept result${st.kept.length > 1 ? 's' : ''}`;
   // tokens: EXIF is read once per first frame (async: the name preview refreshes when it lands)
   const f0 = st.files[0];
   if (f0 && SV.exifFor !== f0) { SV.exifFor = f0; SV.exif = null; exifDate(f0).then((d) => { if (SV.exifFor === f0) { SV.exif = d; renderSave(); } }); }
@@ -917,7 +1012,7 @@ async function renderSave() {
   $('fn-stack-val').textContent = B.all ? 's' + pad2(B.k + 1) : 'in a batch';
   const j = $('sv-format').value === 'jpeg'; $('sv-qrow').hidden = !j; $('sv-quality').hidden = !j;
   // metadata: what the engine found in the first frame (the run reads it); nothing found disables the box
-  const mt = st.result.meta, have = !!(mt && (mt.exif || mt.icc || mt.xmp || mt.chrm));
+  const mt = res && res.meta, have = !!(mt && (mt.exif || mt.icc || mt.xmp || mt.chrm)) || st.kept.some((k) => k.meta && (k.meta.exif || k.meta.icc || k.meta.xmp));
   $('sv-meta').disabled = !have;
   $('sv-meta-info').textContent = !mt ? '—' : have ? `${f0 ? f0.name : 'first frame'}: ${mt.text}` + (!mt.icc && mt.chrm ? ' (no ICC profile: PNG gets a cHRM chunk)' : '') : `nothing found in ${f0 ? f0.name : 'the first frame'}`;
   $('fn-preview').textContent = svName(OUTPUTS[0]);
@@ -930,8 +1025,8 @@ async function renderSave() {
     $('m3-info').textContent = `${p.nx}×${p.ny} vertices, ${p.nt >= 1e6 ? (p.nt / 1e6).toFixed(1) + ' M' : Math.round(p.nt / 1e3) + ' k'} triangles` + (m.format === 'stl' ? '' : `, texture ${p.tw}×${p.th}`) + ` · roughly ${fmtMB(p.size)} as ${m.format.toUpperCase()}`; }
   // the file list
   const list = $('sv-files'); list.innerHTML = '';
-  const avail = OUTPUTS.filter((o) => o.avail());
-  for (const o of OUTPUTS) {
+  const rows = saveRows(), avail = rows.filter((o) => o.avail());
+  for (const o of rows) {
     const ok = o.avail(), on = ok && SV.sel.has(o.id);
     const row = document.createElement('div'); row.className = 'svf' + (on ? ' on' : '') + (ok ? '' : ' off'); row.dataset.id = o.id;
     const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = on; cb.disabled = !ok;
@@ -962,13 +1057,14 @@ function updateAnimInfo() {
   $('an-info').classList.toggle('warn', est > 1e9);
 }
 function updateSaveButtons() {
-  const n = OUTPUTS.filter((o) => o.avail() && SV.sel.has(o.id)).length;
+  const n = saveRows().filter((o) => o.avail() && SV.sel.has(o.id)).length;
   $('sv-go').textContent = n ? `Save ${n} file${n > 1 ? 's' : ''}` : 'Save'; $('sv-go').disabled = !n || SV.exporting;
   $('sv-cancel').hidden = !SV.exporting;
 }
 // a small preview of an output: the layer as the viewer shows it, the animations at their middle frame
 async function thumbInto(o, cv) {
   const c = cv.getContext('2d'); c.fillStyle = '#111'; c.fillRect(0, 0, cv.width, cv.height);
+  if (o.kept) { const k = o.kept, s = Math.min(cv.width / k.w, cv.height / k.h); c.drawImage(k.canvas, (cv.width - k.w * s) / 2, (cv.height - k.h * s) / 2, k.w * s, k.h * s); return; }
   const r = st.result; if (!r) return;
   const mid = Math.floor((st.files.length - 1) / 2);
   const [ow, oh] = outDims();
@@ -1029,7 +1125,7 @@ async function winnerBitmap() {
 }
 for (const id of svIds) $(id).addEventListener(svLive.includes(id) ? 'input' : 'change', () => { $('sv-qval').textContent = $('sv-quality').value; saveSaveSettings(); renderSave(); if (id === 'sv-crop') draw(); });
 document.querySelectorAll('#savecard [data-step]').forEach((b) => b.addEventListener('click', () => { const id = b.dataset.step; setStep(id, Number($(id).textContent) + Number(b.dataset.d)); saveSaveSettings(); renderSave(); }));
-$('sv-all').addEventListener('change', (e) => { for (const o of OUTPUTS) if (o.avail()) { if (e.target.checked) SV.sel.add(o.id); else SV.sel.delete(o.id); } saveSaveSettings(); renderSave(); });
+$('sv-all').addEventListener('change', (e) => { for (const o of saveRows()) if (o.avail()) { if (e.target.checked) SV.sel.add(o.id); else SV.sel.delete(o.id); } saveSaveSettings(); renderSave(); });
 // a finished file: into the chosen folder when there is one, else a download
 async function downloadBlob(blob, name) {
   if (window.__saveHook) { window.__saveHook(blob, name); return; }   // tests collect the files instead of downloading
@@ -1148,8 +1244,8 @@ async function signBlob(blob, o, name, mime) {
   return new Blob([r.bytes], { type: mime });
 }
 async function saveSelected() {
-  if (SV.exporting || !st.result || st.running) return 'skipped';
-  const items = OUTPUTS.filter((o) => o.avail() && SV.sel.has(o.id));
+  if (SV.exporting || !(st.result || st.kept.length) || st.running) return 'skipped';
+  const items = saveRows().filter((o) => o.avail() && SV.sel.has(o.id));
   if (!items.length) return 'skipped';
   const saved = []; SV.lastSaved = saved;
   SV.exporting = true; SV.cancel = false; updateSaveButtons(); $('run').disabled = true; $('clear').disabled = true;
@@ -1186,6 +1282,7 @@ async function saveSelected() {
           finally { await call({ type: 'refold_end' }).catch(() => {}); R.gpuIndex = -1; }
           prog(`encoding ${name}`, 0, 0); setState(o, 'encoding…');
         } else if (o.kind === 'stereo') r = await call({ type: 'view_stereo', ...v3(), format: f, quality: q, meta });   // the pair at the crop's full size
+        else if (o.kept) r = await call({ type: 'save', kind: o.kind, format: f, quality: q, meta: $('sv-meta').checked && !!o.kept.meta, crop: $('sv-crop').checked && !!o.kept.crop });   // its own window and metadata
         else r = await call({ type: 'save', kind: o.kind, format: f, quality: q, meta, crop: !!cropArea() });
         mime = f === 'jpeg' ? 'image/jpeg' : 'image/png'; blob = new Blob([r.bytes], { type: mime });
       }
@@ -1547,15 +1644,20 @@ const targetCanvas = () => st.result && st.result[target()];
 // rendering the choice falls back to the frame. The source is what the right pane shows
 // (updateTabs pins st.cmp to it).
 const otherResult = () => (target() === 'dmap' ? 'fused' : 'dmap');
-const brushFrom = () => (R.from === 'slab' ? 'slab' : R.from === 'stack' && haveDmap() ? otherResult() : 'source');
-const brushCanvas = () => (brushFrom() === 'source' ? srcGet(st.selected) : brushFrom() === 'slab' ? (slabReady() ? R.slab.canvas : null) : st.result && st.result[brushFrom()]);
+// a kept result as the source ('kept', R.kept its id): the one chosen if it is the run's size, else the newest usable
+const brushKept = () => { const k = st.kept.find((k) => k.id === R.kept); return k && keptUsable(k) ? k : [...st.kept].reverse().find(keptUsable) || null; };
+const brushFrom = () => (R.from === 'slab' ? 'slab' : R.from === 'stack' && haveDmap() ? otherResult() : R.from === 'kept' && brushKept() ? keptId(brushKept()) : 'source');
+const brushCanvas = () => { const f = brushFrom(); return f === 'source' ? srcGet(st.selected) : f === 'slab' ? (slabReady() ? R.slab.canvas : null) : keptOf(f) ? keptOf(f).canvas : st.result && st.result[f]; };
 const brushReady = () => (brushFrom() === 'source' ? R.wasmIndex === st.selected && !!srcGet(st.selected) : !!brushCanvas());
-function setBrushFrom(from) {
-  R.from = ['stack', 'slab'].includes(from) ? from : 'source';
+function setBrushFrom(from, id) {
+  R.from = ['stack', 'slab', 'kept'].includes(from) ? from : 'source';
+  if (from === 'kept') { const k = id != null ? st.kept.find((k) => k.id === id) : brushKept(); if (k) R.kept = k.id; }
   saveParams(); updateTabs(); renderFilmstrip(); draw();
 }
 $('bs-frame').addEventListener('click', () => setBrushFrom('source'));
 $('bs-stack').addEventListener('click', () => setBrushFrom('stack'));
+$('bs-kept').addEventListener('click', () => setBrushFrom('kept'));
+$('bs-kept-sel').addEventListener('change', (e) => setBrushFrom('kept', Number(e.target.value)));
 $('bs-slab').addEventListener('click', () => setBrushFrom('slab'));
 function onPatch(m) {
   R.undo = m.undo; R.redo = m.redo; updateTabs();
@@ -1648,7 +1750,7 @@ $('undo').addEventListener('click', () => worker.postMessage({ type: 'undo' }));
 // step, or losing the result all end the mode (updateTabs).
 function enterRetouch() {
   if (R.on || !st.result || st.step !== 'stack') return;
-  if (groupOf(st.view) !== 'stack') { setView(st.compare && groupOf(st.cmp) === 'stack' ? st.cmp : lastIn.stack); }
+  if (!isTarget(st.view)) { setView(st.compare && isTarget(st.cmp) ? st.cmp : isTarget(lastIn.stack) ? lastIn.stack : 'fused'); }
   R.prev = { compare: st.compare, cmpMode: st.cmpMode, cmp: st.cmp };
   R.on = true; st.compare = true; st.cmpMode = 'split'; st.cmp = brushFrom(); st.flipped = false;
   setBrush(R.size, R.hard);
@@ -1670,6 +1772,7 @@ const canvas = $('view'), ctx = canvas.getContext('2d');
 const canvas2 = $('view2'), ctx2 = canvas2.getContext('2d');
 function imageDims() {
   if (st.result) return [st.result.w, st.result.h];
+  const k = keptOf(st.view) || (st.compare && keptOf(st.cmp)); if (k) return [k.w, k.h];
   const f = st.frames[st.selected]; if (f && f.w) return [f.w, f.h];
   const b = f && f.thumb; if (b) return [b.width, b.height];
   return [0, 0];
@@ -1686,6 +1789,7 @@ function zoom100() {
   st.zoom = z; st.ox = cw / 2 - cx * z; st.oy = ch / 2 - cy * z; st.fitted = false; draw();
 }
 function layerFor(tab) {
+  const k = keptOf(tab); if (k) return { bmp: k.canvas, w: k.w, h: k.h };
   if (tab === 'fused') return st.result ? { bmp: st.result.fused, w: st.result.w, h: st.result.h } : null;
   if (tab === 'dmap') return st.result && st.result.dmap ? { bmp: st.result.dmap, w: st.result.w, h: st.result.h } : null;
   if (isDepthLayer(tab)) {
@@ -2019,9 +2123,10 @@ const LAYERS = [['fused', 'LAP'], ['dmap', 'DFR'], ['depth', 'Focus depth'], ['f
 // Header groups: Source | Stack (LAP, DFR) | Depth (Focus depth, In focus). The sub-control
 // lists the group's layers and is hidden when the group has only one.
 const GROUPS = { source: ['source'], stack: ['fused', 'dmap'], depth: ['depth', 'focus'] };
-const groupOf = (v) => Object.keys(GROUPS).find((g) => GROUPS[g].includes(v)) || null;
+const groupOf = (v) => (keptOf(v) ? 'stack' : Object.keys(GROUPS).find((g) => GROUPS[g].includes(v)) || null);   // kept results are Stack layers
 const lastIn = { stack: 'fused', depth: 'depth' };   // last layer picked in each group
-const layerName = (id) => (LAYERS.find((l) => l[0] === id) || [id, id])[1];
+const layerName = (id) => (keptOf(id) ? keptOf(id).label : (LAYERS.find((l) => l[0] === id) || [id, id])[1]);
+const isTarget = (v) => v === 'fused' || v === 'dmap';   // the layers the retouch paints
 // while the full-res frame decodes, say so: the pane is showing the proxy
 const layerLabel = (id) => id === 'slab' ? slabLabel() : (usesSource(id) && st.result && (!srcCache.has(id === 'focus' ? `focus:${st.selected}` : st.selected) || (R.on && id === 'source' && R.wasmIndex !== st.selected)))
   ? `${layerName(id)} — loading full res…` : layerName(id);
@@ -2030,43 +2135,55 @@ const haveDmap = () => !!(st.result && st.result.dmap);
 const usesFrame = (t) => usesSource(t) || (t === 'slab' && R.on) || (isDepthLayer(t) && st.slice);   // the slab follows the scrub while it is the brush source
 function scrubbable() { return usesFrame(st.view) || (st.compare && usesFrame(st.cmp)); }
 function updateTabs() {
-  const have = !!st.result;
-  $('tab-source').disabled = !st.files.length; $('tab-stack').disabled = !have; $('tab-depth').disabled = !have; $('ab').disabled = !have || st.step !== 'stack';
+  const have = !!st.result, haveStack = have || st.kept.length > 0;   // the Stack group: the run's images, and the kept results
+  $('tab-source').disabled = !st.files.length; $('tab-stack').disabled = !haveStack; $('tab-depth').disabled = !have; $('ab').disabled = !haveStack || st.step !== 'stack';
   if (!haveDmap() && st.view === 'dmap') st.view = 'fused';
   if (!haveDmap() && lastIn.stack === 'dmap') lastIn.stack = 'fused';
+  // a kept result that was let go, or the run's image with no run: the newest kept result stands in, else Source
+  const newest = st.kept.length ? keptId(st.kept[st.kept.length - 1]) : null;
+  if ((st.view.startsWith('kept:') && !keptOf(st.view)) || (!have && isTarget(st.view))) st.view = newest || 'source';
+  if ((lastIn.stack.startsWith('kept:') && !keptOf(lastIn.stack)) || (!have && isTarget(lastIn.stack))) lastIn.stack = newest || 'fused';
+  if (st.cmp.startsWith('kept:') && !keptOf(st.cmp)) st.cmp = 'depth';
   $('cm-swipe').classList.toggle('on', st.cmpMode !== 'split'); $('cm-split').classList.toggle('on', st.cmpMode === 'split');
-  document.querySelectorAll('#steps button').forEach((b) => { if (b.dataset.step !== 'stack') b.disabled = !have; });
+  document.querySelectorAll('#steps button').forEach((b) => { if (b.dataset.step !== 'stack') b.disabled = !haveStack; });
   const group = groupOf(st.view);
   // retouch mode ends when its target leaves the screen; while it is on, the split is pinned to target | brush source
-  if (R.on && (!have || st.step !== 'stack' || group !== 'stack')) leaveRetouch();
+  if (R.on && (!have || st.step !== 'stack' || !isTarget(st.view))) leaveRetouch();
   const retouch = R.on;
   if (retouch) { st.compare = true; st.cmpMode = 'split'; st.cmp = brushFrom(); st.flipped = false; }
   $('viewseg').hidden = st.step !== 'stack';
   $('brush').hidden = !retouch;
-  // the brush source picker: the frame, or the other result (only once there are two)
+  // the brush source picker: the frame, or the other result (only once there are two), or a kept result of the run's size
   $('bs-stack').hidden = !haveDmap(); $('bs-stack').textContent = layerName(otherResult());
   $('bs-stack').title = `paint the ${layerName(otherResult())} image into ${layerName(target())} (S)`;
-  const from = brushFrom(), fromStack = from === 'fused' || from === 'dmap';
-  $('bs-frame').classList.toggle('on', from === 'source'); $('bs-stack').classList.toggle('on', fromStack); $('bs-slab').classList.toggle('on', from === 'slab');
-  $('bs-frame-hint').hidden = from !== 'source'; $('bs-stack-hint').hidden = !fromStack; $('bs-slab-hint').hidden = from !== 'slab'; $('bs-slab-ctl').hidden = from !== 'slab';
+  const from = brushFrom(), fromStack = from === 'fused' || from === 'dmap', fromKept = from.startsWith('kept:');
+  const usable = st.kept.filter(keptUsable); $('bs-kept').hidden = !usable.length;
+  { const sel = $('bs-kept-sel'), cur = fromKept ? keptOf(from).id : -1; sel.innerHTML = ''; for (const k of usable) { const o = document.createElement('option'); o.value = String(k.id); o.textContent = k.label; o.selected = k.id === cur; sel.appendChild(o); } }
+  $('bs-frame').classList.toggle('on', from === 'source'); $('bs-stack').classList.toggle('on', fromStack); $('bs-kept').classList.toggle('on', fromKept); $('bs-slab').classList.toggle('on', from === 'slab');
+  $('bs-frame-hint').hidden = from !== 'source'; $('bs-stack-hint').hidden = !fromStack; $('bs-kept-hint').hidden = !fromKept; $('bs-kept-ctl').hidden = !fromKept; $('bs-slab-hint').hidden = from !== 'slab'; $('bs-slab-ctl').hidden = from !== 'slab';
   $('undo').disabled = !R.undo; $('redo').disabled = !R.redo; $('hist').textContent = R.undo || R.redo ? `${R.undo} undo · ${R.redo} redo` : '';
   $('ab').parentElement.hidden = st.step !== 'stack';
   // the Retouch button: whenever a stacked image is on screen (as the view or the compare partner)
-  const canRetouch = have && st.step === 'stack' && (group === 'stack' || (st.compare && groupOf(st.cmp) === 'stack'));
+  const canRetouch = have && st.step === 'stack' && (isTarget(st.view) || (st.compare && isTarget(st.cmp)));
   $('rtseg').hidden = !canRetouch; $('retouch').classList.toggle('on', retouch);
   ensureSource(); ensureSlab();
   document.querySelectorAll('#viewseg button').forEach((b) => b.classList.toggle('on', b.dataset.group === group));
-  const subs = (GROUPS[group] || []).filter((t) => t !== 'dmap' || haveDmap());
+  const subs = (GROUPS[group] || []).filter((t) => (t !== 'dmap' || haveDmap()) && (t !== 'fused' || have)).concat(group === 'stack' ? st.kept.map(keptId) : []);
   $('subseg').hidden = st.step !== 'stack' || subs.length < 2;
+  // the kept results' chips are made here, after the fixed ones, newest first
+  document.querySelectorAll('#subseg button.kept').forEach((b) => b.remove());
+  for (const k of [...st.kept].reverse()) { const b = document.createElement('button'); b.className = 'kept'; b.dataset.tab = keptId(k); b.dataset.group = 'stack'; b.textContent = k.label; b.title = keptTip(k); b.addEventListener('click', () => setView(keptId(k))); $('subseg').appendChild(b); }
   document.querySelectorAll('#subseg button').forEach((b) => { b.hidden = !subs.includes(b.dataset.tab); b.classList.toggle('on', b.dataset.tab === st.view); });
+  { const rev = [...st.kept].reverse(); document.querySelectorAll('#kept-list .kept').forEach((d, i) => { const k = rev[i]; d.classList.toggle('on', !!k && (st.view === keptId(k) || (st.compare && st.cmp === keptId(k)))); }); }
   if (group) $('subseg').dataset.group = group; else delete $('subseg').dataset.group;
   // compare partner: any layer but the current view
-  const choices = LAYERS.filter(([id]) => id !== st.view && (id !== 'source' || st.files.length) && (id !== 'dmap' || haveDmap()) && (id !== 'slab' || !!R.slab || (retouch && brushFrom() === 'slab')));   // the slab: once one exists, and while it is being made for the brush
+  const choices = LAYERS.filter(([id]) => id !== st.view && (id !== 'source' || st.files.length) && (id !== 'dmap' || haveDmap()) && (id !== 'fused' || have) && (!isDepthLayer(id) && id !== 'focus' || have) && (id !== 'slab' || !!R.slab || (retouch && brushFrom() === 'slab')))   // the slab: once one exists, and while it is being made for the brush
+    .concat([...st.kept].reverse().filter((k) => keptId(k) !== st.view).map((k) => [keptId(k), k.label]));
   if (!choices.some(([id]) => id === st.cmp)) st.cmp = choices[0] ? choices[0][0] : 'depth';
   const menu = $('cmp-menu'); menu.innerHTML = '';
   for (const [id, name] of choices) { const b = document.createElement('button'); b.textContent = name; b.dataset.value = id; b.dataset.group = groupOf(id); b.classList.toggle('on', id === st.cmp); menu.appendChild(b); }
   $('cmp-name').textContent = layerName(st.cmp); $('cmp-sel').dataset.group = groupOf(st.cmp);
-  $('ab').checked = st.compare; $('ctx-compare').hidden = !(st.compare && have); $('cmp-btn').disabled = retouch; $('cmpbar').hidden = $('ctx-compare').hidden || retouch;
+  $('ab').checked = st.compare; $('ctx-compare').hidden = !(st.compare && haveStack); $('cmp-btn').disabled = retouch; $('cmpbar').hidden = $('ctx-compare').hidden || retouch;
   const depthShown = isDepthLayer(st.view) || (st.compare && isDepthLayer(st.cmp));
   // put each context group next to the layer it acts on: the shown layer (left) or the compare partner (after "vs")
   const place = (el, onView, onPartner) => { const slot = (!onView && onPartner) ? $('cmp-ctx') : $('view-ctx'); if (el.parentElement !== slot) slot.appendChild(el); };
@@ -2105,7 +2222,7 @@ function layoutScrub() {
 function setView(v) { st.view = v; const g = groupOf(v); if (g && g !== 'source') lastIn[g] = v; updateTabs(); renderFilmstrip(); draw(); }
 // ---------- workflow steps ----------
 function gotoStep(step) {
-  if (step !== 'stack' && !st.result) return;
+  if (step !== 'stack' && !(st.result || st.kept.length)) return;
   st.step = step;
   if (step === 'save') { leaveRetouch(false); st.view = 'fused'; st.compare = false; }
   document.querySelectorAll('#steps button').forEach((b) => b.classList.toggle('on', b.dataset.step === step));
@@ -2121,7 +2238,7 @@ $('cmp-btn').addEventListener('click', (e) => { e.stopPropagation(); $('cmp-menu
 $('cmp-menu').addEventListener('click', (e) => { e.stopPropagation(); const b = e.target.closest('button'); if (!b) return; $('cmp-menu').hidden = true; st.cmp = b.dataset.value; updateTabs(); draw(); });
 $('cm-swipe').addEventListener('click', () => { st.cmpMode = 'swipe'; saveParams(); updateTabs(); draw(); });
 $('cm-split').addEventListener('click', () => { st.cmpMode = 'split'; saveParams(); updateTabs(); draw(); });
-$('ab').addEventListener('change', (e) => { if (R.on) leaveRetouch(false); st.compare = e.target.checked; if (st.compare && st.view === 'source') st.view = 'fused'; updateTabs(); draw(); });
+$('ab').addEventListener('change', (e) => { if (R.on) leaveRetouch(false); st.compare = e.target.checked; if (st.compare && st.view === 'source') st.view = st.result ? 'fused' : keptId(st.kept[st.kept.length - 1]); updateTabs(); draw(); });
 $('lut-gray').addEventListener('click', () => { st.turbo = false; saveParams(); updateTabs(); draw(); });
 $('lut-turbo').addEventListener('click', () => { st.turbo = true; saveParams(); updateTabs(); draw(); });
 const flip = (on) => { st.flipped = on; draw(); };
@@ -2151,7 +2268,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === '[' && R.on) setBrush(R.size / 1.25, R.hard); else if (e.key === ']' && R.on) setBrush(R.size * 1.25, R.hard);
-  else if (e.key === 's' && R.on && !e.ctrlKey && !e.metaKey) { const order = haveDmap() ? ['source', 'stack', 'slab'] : ['source', 'slab']; setBrushFrom(order[(order.indexOf(R.from) + 1) % order.length]); }   // frame → other result (once there is one) → slab
+  else if (e.key === 's' && R.on && !e.ctrlKey && !e.metaKey) { const order = ['source', ...(haveDmap() ? ['stack'] : []), ...(brushKept() ? ['kept'] : []), 'slab']; setBrushFrom(order[(order.indexOf(R.from) + 1) % order.length]); }   // frame → other result (once there is one) → kept result (once one fits) → slab
   else if (e.key === '1') gotoStep('stack'); else if (e.key === '2') gotoStep('save');
   else if (e.key === 'r' && !e.ctrlKey && !e.metaKey) toggleRetouch();
   else if (e.key === 'ArrowLeft') scrub(e.shiftKey ? -10 : -1); else if (e.key === 'ArrowRight') scrub(e.shiftKey ? 10 : 1);
@@ -2181,4 +2298,4 @@ if (q.get('autorun')) {
     tick();
   })();
 }
-updateTabs(); draw();
+renderKept(); updateTabs(); draw();

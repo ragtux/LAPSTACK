@@ -152,7 +152,9 @@
         <!-- what the brush copies from (right pane): the scrubbed frame, the other stacked
              result — LAP into DFR or DFR into LAP (needs a Run LAP + DFR) — or a slab: the
              frames around the scrubbed one fused on their own, on demand -->
-        <div class="row"><div class="seg" id="bs-seg"><button id="bs-frame" title="paint the scrubbed source frame into the stacked image (S cycles)">Frame</button><button id="bs-stack" hidden>DFR</button><button id="bs-slab" title="paint from a slab: the frames around the scrubbed one, stacked on their own (S cycles)">Slab</button></div></div>
+        <div class="row"><div class="seg" id="bs-seg"><button id="bs-frame" title="paint the scrubbed source frame into the stacked image (S cycles)">Frame</button><button id="bs-stack" hidden>DFR</button><button id="bs-kept" title="paint from a kept result: an earlier run's image, or a loaded file (S cycles)" hidden>Result</button><button id="bs-slab" title="paint from a slab: the frames around the scrubbed one, stacked on their own (S cycles)">Slab</button></div></div>
+        <div id="bs-kept-ctl" hidden><select id="bs-kept-sel" title="the kept result to paint from (the Results section of the panel lists them)"></select></div>
+        <div class="dim small" id="bs-kept-hint" hidden>A kept result: an earlier run over these frames with other settings, or a saved result loaded as one — brush the parts it got right into this image.</div>
         <div class="dim small" id="bs-frame-hint">Pick the frame to paint from in the filmstrip, with ←/→ or the slider. It is decoded and re-aligned on demand (~1 s at 45 MP).</div>
         <div class="dim small" id="bs-stack-hint" hidden>The other stacked image: brush the pyramid's fine detail into the depth-map rendering, or its smooth areas back into the pyramid image.</div>
         <div id="bs-slab-ctl" hidden>
@@ -190,6 +192,13 @@
     <div class="sec-body">
       <label class="stepper" title="depth from focus works on a grid of 1/2^N the frame size">grid 1/2^N <span><button data-step="p-depthscale" data-d="-1">−</button><span id="p-depthscale" data-min="1" data-max="4">2</span><button data-step="p-depthscale" data-d="1">+</button></span></label>
       <label class="stepper" title="pyramid level the winner map (ctrl+G pixel lookup, Save winner map) is read from (0 = full resolution, noisy where the scene is flat)">winner map level <span><button data-step="p-depthlevel" data-d="-1">−</button><span id="p-depthlevel" data-min="0" data-max="6">2</span><button data-step="p-depthlevel" data-d="1">+</button></span></label>
+    </div>
+    <button class="section" type="button" data-sec="results">Results</button>
+    <div class="sec-body">
+      <div class="dim small">When a run starts, the last result's LAP and DFR images stay on as results — to compare with, to brush from and to save — up to the memory below, the oldest going first. A saved result can be loaded as one too.</div>
+      <div id="kept-list"></div>
+      <div class="row"><button id="kept-add" title="load a saved result (PNG, JPEG or TIFF) as one more: an earlier session's, or another program's">Load result…</button><input type="file" id="kept-file" accept=".png,.jpg,.jpeg,.tif,.tiff,image/png,image/jpeg,image/tiff" hidden></div>
+      <label class="stepper" title="the memory the kept results may take in the engine (a 45 MP image is 270 MB); over it, the oldest are let go">results kept MB <span><button data-step="p-kept" data-d="-256">−</button><span id="p-kept" data-min="0" data-max="8192">1536</span><button data-step="p-kept" data-d="256">+</button></span></label>
     </div>
     <button class="section" type="button" data-sec="view">View</button>
     <div class="sec-body">

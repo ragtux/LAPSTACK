@@ -178,6 +178,10 @@ async function handleCall(m) {
   } else if (m.type === 'refold_end') {
     engine.refold_end();
     post({ type: 'refold', rid: m.rid });
+  } else if (m.type === 'keep_file') {
+    // an image file kept as a result (see 'keep' below): decoded here, its RGBA8 back for the page's copy
+    const r = engine.keep_file(m.id, new Uint8Array(await m.file.arrayBuffer()));
+    post({ type: 'kept_file', rid: m.rid, id: m.id, w: r.w, h: r.h, bits: r.bits, rgba: r.rgba.buffer }, [r.rgba.buffer]);
   } else if (m.type === 'make_cert') {
     const [cert, key] = (await loadCc()).make_cert(m.name, Date.now() / 1000);
     post({ type: 'cert', rid: m.rid, cert, key });
@@ -284,6 +288,14 @@ async function handle(m) {
         post({ type: 'done2', w: r.w, h: r.h, rgba: r.rgba.buffer, ms: performance.now() - t1 }, [r.rgba.buffer]);
       }
       running = false;
+    } else if (m.type === 'keep') {
+      // the run's LAP or DFR master becomes a kept result (the page sends this before the
+      // next run, or when it lets a result go): the engine takes it out of the run
+      if (!engine.keep(m.id, m.kind)) post({ type: 'debug', text: `keep ${m.id} ${m.kind}: nothing to keep` });
+    } else if (m.type === 'drop_kept') {
+      engine.drop_kept(m.id);
+    } else if (m.type === 'drop_all_kept') {
+      engine.drop_all_kept();
     } else if (m.type === 'load_source') {
       // m.focus = {dim, w0, w1, tex}: the In focus rendering of the frame instead of the
       // plain frame. A request the page has since superseded (the user scrubbed on

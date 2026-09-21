@@ -68,6 +68,13 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 .thumb:hover .fx, .thumb.off .fx { opacity: 1; }
 .thumb .fx button { padding: 0; width: 20px; height: 20px; line-height: 18px; font-size: 12px; background: rgba(0, 0, 0, .7); border-color: #555; color: #eee; }
 .thumb .fx button:hover { background: var(--accent); border-color: var(--accent); }
+/* the Results section: one row per kept result — its name (a button: show it), a note, and drop */
+.kept { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: var(--fs-xs); }
+.kept .kl { flex: 1; min-width: 0; text-align: left; padding: 2px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kept.on .kl { border-color: var(--accent); }
+.kept .kn { flex: none; color: var(--dim); white-space: nowrap; }
+.kept .kx { flex: none; padding: 0 6px; }
+#subseg button.kept { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fs-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 0 2px; font-size: var(--fs-xs); color: var(--dim); }
 .fs-tools span { width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fs-tools button { padding: 0 6px; font-size: var(--fs-xs); }
