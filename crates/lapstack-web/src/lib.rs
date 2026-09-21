@@ -21,6 +21,7 @@ use lapstack_core::depth::{DepthParams, FocusMeasure, Upsample};
 use lapstack_core::fuse::{FuseParams, TopRule, binomial, fuse_residuals, upsample_index};
 use lapstack_core::align::{Rect, common_area};
 use lapstack_core::pyramid::{Img3, auto_levels, half};
+use lapstack_core::view::{self, Layout, View};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
@@ -190,6 +191,12 @@ struct Run {
     undo: Vec<Patch>,
     redo: Vec<Patch>,
     undo_bytes: usize,
+    /// Retouch strokes, undos and redos so far: the view base is keyed on it.
+    edits: u64,
+    /// The image the stereo / rocking views are cut from (`view_prepare`).
+    view_base: Option<ViewBase>,
+    /// A refold in progress (`refold_begin` … `refold_end`).
+    refold: Option<Refold>,
 }
 
 /// A depth-map rendering from slabs (LAP within slabs, the depth-map blend
@@ -224,6 +231,89 @@ struct Patch {
 
 /// Undo memory cap (before + after copies); oldest strokes are dropped first.
 const UNDO_CAP: usize = 600 << 20;
+
+/// The image the stereo and rocking views are cut from (`Engine::view_prepare`):
+/// the LAP or DFR master and the full-resolution depth map, cut to the crop
+/// and shrunk to the view size. `rgb` / `z` are owned only when something
+/// was cut or shrunk (or the depth had to be upsampled); otherwise the run's
+/// own arrays serve.
+struct ViewBase {
+    /// (source, cropped, w, h, edits)
+    key: (String, bool, usize, usize, u64),
+    w: usize,
+    h: usize,
+    rgb: Option<Vec<u16>>,
+    z: Option<Vec<u16>>,
+}
+
+/// Zerene-style synthetic stereo (`Engine::refold_*`): the stack folded
+/// again, every frame shifted sideways in proportion to its index, into one
+/// accumulator per view — at full resolution for a stereo pair, at the
+/// animation's size for a rocking sequence (each warped frame is
+/// block-averaged by `k` first, the shift then an integer number of source
+/// pixels). Views are done `per_pass` at a time, one pass over the frames
+/// each, as many as a GPU memory budget allows.
+struct Refold {
+    shifts: Vec<f32>,
+    near_first: bool,
+    k: usize,
+    /// the pyramid at the view size
+    dims: Vec<(usize, usize)>,
+    levels: usize,
+    fp: FuseParams,
+    per_pass: usize,
+    /// the frame pyramid, REDUCE/EXPAND scratch, energy plane and window-sum
+    /// scratch at the view size; `None` = the run's own (k == 1)
+    work: Option<(Vec<wgpu::Buffer>, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer)>,
+    /// per view of a pass: its accumulator (acc, best; `None` = the run's
+    /// own) and the residuals folded so far
+    accs: Vec<(Option<(Vec<wgpu::Buffer>, Vec<wgpu::Buffer>)>, Vec<Img3>)>,
+    /// the first view of the pass in progress
+    pass: Option<usize>,
+    /// the crop, in view pixels
+    crop: Rect,
+    /// the finished views, cropped
+    done: Vec<Option<Vec<u16>>>,
+}
+
+/// The GPU memory a refold may take for its own accumulators.
+const REFOLD_BUDGET: usize = 1 << 30;
+
+impl Run {
+    /// The fold buffers of view `v` of the refold pass.
+    fn refold_bufs(&self, v: usize) -> FoldBufs<'_> {
+        let rf = self.refold.as_ref().unwrap();
+        let (cur, tmp_half, en) = match &rf.work {
+            Some((cur, th, en, _)) => (&cur[..], th, en),
+            None => (&self.cur[..], &self.tmp_half, &self.en),
+        };
+        let (acc, best) = match &rf.accs[v].0 {
+            Some((a, b)) => (&a[..], &b[..]),
+            None => (&self.acc[..], &self.best[..]),
+        };
+        FoldBufs { dims: &rf.dims, levels: rf.levels, cur, acc, best, tmp_half, en }
+    }
+    fn refold_scratch(&self) -> &wgpu::Buffer {
+        match &self.refold.as_ref().unwrap().work {
+            Some((_, _, _, s)) => s,
+            None => &self.tmp_full, // en2 holds the depth map
+        }
+    }
+}
+
+/// Encode an RGB u16 image as PNG (16-bit when `bits16`, else 8-bit) or JPEG.
+fn encode_rgb16(v: &[u16], w: u32, h: u32, format: &str, quality: u8, bits16: bool) -> Result<Vec<u8>, String> {
+    use image::ImageEncoder;
+    let err = |e: image::ImageError| format!("encode: {e}");
+    let to8 = || -> Vec<u8> { v.iter().map(|&s| (s as f32 / 65535.0 * 255.0 + 0.5) as u8).collect() };
+    let mut out = Vec::new();
+    match format {
+        "jpeg" => image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.clamp(1, 100)).write_image(&to8(), w, h, image::ExtendedColorType::Rgb8).map_err(err)?,
+        "png" if bits16 => image::codecs::png::PngEncoder::new(&mut out).write_image(bytemuck::cast_slice(v), w, h, image::ExtendedColorType::Rgb16).map_err(err)?,
+        _ => image::codecs::png::PngEncoder::new(&mut out).write_image(&to8(), w, h, image::ExtendedColorType::Rgb8).map_err(err)?,
+    }
+    Ok(out)
+}
 
 #[wasm_bindgen]
 pub struct Engine {
@@ -307,17 +397,21 @@ fn patch_obj(img: &[u16], iw: usize, dmap: bool, x: usize, y: usize, w: usize, h
 }
 
 /// Record the warp of the uploaded frame (`up`) into `cur[0]` with the
-/// registration the run found for frame `index`, then the run's brightness
-/// gain for it: how a frame is brought back after the run (the depth-map
-/// render, the source frame, a slab).
-fn record_rewarp(g: &Gpu, run: &Run, rec: &mut Rec<'_>, index: usize) -> Result<(), String> {
+/// registration the run found for frame `index`, moved `dx` pixels to the
+/// right on top of it (the refold's synthetic-stereo shift; 0 otherwise),
+/// then the run's brightness gain for it: how a frame is brought back after
+/// the run (the depth-map render, the source frame, a slab, a refold).
+fn record_rewarp(g: &Gpu, run: &Run, rec: &mut Rec<'_>, index: usize, dx: f32) -> Result<(), String> {
     let sim = *run.sims.get(index).ok_or("unknown frame index")?;
     let (w, h) = (run.w, run.h);
-    let identity = !run.params.align || index == 0;
+    let registered = run.params.align && index != 0;
+    let identity = !registered && dx == 0.0;
     let mut p = P { w: w as u32, h: h as u32, flag: identity as u32, ..Default::default() };
     if !identity {
-        let inv = affine_inv(sim.matrix(w, h));
-        g.queue.write_buffer(&run.aff, 0, bytemuck::cast_slice(&[inv[0][2] as f32, inv[1][2] as f32, 0.0, 0.0]));
+        let inv = affine_inv(if registered { sim } else { Sim::id() }.matrix(w, h));
+        // the output moves dx right, so its source is taken dx to the left: t' = t − A·(dx, 0)
+        let t = [inv[0][2] - inv[0][0] * dx as f64, inv[1][2] - inv[1][0] * dx as f64];
+        g.queue.write_buffer(&run.aff, 0, bytemuck::cast_slice(&[t[0] as f32, t[1] as f32, 0.0, 0.0]));
         p.f0 = inv[0][0] as f32;
         p.f1 = inv[0][1] as f32;
         p.f2 = inv[1][0] as f32;
@@ -330,48 +424,81 @@ fn record_rewarp(g: &Gpu, run: &Run, rec: &mut Rec<'_>, index: usize) -> Result<
     Ok(())
 }
 
+/// The buffers a fold works in — a frame's Laplacian pyramid `cur`
+/// (levels + 1 buffers), the accumulator `acc` and its best-energy planes,
+/// the REDUCE/EXPAND scratch and the energy plane — at the sizes in `dims`:
+/// the run's own, or a refold's at the view size.
+struct FoldBufs<'a> {
+    dims: &'a [(usize, usize)],
+    levels: usize,
+    cur: &'a [wgpu::Buffer],
+    acc: &'a [wgpu::Buffer],
+    best: &'a [wgpu::Buffer],
+    tmp_half: &'a wgpu::Buffer,
+    en: &'a wgpu::Buffer,
+}
+
+impl Run {
+    fn fold_bufs(&self) -> FoldBufs<'_> {
+        FoldBufs { dims: &self.dims, levels: self.levels, cur: &self.cur, acc: &self.acc, best: &self.best, tmp_half: &self.tmp_half, en: &self.en }
+    }
+}
+
 /// Record the fold of the frame in `cur[0]`: its Laplacian pyramid (band-pass
 /// levels in `cur[l]`, the residual left in `cur[levels]`), the region energy
 /// of every band-pass level and the winner-take-all select into `acc` / `best`.
 /// `scratch` is a w×h f32 buffer for the window sums. With `winner` =
 /// Some(index) the level `depth_level` records the frame index (the winner
 /// map); with `peak` the focus-peaking map is taken from level `peak.4`. The
-/// run does both; a slab neither.
+/// run does both; a slab and a refold neither.
 fn record_fold(run: &Run, rec: &mut Rec<'_>, scratch: &wgpu::Buffer, winner: Option<usize>, peak: bool) {
+    record_fold_in(&run.fold_bufs(), run.klen, &run.wt, run.fp.use_chroma, rec, scratch, winner.map(|i| (i, run.depth_level)), peak.then_some(&run.peak));
+}
+
+fn record_fold_in(
+    fb: &FoldBufs<'_>,
+    klen: u32,
+    wt: &wgpu::Buffer,
+    use_chroma: bool,
+    rec: &mut Rec<'_>,
+    scratch: &wgpu::Buffer,
+    winner: Option<(usize, usize)>,
+    peak: Option<&(wgpu::Buffer, usize, usize, usize, usize)>,
+) {
     // build: L_l = G_l - EXPAND(REDUCE(G_l)), per plane
-    for l in 0..run.levels {
-        let (fw, fh) = run.dims[l];
-        let (cw, ch) = run.dims[l + 1];
+    for l in 0..fb.levels {
+        let (fw, fh) = fb.dims[l];
+        let (cw, ch) = fb.dims[l + 1];
         for c in 0..3 {
             let pr = P { w: fw as u32, h: fh as u32, ow: cw as u32, oh: ch as u32, off_in: (c * fw * fh) as u32, off_out: (c * cw * ch) as u32, ..Default::default() };
-            rec.dispatch("red_h", [Some(&run.cur[l]), Some(&run.tmp_half), None, None, None, None], pr, grid2(cw, fh));
-            rec.dispatch("red_v", [None, Some(&run.tmp_half), Some(&run.cur[l + 1]), None, None, None], pr, grid2(cw, ch));
+            rec.dispatch("red_h", [Some(&fb.cur[l]), Some(fb.tmp_half), None, None, None, None], pr, grid2(cw, fh));
+            rec.dispatch("red_v", [None, Some(fb.tmp_half), Some(&fb.cur[l + 1]), None, None, None], pr, grid2(cw, ch));
             let pe = P { w: fw as u32, h: fh as u32, ow: cw as u32, oh: ch as u32, off_in: (c * cw * ch) as u32, off_out: (c * fw * fh) as u32, flag: 1, ..Default::default() };
-            rec.dispatch("exp_h", [Some(&run.cur[l + 1]), Some(&run.tmp_half), None, None, None, None], pe, grid2(fw, ch));
-            rec.dispatch("exp_v", [None, Some(&run.tmp_half), Some(&run.cur[l]), None, None, None], pe, grid2(fw, fh));
+            rec.dispatch("exp_h", [Some(&fb.cur[l + 1]), Some(fb.tmp_half), None, None, None, None], pe, grid2(fw, ch));
+            rec.dispatch("exp_v", [None, Some(fb.tmp_half), Some(&fb.cur[l]), None, None, None], pe, grid2(fw, fh));
         }
     }
     // region energy + winner-take-all per band-pass level
-    for l in 0..run.levels {
-        let (lw, lh) = run.dims[l];
+    for l in 0..fb.levels {
+        let (lw, lh) = fb.dims[l];
         let ln = lw * lh;
-        let pl = P { w: lw as u32, h: lh as u32, klen: run.klen, flag: run.fp.use_chroma as u32, ..Default::default() };
-        rec.dispatch("energy", [Some(&run.cur[l]), None, None, Some(&run.en), None, None], pl, grid1(ln));
-        if run.klen > 1 {
-            rec.dispatch("win_h", [None, Some(scratch), None, Some(&run.en), Some(&run.wt), None], pl, grid2(lw, lh));
-            rec.dispatch("win_v", [None, Some(scratch), None, Some(&run.en), Some(&run.wt), None], pl, grid2(lw, lh));
+        let pl = P { w: lw as u32, h: lh as u32, klen, flag: use_chroma as u32, ..Default::default() };
+        rec.dispatch("energy", [Some(&fb.cur[l]), None, None, Some(fb.en), None, None], pl, grid1(ln));
+        if klen > 1 {
+            rec.dispatch("win_h", [None, Some(scratch), None, Some(fb.en), Some(wt), None], pl, grid2(lw, lh));
+            rec.dispatch("win_v", [None, Some(scratch), None, Some(fb.en), Some(wt), None], pl, grid2(lw, lh));
         }
-        if peak && l == run.peak.4 {
-            let (kw, kh, kf) = (run.peak.1, run.peak.2, run.peak.3);
+        if let Some(pk) = peak.filter(|pk| l == pk.4) {
+            let (kw, kh, kf) = (pk.1, pk.2, pk.3);
             rec.dispatch(
                 "down1",
-                [Some(&run.en), None, Some(&run.peak.0), None, None, None],
+                [Some(fb.en), None, Some(&pk.0), None, None, None],
                 P { w: lw as u32, h: lh as u32, ow: kw as u32, oh: kh as u32, klen: kf as u32, ..Default::default() },
                 grid2(kw, kh),
             );
         }
-        let ps = P { w: lw as u32, h: lh as u32, flag: (winner.is_some() && l == run.depth_level) as u32, f0: winner.unwrap_or(0) as f32, ..Default::default() };
-        rec.dispatch("sel", [Some(&run.cur[l]), Some(&run.best[l]), Some(&run.acc[l]), Some(&run.en), None, None], ps, grid1(ln));
+        let ps = P { w: lw as u32, h: lh as u32, flag: winner.is_some_and(|(_, dl)| l == dl) as u32, f0: winner.map_or(0.0, |(i, _)| i as f32), ..Default::default() };
+        rec.dispatch("sel", [Some(&fb.cur[l]), Some(&fb.best[l]), Some(&fb.acc[l]), Some(fb.en), None, None], ps, grid1(ln));
     }
 }
 
@@ -379,24 +506,63 @@ fn record_fold(run: &Run, rec: &mut Rec<'_>, scratch: &wgpu::Buffer, winner: Opt
 /// `acc[levels]`, expand-and-add down the accumulator pyramid, and clamp
 /// the image left in `acc[0]` to [0, 1].
 fn record_collapse(g: &Gpu, run: &Run, rec: &mut Rec<'_>, tops: &[Img3]) {
-    let (w, h, n) = (run.w, run.h, run.w * run.h);
-    let top = fuse_residuals(tops, &run.fp);
-    let (tw, th) = run.dims[run.levels];
+    record_collapse_in(g, &run.fold_bufs(), &run.fp, rec, tops);
+}
+
+fn record_collapse_in(g: &Gpu, fb: &FoldBufs<'_>, fp: &FuseParams, rec: &mut Rec<'_>, tops: &[Img3]) {
+    let (w, h) = fb.dims[0];
+    let n = w * h;
+    let top = fuse_residuals(tops, fp);
+    let (tw, th) = fb.dims[fb.levels];
     let mut flat = Vec::with_capacity(3 * tw * th);
     for c in 0..3 {
         flat.extend_from_slice(&top.p[c]);
     }
-    g.queue.write_buffer(&run.acc[run.levels], 0, bytemuck::cast_slice(&flat));
-    for l in (0..run.levels).rev() {
-        let (fw, fh) = run.dims[l];
-        let (cw, ch) = run.dims[l + 1];
+    g.queue.write_buffer(&fb.acc[fb.levels], 0, bytemuck::cast_slice(&flat));
+    for l in (0..fb.levels).rev() {
+        let (fw, fh) = fb.dims[l];
+        let (cw, ch) = fb.dims[l + 1];
         for c in 0..3 {
             let pe = P { w: fw as u32, h: fh as u32, ow: cw as u32, oh: ch as u32, off_in: (c * cw * ch) as u32, off_out: (c * fw * fh) as u32, flag: 2, ..Default::default() };
-            rec.dispatch("exp_h", [Some(&run.acc[l + 1]), Some(&run.tmp_half), None, None, None, None], pe, grid2(fw, ch));
-            rec.dispatch("exp_v", [None, Some(&run.tmp_half), Some(&run.acc[l]), None, None, None], pe, grid2(fw, fh));
+            rec.dispatch("exp_h", [Some(&fb.acc[l + 1]), Some(fb.tmp_half), None, None, None, None], pe, grid2(fw, ch));
+            rec.dispatch("exp_v", [None, Some(fb.tmp_half), Some(&fb.acc[l]), None, None, None], pe, grid2(fw, fh));
         }
     }
-    rec.dispatch("clamp01", [None, None, Some(&run.acc[0]), None, None, None], P { w: w as u32, h: h as u32, ..Default::default() }, grid1(3 * n));
+    rec.dispatch("clamp01", [None, None, Some(&fb.acc[0]), None, None, None], P { w: w as u32, h: h as u32, ..Default::default() }, grid1(3 * n));
+}
+
+/// Read a float image (3 planes in `img`, w×h) back as RGB u16.
+async fn read_rgb16(g: &Gpu, img: &wgpu::Buffer, w: usize, h: usize) -> Result<Vec<u16>, String> {
+    let n = w * h;
+    let words = (3 * n).div_ceil(2);
+    let buf = g.buffer("rgb16 out", (words * 4) as u64);
+    let mut rec = g.rec();
+    rec.dispatch("to_rgb16", [Some(img), None, Some(&buf), None, None, None], P { w: w as u32, h: h as u32, ..Default::default() }, grid1(words));
+    rec.submit();
+    let r16 = g.read(&buf, (words * 4) as u64).await?;
+    let mut v: Vec<u16> = bytemuck::cast_slice(&r16).to_vec();
+    v.truncate(3 * n);
+    Ok(v)
+}
+
+/// The window `r` of an interleaved RGB u16 image `stride` pixels wide.
+fn cut_rgb(v: &[u16], stride: usize, r: &Rect) -> Vec<u16> {
+    let mut out = Vec::with_capacity(r.w * r.h * 3);
+    for y in r.y..r.y + r.h {
+        out.extend_from_slice(&v[(y * stride + r.x) * 3..(y * stride + r.x + r.w) * 3]);
+    }
+    out
+}
+
+/// RGB u16 to RGBA8 for display.
+fn rgb16_to_rgba8(v: &[u16]) -> Vec<u8> {
+    let mut rgba = vec![255u8; v.len() / 3 * 4];
+    for (o, p) in rgba.chunks_exact_mut(4).zip(v.chunks_exact(3)) {
+        for k in 0..3 {
+            o[k] = (p[k] as f32 / 65535.0 * 255.0 + 0.5) as u8;
+        }
+    }
+    rgba
 }
 
 /// Read a float image (3 planes in `img`) back as (RGBA8 for display, RGB
@@ -677,7 +843,7 @@ impl Engine {
             rec.clear(&run.acc[0]);
             rec.clear(&run.best[0]);
         }
-        record_rewarp(g, run, &mut rec, index).map_err(|e| JsValue::from_str(&e))?;
+        record_rewarp(g, run, &mut rec, index, 0.0).map_err(|e| JsValue::from_str(&e))?;
         run.src_gpu = None;
         rec.dispatch(
             "dmap_acc",
@@ -831,7 +997,7 @@ impl Engine {
         g.queue.write_buffer(&run.up, 0, bytemuck::cast_slice(&frame.rgb));
         drop(frame);
         let mut rec = g.rec();
-        record_rewarp(g, run, &mut rec, index).map_err(|e| JsValue::from_str(&e))?;
+        record_rewarp(g, run, &mut rec, index, 0.0).map_err(|e| JsValue::from_str(&e))?;
         rec.submit();
         run.src_gpu = Some(index);
         if !readback {
@@ -927,7 +1093,7 @@ impl Engine {
         g.upload(&run.up, bytemuck::cast_slice(&frame.rgb)).await.map_err(|e| JsValue::from_str(&e))?;
         drop(frame);
         let mut rec = g.rec();
-        record_rewarp(g, run, &mut rec, index).map_err(|e| JsValue::from_str(&e))?;
+        record_rewarp(g, run, &mut rec, index, 0.0).map_err(|e| JsValue::from_str(&e))?;
         run.src_gpu = None;
         // tmp_full stands in for en2 as the window-sum scratch: en2 holds the depth map
         record_fold(run, &mut rec, &run.tmp_full, None, false);
@@ -1032,6 +1198,7 @@ impl Engine {
         if from == target {
             return Err(JsValue::from_str("the brush source is the paint target"));
         }
+        run.edits += 1;
         // target and source as one pair per case: they are different fields of the run,
         // which the borrow checker only sees when both are named in the same expression
         const NO_FUSED: &str = "not finished";
@@ -1106,6 +1273,7 @@ impl Engine {
     fn restore(&mut self, redo: bool) -> Result<JsValue, JsValue> {
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         let w = run.w;
+        run.edits += 1;
         let Some(p) = (if redo { run.redo.pop() } else { run.undo.pop() }) else { return Ok(JsValue::NULL) };
         let fused = if p.dmap { run.dmap_rgb16.as_mut() } else { run.fused_rgb16.as_mut() }.ok_or_else(|| JsValue::from_str("not finished"))?;
         let pixels = if redo { &p.after } else { &p.before };
@@ -1228,6 +1396,308 @@ impl Engine {
         self.encode(kind, "png", 90, false, false)
     }
 
+    /// Prepare the image the stereo / rocking views are cut from: the
+    /// `source` (fused | dmap) master and the depth map, cut to the crop
+    /// (`crop`) and shrunk to `ow`×`oh` (0 = the crop's own size). Kept until
+    /// the source, crop, size or retouch changes. Returns {w, h}.
+    pub fn view_prepare(&mut self, source: &str, crop: bool, ow: u32, oh: u32) -> Result<JsValue, JsValue> {
+        let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no result"))?;
+        let key = (source.to_string(), crop, ow as usize, oh as usize, run.edits);
+        if run.view_base.as_ref().is_none_or(|b| b.key != key) {
+            let area = if crop { run.crop } else { None }.unwrap_or(Rect::full(run.w, run.h));
+            let (ow, oh) = if ow == 0 || oh == 0 { (area.w, area.h) } else { (ow as usize, oh as usize) };
+            let same = area.is_full(run.w, run.h) && ow == run.w && oh == run.h;
+            let src = match source {
+                "dmap" => run.dmap_rgb16.as_deref().ok_or_else(|| JsValue::from_str("no depth-map rendering"))?,
+                _ => run.fused_rgb16.as_deref().ok_or_else(|| JsValue::from_str("not finished"))?,
+            };
+            // full-resolution depth, 65535 = last frame: the DFF map, or the winner map upsampled
+            let full: std::borrow::Cow<'_, [u16]> = match &run.depth_full {
+                Some(f) => std::borrow::Cow::Borrowed(f),
+                None => {
+                    let (d, dw, dh) = run.depth_small.as_ref().ok_or_else(|| JsValue::from_str("not finished"))?;
+                    let k = 65535.0 / (run.count.max(2) - 1) as f32;
+                    std::borrow::Cow::Owned(upsample_index(d, *dw, *dh, run.w, run.h, run.depth_level).iter().map(|&v| (v * k + 0.5) as u16).collect())
+                }
+            };
+            let rgb = (!same).then(|| view::shrink(src, run.w, &area, 3, ow, oh));
+            let z = if same && run.depth_full.is_some() { None } else { Some(view::shrink(&full, run.w, &area, 1, ow, oh)) };
+            run.view_base = Some(ViewBase { key, w: ow, h: oh, rgb, z });
+        }
+        let b = run.view_base.as_ref().unwrap();
+        let o = js_sys::Object::new();
+        set(&o, "w", b.w as u32);
+        set(&o, "h", b.h as u32);
+        Ok(o.into())
+    }
+
+    /// The prepared base: (rgb u16 interleaved, depth u16, w, h).
+    fn view_base(&self) -> Result<(&[u16], &[u16], usize, usize), JsValue> {
+        let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no result"))?;
+        let b = run.view_base.as_ref().ok_or_else(|| JsValue::from_str("no view prepared"))?;
+        let rgb: &[u16] = match &b.rgb {
+            Some(v) => v,
+            None => if b.key.0 == "dmap" { run.dmap_rgb16.as_deref() } else { run.fused_rgb16.as_deref() }.ok_or_else(|| JsValue::from_str("not finished"))?,
+        };
+        let z: &[u16] = match &b.z {
+            Some(v) => v,
+            None => run.depth_full.as_deref().ok_or_else(|| JsValue::from_str("no depth map"))?,
+        };
+        Ok((rgb, z, b.w, b.h))
+    }
+
+    /// One view of the prepared base as RGBA8 (w·h·4 bytes): `shift` is the
+    /// far end's shift as a fraction of the width, positive = seen from the
+    /// right; `near_first` = frame 0 is the near end (see core `view`).
+    pub fn view_rgba(&self, shift: f32, near_first: bool) -> Result<js_sys::Uint8Array, JsValue> {
+        let (rgb, z, w, h) = self.view_base()?;
+        let v = view::render_new(rgb, w, h, 3, z, 1.0 / 65535.0, &View::new(shift, near_first));
+        Ok(js_sys::Uint8Array::from(&rgb16_to_rgba8(&v)[..]))
+    }
+
+    /// The stereo pair of the prepared base — the views from the left and
+    /// the right at ∓`shift` — in `layout` (sbs | cross | anaglyph), encoded
+    /// like `encode` (`format` png | png8 | jpeg, the first frame's metadata
+    /// embedded with `metadata`).
+    pub fn view_stereo(&self, shift: f32, near_first: bool, layout: &str, format: &str, quality: u8, metadata: bool) -> Result<js_sys::Uint8Array, JsValue> {
+        let layout = Layout::parse(layout).ok_or_else(|| JsValue::from_str("layout must be sbs | cross | anaglyph"))?;
+        let (rgb, z, w, h) = self.view_base()?;
+        let (px, pw, ph) = view::stereo(rgb, w, h, 3, z, 1.0 / 65535.0, shift, near_first, layout);
+        let run = self.run.as_ref().unwrap();
+        let mut out = encode_rgb16(&px, pw as u32, ph as u32, format, quality, run.bits == 16).map_err(|e| JsValue::from_str(&e))?;
+        if metadata {
+            out = lapstack_core::meta::embed(out, &run.meta);
+        }
+        Ok(js_sys::Uint8Array::from(&out[..]))
+    }
+
+    /// Start a refold (see `Refold`): views at `shifts` (each the far end's
+    /// shift as a fraction of the width, positive = seen from the right),
+    /// rendered at the size that block-averages the frames to about
+    /// `ow`×`oh` (0 = full resolution). Returns {w, h (the cropped view
+    /// size), k, per_pass, passes}; then `refold_pass_begin(p)`,
+    /// `refold_push` per frame, `refold_pass_finish()` for each pass.
+    pub fn refold_begin(&mut self, shifts: &[f32], near_first: bool, ow: u32, oh: u32) -> Result<JsValue, JsValue> {
+        let g = &self.gpu;
+        let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
+        if run.fused_rgb16.is_none() {
+            return Err(JsValue::from_str("finish the run first"));
+        }
+        if shifts.is_empty() {
+            return Err(JsValue::from_str("no views"));
+        }
+        let (w, h) = (run.w, run.h);
+        let k = if ow == 0 || oh == 0 { 1 } else { ((w as f32 / ow as f32).max(h as f32 / oh as f32).round() as usize).max(1) };
+        let (vw, vh) = (w.div_ceil(k), h.div_ceil(k));
+        let (dims, levels, fp) = if k == 1 {
+            (run.dims.clone(), run.levels, run.fp.clone())
+        } else {
+            let levels = auto_levels(vw, vh, 32).max(1);
+            let mut dims = vec![(vw, vh)];
+            for _ in 0..levels {
+                let (cw, ch) = *dims.last().unwrap();
+                dims.push((half(cw), half(ch)));
+            }
+            (dims, levels, FuseParams { levels: Some(levels), ..run.fp.clone() })
+        };
+        let per_view = 4 * (3 * dims.iter().map(|&(a, b)| a * b).sum::<usize>() + dims[..levels].iter().map(|&(a, b)| a * b).sum::<usize>());
+        let owned = (REFOLD_BUDGET / per_view).max(if k == 1 { 0 } else { 1 });
+        let per_pass = (owned + (k == 1) as usize).min(shifts.len()).max(1);
+        let work = (k > 1).then(|| {
+            let cur: Vec<_> = dims.iter().enumerate().map(|(l, &(lw, lh))| g.buffer_f32(&format!("refold cur{l}"), 3 * lw * lh)).collect();
+            (cur, g.buffer_f32("refold tmp_half", (half(vw) * vh).max(half(vh) * vw)), g.buffer_f32("refold en", vw * vh), g.buffer_f32("refold scratch", vw * vh))
+        });
+        let accs = (0..per_pass)
+            .map(|v| {
+                let own = !(k == 1 && v == 0);
+                let bufs = own.then(|| {
+                    let acc: Vec<_> = dims.iter().enumerate().map(|(l, &(lw, lh))| g.buffer_f32(&format!("refold acc{l}"), 3 * lw * lh)).collect();
+                    let best: Vec<_> = dims[..levels].iter().map(|&(lw, lh)| g.buffer_f32("refold best", lw * lh)).collect();
+                    (acc, best)
+                });
+                (bufs, Vec::new())
+            })
+            .collect();
+        let crop = match run.crop {
+            Some(r) => {
+                let (x0, y0) = (r.x.div_ceil(k), r.y.div_ceil(k));
+                Rect { x: x0, y: y0, w: ((r.x + r.w) / k).saturating_sub(x0).max(1), h: ((r.y + r.h) / k).saturating_sub(y0).max(1) }
+            }
+            None => Rect::full(vw, vh),
+        };
+        let passes = shifts.len().div_ceil(per_pass);
+        log(&format!(
+            "[lapstack] refold: {} views at {vw}x{vh} (1/{k}), {levels} levels, {per_pass} per pass ({} MB each), {passes} pass{}",
+            shifts.len(), per_view >> 20, if passes == 1 { "" } else { "es" }
+        ));
+        run.refold = Some(Refold { shifts: shifts.to_vec(), near_first, k, dims, levels, fp, per_pass, work, accs, pass: None, crop, done: vec![None; shifts.len()] });
+        run.src_gpu = None;
+        let o = js_sys::Object::new();
+        set(&o, "w", crop.w as u32);
+        set(&o, "h", crop.h as u32);
+        set(&o, "k", k as u32);
+        set(&o, "per_pass", per_pass as u32);
+        set(&o, "passes", passes as u32);
+        Ok(o.into())
+    }
+
+    /// Start pass `pass` of the refold: reset the accumulators of its views.
+    pub fn refold_pass_begin(&mut self, pass: u32) -> Result<(), JsValue> {
+        let g = &self.gpu;
+        let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
+        let (first, count) = {
+            let rf = run.refold.as_ref().ok_or_else(|| JsValue::from_str("no refold begun"))?;
+            let first = pass as usize * rf.per_pass;
+            if first >= rf.shifts.len() {
+                return Err(JsValue::from_str("no such pass"));
+            }
+            (first, (rf.shifts.len() - first).min(rf.per_pass))
+        };
+        let mut rec = g.rec();
+        for v in 0..count {
+            let fb = run.refold_bufs(v);
+            for (l, b) in fb.best.iter().enumerate() {
+                let (lw, lh) = fb.dims[l];
+                rec.dispatch("fill", [None, None, Some(b), None, None, None], P { w: (lw * lh) as u32, f0: -1.0, ..Default::default() }, grid1(lw * lh));
+            }
+        }
+        rec.submit();
+        let rf = run.refold.as_mut().unwrap();
+        rf.pass = Some(first);
+        for a in rf.accs.iter_mut() {
+            a.1.clear();
+        }
+        Ok(())
+    }
+
+    /// Fold frame `index` (decoded again from `bytes`) into every view of the
+    /// pass, shifted by its index. Returns {index, ms}.
+    pub async fn refold_push(&mut self, index: usize, bytes: &[u8]) -> Result<JsValue, JsValue> {
+        let t0 = now();
+        let frame = decode::decode(bytes).map_err(|e| JsValue::from_str(&e))?;
+        let g = &self.gpu;
+        let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
+        if frame.w != run.w || frame.h != run.h {
+            return Err(JsValue::from_str("frame size differs from the run"));
+        }
+        if index >= run.count {
+            return Err(JsValue::from_str("unknown frame index"));
+        }
+        let (w, h) = (run.w, run.h);
+        // the shift of this frame in each view: the far end of the stack moves shift × width, about the middle
+        let (k, dxs) = {
+            let rf = run.refold.as_ref().ok_or_else(|| JsValue::from_str("no refold begun"))?;
+            let first = rf.pass.ok_or_else(|| JsValue::from_str("no pass begun"))?;
+            let count = (rf.shifts.len() - first).min(rf.per_pass);
+            let z = if run.count > 1 { index as f32 / (run.count - 1) as f32 } else { 0.5 };
+            let sign = if rf.near_first { 1.0 } else { -1.0 };
+            (rf.k, (0..count).map(|v| rf.shifts[first + v] * w as f32 * (z - 0.5) * sign).collect::<Vec<f32>>())
+        };
+        g.upload(&run.up, bytemuck::cast_slice(&frame.rgb)).await.map_err(|e| JsValue::from_str(&e))?;
+        drop(frame);
+        if k > 1 {
+            // warped once at full resolution; each view block-averages it with its (integer) shift
+            let mut rec = g.rec();
+            record_rewarp(g, run, &mut rec, index, 0.0).map_err(|e| JsValue::from_str(&e))?;
+            rec.submit();
+        }
+        for (v, &dx) in dxs.iter().enumerate() {
+            let mut rec = g.rec();
+            let fb = run.refold_bufs(v);
+            if k == 1 {
+                record_rewarp(g, run, &mut rec, index, dx).map_err(|e| JsValue::from_str(&e))?;
+            } else {
+                let (vw, vh) = fb.dims[0];
+                for c in 0..3 {
+                    rec.dispatch(
+                        "down1",
+                        [Some(&run.cur[0]), None, Some(&fb.cur[0]), None, None, None],
+                        P { w: w as u32, h: h as u32, ow: vw as u32, oh: vh as u32, klen: k as u32, off_in: (c * w * h) as u32, off_out: (c * vw * vh) as u32, f0: dx, ..Default::default() },
+                        grid2(vw, vh),
+                    );
+                }
+            }
+            record_fold_in(&fb, run.klen, &run.wt, run.fp.use_chroma, &mut rec, run.refold_scratch(), None, None);
+            rec.submit();
+            let (tw, th) = fb.dims[fb.levels];
+            let top = g.read_f32(&fb.cur[fb.levels], 3 * tw * th).await.map_err(|e| JsValue::from_str(&e))?;
+            run.refold.as_mut().unwrap().accs[v].1.push(Img3 { w: tw, h: th, p: [top[..tw * th].to_vec(), top[tw * th..2 * tw * th].to_vec(), top[2 * tw * th..].to_vec()] });
+        }
+        let o = js_sys::Object::new();
+        set(&o, "index", index as u32);
+        set(&o, "ms", now() - t0);
+        Ok(o.into())
+    }
+
+    /// Collapse the pass's views and keep them (cropped) on the CPU.
+    pub async fn refold_pass_finish(&mut self) -> Result<(), JsValue> {
+        let t0 = now();
+        let g = &self.gpu;
+        let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
+        let (first, count) = {
+            let rf = run.refold.as_ref().ok_or_else(|| JsValue::from_str("no refold begun"))?;
+            let first = rf.pass.ok_or_else(|| JsValue::from_str("no pass begun"))?;
+            (first, (rf.shifts.len() - first).min(rf.per_pass))
+        };
+        for v in 0..count {
+            let tops = std::mem::take(&mut run.refold.as_mut().unwrap().accs[v].1);
+            if tops.is_empty() {
+                return Err(JsValue::from_str("no frames folded into the refold"));
+            }
+            let (vw, vh, v16) = {
+                let rf = run.refold.as_ref().unwrap();
+                let fb = run.refold_bufs(v);
+                let mut rec = g.rec();
+                record_collapse_in(g, &fb, &rf.fp, &mut rec, &tops);
+                rec.submit();
+                let (vw, vh) = fb.dims[0];
+                (vw, vh, read_rgb16(g, &fb.acc[0], vw, vh).await.map_err(|e| JsValue::from_str(&e))?)
+            };
+            let rf = run.refold.as_mut().unwrap();
+            let cropped = if rf.crop.is_full(vw, vh) { v16 } else { cut_rgb(&v16, vw, &rf.crop) };
+            rf.done[first + v] = Some(cropped);
+        }
+        let rf = run.refold.as_mut().unwrap();
+        rf.pass = None;
+        log(&format!("[lapstack] refold: views {}..{} collapsed ({:.0} ms)", first, first + count - 1, now() - t0));
+        Ok(())
+    }
+
+    /// A finished view as RGBA8: {index, w, h, rgba}.
+    pub fn refold_view(&self, index: usize) -> Result<JsValue, JsValue> {
+        let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no run"))?;
+        let rf = run.refold.as_ref().ok_or_else(|| JsValue::from_str("no refold begun"))?;
+        let v = rf.done.get(index).and_then(|d| d.as_ref()).ok_or_else(|| JsValue::from_str("view not rendered"))?;
+        let o = js_sys::Object::new();
+        set(&o, "index", index as u32);
+        set(&o, "w", rf.crop.w as u32);
+        set(&o, "h", rf.crop.h as u32);
+        set(&o, "rgba", js_sys::Uint8Array::from(&rgb16_to_rgba8(v)[..]));
+        Ok(o.into())
+    }
+
+    /// Views 0 (left) and 1 (right) of the refold as a stereo pair in
+    /// `layout` (sbs | cross | anaglyph), encoded like `view_stereo`.
+    pub fn refold_stereo(&self, layout: &str, format: &str, quality: u8, metadata: bool) -> Result<js_sys::Uint8Array, JsValue> {
+        let layout = Layout::parse(layout).ok_or_else(|| JsValue::from_str("layout must be sbs | cross | anaglyph"))?;
+        let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no run"))?;
+        let rf = run.refold.as_ref().ok_or_else(|| JsValue::from_str("no refold begun"))?;
+        let get = |i: usize| rf.done.get(i).and_then(|d| d.as_deref()).ok_or_else(|| JsValue::from_str("the pair's views are not rendered"));
+        let (px, pw, ph) = view::compose_pair(get(0)?, get(1)?, rf.crop.w, rf.crop.h, 3, layout);
+        let mut out = encode_rgb16(&px, pw as u32, ph as u32, format, quality, run.bits == 16).map_err(|e| JsValue::from_str(&e))?;
+        if metadata {
+            out = lapstack_core::meta::embed(out, &run.meta);
+        }
+        Ok(js_sys::Uint8Array::from(&out[..]))
+    }
+
+    /// Drop the refold (its views and GPU buffers).
+    pub fn refold_end(&mut self) {
+        if let Some(run) = self.run.as_mut() {
+            run.refold = None;
+        }
+    }
+
     /// Full-resolution depth map (u16, 65535 = last frame); for tests.
     pub fn depth_full(&self) -> Result<js_sys::Uint16Array, JsValue> {
         let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no result"))?;
@@ -1348,6 +1818,9 @@ impl Engine {
             undo: Vec::new(),
             redo: Vec::new(),
             undo_bytes: 0,
+            edits: 0,
+            view_base: None,
+            refold: None,
             meta: Default::default(),
             crop: None,
         })

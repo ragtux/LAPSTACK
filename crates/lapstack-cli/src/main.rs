@@ -3,8 +3,10 @@
 
 //! lapstack — Laplacian-pyramid focus stacking CLI.
 
-use lapstack_core::{DepthParams, FocusMeasure, Params, TopRule, Upsample, run_with};
+use lapstack_core::{DepthParams, FocusMeasure, Layout, Params, TopRule, Upsample, View, run_with};
 use lapstack_core::io;
+use lapstack_core::pyramid::Img3;
+use lapstack_core::view;
 use std::time::Instant;
 
 fn fail(msg: &str) -> ! {
@@ -26,6 +28,9 @@ fn main() {
     let mut dp = DepthParams::default();
     let mut depth_mode = "dff".to_string();
     let mut slab_dir: Option<String> = None;
+    let mut stereo: Option<(f32, Layout)> = None;
+    let mut rocking: Option<(f32, usize)> = None;
+    let mut near_first = true;
 
     let mut i = 0;
     let next = |i: &mut usize| -> String {
@@ -68,6 +73,21 @@ fn main() {
                 p.slabs = Some((size, overlap));
             }
             "--slab-dir" => slab_dir = Some(next(&mut i)),
+            "--stereo" => {
+                let s = next(&mut i);
+                let mut it = s.split(':');
+                let pct: f32 = it.next().and_then(|v| v.parse().ok()).filter(|v: &f32| *v > 0.0).unwrap_or_else(|| fail("--stereo: PCT[:LAYOUT], PCT > 0"));
+                let layout = match it.next() { Some(l) => Layout::parse(l).unwrap_or_else(|| fail("--stereo: layout sbs | cross | anaglyph")), None => Layout::SideBySide };
+                stereo = Some((pct / 100.0, layout));
+            }
+            "--rocking" => {
+                let s = next(&mut i);
+                let mut it = s.split(':');
+                let pct: f32 = it.next().and_then(|v| v.parse().ok()).filter(|v: &f32| *v > 0.0).unwrap_or_else(|| fail("--rocking: PCT[:N], PCT > 0"));
+                let n = match it.next() { Some(n) => n.parse().ok().filter(|&n| n >= 2).unwrap_or_else(|| fail("--rocking: PCT[:N], N >= 2")), None => 24 };
+                rocking = Some((pct / 100.0, n));
+            }
+            "--far-first" => near_first = false,
             "--depth-raw" => depth_raw = Some(next(&mut i)),
             "--depth" => {
                 depth_mode = next(&mut i);
@@ -155,6 +175,48 @@ fn main() {
         }
     }
     let n_last = (inputs.len().max(2) - 1) as f32;
+    // synthetic stereo and rocking (view.rs): the result sheared by its depth map, plane by plane
+    let (iw, ih) = (out.image.w, out.image.h);
+    let sheared = |v: &View| -> Img3 {
+        let mut img = Img3::zeros(iw, ih);
+        for c in 0..3 {
+            view::render(&out.image.p[c], iw, ih, 1, &out.depth, 1.0 / n_last, v, &mut img.p[c], iw, 0);
+        }
+        img
+    };
+    if let Some((shift, layout)) = stereo {
+        let (l, r) = (sheared(&View::new(-shift, near_first)), sheared(&View::new(shift, near_first)));
+        let pair = match layout {
+            Layout::Anaglyph => Img3 { w: iw, h: ih, p: [l.p[0].clone(), r.p[1].clone(), r.p[2].clone()] },
+            _ => {
+                let (a, b) = if layout == Layout::SideBySide { (&l, &r) } else { (&r, &l) };
+                let mut img = Img3::zeros(2 * iw, ih);
+                for c in 0..3 {
+                    for y in 0..ih {
+                        img.p[c][y * 2 * iw..y * 2 * iw + iw].copy_from_slice(&a.p[c][y * iw..(y + 1) * iw]);
+                        img.p[c][y * 2 * iw + iw..(y + 1) * 2 * iw].copy_from_slice(&b.p[c][y * iw..(y + 1) * iw]);
+                    }
+                }
+                img
+            }
+        };
+        let path = format!("{stem}_stereo{ext}");
+        if let Err(e) = io::save_rgb(&pair, &path, out.bit_depth, meta.as_ref()) {
+            fail(&e);
+        }
+        eprintln!("[lapstack] stereo pair (±{:.1} %, {}) -> {path}", shift * 100.0, match layout { Layout::SideBySide => "left | right", Layout::CrossEyed => "right | left", Layout::Anaglyph => "red-cyan anaglyph" });
+    }
+    if let Some((amp, n)) = rocking {
+        let dir = format!("{stem}_rocking");
+        std::fs::create_dir_all(&dir).unwrap_or_else(|e| fail(&format!("cannot create {dir}: {e}")));
+        for (i, s) in view::rocking_shifts(amp, n).into_iter().enumerate() {
+            let path = format!("{dir}/view_{i:02}{ext}");
+            if let Err(e) = io::save_rgb(&sheared(&View::new(s, near_first)), &path, out.bit_depth, meta.as_ref()) {
+                fail(&e);
+            }
+        }
+        eprintln!("[lapstack] rocking: {n} views of ±{:.1} % -> {dir}/view_NN{ext}", amp * 100.0);
+    }
     if let Some(path) = &depth_raw {
         if let Err(e) = io::save_gray16(&out.depth, out.image.w, out.image.h, n_last, path) {
             fail(&e);
@@ -205,6 +267,12 @@ fn help() {
            --slabs SIZE[:OVERLAP] also fuse slabs of SIZE consecutive frames, overlapping by OVERLAP [2],\n\
                                   each on its own (Zerene's slabbing): thick planes of focus to retouch from\n\
            --slab-dir DIR         where the slabs go, in the output's format [<output stem>_slabs]\n\
+           --stereo PCT[:LAYOUT]  synthetic stereo pair -> <stem>_stereo.<ext>: the result sheared by its depth map,\n\
+                                  the far end of the stack moved -PCT / +PCT % of the width (left / right view);\n\
+                                  LAYOUT sbs (left | right, default) | cross (right | left) | anaglyph (red-cyan)\n\
+           --rocking PCT[:N]      rocking animation: N [24] views, the shift sweeping +-PCT % in one sine cycle,\n\
+                                  -> <stem>_rocking/view_NN.<ext> (join them with ffmpeg / ImageMagick)\n\
+           --far-first            frame 0 is the far end of the stack (the focus went back to front) [near]\n\
            --depth MODE           dff = depth from focus (default) | winner = pyramid winner map\n\
            --depth-level L        (winner) pyramid level the map is read from [2 = 1/4 res]\n\
          Depth from focus (Jeon et al. 2019 focus measure, guided-filter aggregation,\n\

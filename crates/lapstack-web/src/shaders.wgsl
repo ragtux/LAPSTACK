@@ -358,19 +358,25 @@ fn proxy(@builtin(global_invocation_id) g: vec3<u32>) {
     s = clamp(s / max(cnt, 1.0), vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0 + 0.5;
     o[y * p.ow + x] = bitcast<f32>(u32(s.x) | (u32(s.y) << 8u) | (u32(s.z) << 16u) | (255u << 24u));
 }
-// down1: area-average one f32 plane `a` (p.w x p.h) by integer factor klen -> o (p.ow x p.oh)
+// down1: area-average one f32 plane `a` (p.w x p.h) by integer factor klen -> o (p.ow x p.oh).
+// f0 (rounded) shifts the output right by that many input pixels, clamped at the input's
+// edges (the refold's per-frame shift); 0 keeps partial blocks at the right edge as they are.
+// off_in / off_out pick a plane of a multi-plane buffer.
 @compute @workgroup_size(16, 16)
 fn down1(@builtin(global_invocation_id) g: vec3<u32>) {
     let x = g.x; let y = g.y; if (x >= p.ow || y >= p.oh) { return; }
     let f = p.klen; var s = 0.0; var cnt = 0.0;
+    let sh = i32(round(p.f0));
     for (var dy = 0u; dy < f; dy++) {
         let yy = y * f + dy; if (yy >= p.h) { break; }
         for (var dx = 0u; dx < f; dx++) {
-            let xx = x * f + dx; if (xx >= p.w) { break; }
-            s += a[yy * p.w + xx]; cnt += 1.0;
+            let xs = i32(x * f + dx) - sh;
+            if (sh == 0 && xs >= i32(p.w)) { break; }
+            let xx = u32(clamp(xs, 0, i32(p.w) - 1));
+            s += a[p.off_in + yy * p.w + xx]; cnt += 1.0;
         }
     }
-    o[y * p.ow + x] = s / max(cnt, 1.0);
+    o[p.off_out + y * p.ow + x] = s / max(cnt, 1.0);
 }
 // luma plane (f32, p.w x p.h) from the packed u16 frame in `u`, for the aligner
 @compute @workgroup_size(256)

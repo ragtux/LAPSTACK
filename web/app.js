@@ -174,6 +174,7 @@ worker.onmessage = (ev) => {
     case 'slab': onSlab(m); break;
     case 'slab-skipped': onSlabSkipped(m); break;
     case 'slab-progress': onSlabProgress(m); break;
+    case 'refold-progress': setProgress(m.text, m.done, m.total); $('sv-progress').textContent = m.text; break;
     case 'patch': onPatch(m); break;
     case 'thumb-error': log(`[lapstack] cannot decode ${m.name}: ${m.text}`); break;
     case 'done': onDone(m); break;
@@ -367,16 +368,20 @@ function onReply(m) {
 const OUTPUTS = [
   { id: 'lap', token: 'lap', kind: 'fused', name: 'LAP stack', desc: 'the fused image', avail: () => !!st.result },
   { id: 'dfr', token: 'dfr', kind: 'dmap', name: 'DFR stack', desc: 'rendered from the depth map', avail: () => haveDmap() },
+  { id: 'stereo', token: 'stereo', kind: 'stereo', name: 'Stereo pair', desc: () => `synthetic stereo: the stacked image seen from the left and from the right, ${refolding() ? 'each view folded from the shifted frames' : 'sheared by its depth map'}`, avail: () => !!st.result },
   { id: 'depth', token: 'depth', kind: 'depth', name: 'Depth map', desc: '8-bit gray PNG, min–max scaled', ext: 'png', avail: () => !!st.result },
   { id: 'depth16', token: 'depth16', kind: 'depth16', name: 'Depth map, 16-bit', desc: '16-bit gray PNG, 65535 = last frame', ext: 'png', avail: () => !!st.result },
   { id: 'winner', token: 'winner', kind: 'winner', name: 'Winner map', desc: '8-bit gray PNG, LAP winner index', ext: 'png', avail: () => !!st.result },
   { id: 'anim-depth', token: 'depth-slice', anim: true, name: 'Focus depth, Turbo, slice sweeping', desc: 'animated GIF: the depth map with the magenta slice moving through the frames', ext: 'gif', avail: () => !!st.result && st.files.length > 1 },
   { id: 'anim-focus', token: 'infocus', anim: true, name: 'In focus sweep', desc: 'animated GIF: each frame\'s in-focus plane lit, the rest dimmed to outlines', ext: 'gif', avail: () => !!st.result && st.files.length > 1 },
   { id: 'anim-peak', token: 'peaking', anim: true, name: 'Source with focus peaking', desc: 'animated GIF: the aligned frames under their magenta peaking band', ext: 'gif', avail: () => !!st.result && st.files.length > 1 && st.frames.some((f) => f && f.peak) },
+  { id: 'anim-rock', token: 'rocking', anim: true, rock: true, name: 'Rocking', desc: () => `animated GIF: the stacked image rocking from side to side, ${refolding() ? 'each view folded from the shifted frames' : 'sheared by its depth map'}`, ext: 'gif', avail: () => !!st.result },
 ];
 const SV = { sel: new Set(['lap']), exif: null, exifFor: null, exporting: false, cancel: false };
 const SK = 'lapstack.save';
-const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'sv-meta', 'sv-crop', 'an-edge', 'an-fps', 'an-loop', 'cc-on', 'cc-name'];
+const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'sv-meta', 'sv-crop', 'an-edge', 'an-fps', 'an-loop', 'v3-method', 'v3-src', 'v3-shift', 'v3-layout', 'v3-rock', 'v3-near', 'cc-on', 'cc-name'];
+const svSteps = ['an-step', 'v3-views'];   // the card's steppers (a number in a span between − and +)
+const svLive = ['sv-quality', 'sv-name', 'cc-name', 'v3-shift', 'v3-rock'];   // re-render on every input, not on change
 // The crop: the run reports the window every aligned frame covers with real pixels
 // (outside it some frame only has its smeared edge). With the Save card's switch on,
 // every saved file is cut to it and the viewer shows it as the bright window.
@@ -385,7 +390,8 @@ const outDims = () => { const r = cropArea(); return r ? [r.w, r.h] : imageDims(
 // the crop as a source rectangle in a bitmap's own pixels (bitmaps come at frame, proxy or grid resolution)
 const srcRect = (bw, bh) => { const r = cropArea(); if (!r) return [0, 0, bw, bh]; const k = bw / st.result.w, l = bh / st.result.h; return [r.x * k, r.y * l, r.w * k, r.h * l]; };
 function saveSaveSettings() {
-  const o = { sel: [...SV.sel], 'an-step': Number($('an-step').textContent) };
+  const o = { sel: [...SV.sel] };
+  for (const id of svSteps) o[id] = Number($(id).textContent);
   for (const id of svIds) { const el = $(id); o[id] = el.type === 'checkbox' ? el.checked : el.value; }
   try { localStorage.setItem(SK, JSON.stringify(o)); } catch {}
 }
@@ -393,7 +399,7 @@ try {
   const o = JSON.parse(localStorage.getItem(SK));
   if (o) {
     for (const id of svIds) if (id in o) { const el = $(id); if (el.type === 'checkbox') el.checked = !!o[id]; else el.value = o[id]; }
-    if (o['an-step']) setStep('an-step', Number(o['an-step']));
+    for (const id of svSteps) if (o[id]) setStep(id, Number(o[id]));
     if (Array.isArray(o.sel)) SV.sel = new Set(o.sel);
   }
 } catch {}
@@ -470,6 +476,8 @@ async function exifDate(file) {
   } catch { return null; }
 }
 window.__svTest = { exifDate, nameDate, save: (kind, format, quality, meta, crop) => call({ type: 'save', kind, format, quality, meta, crop }),   // tests
+                    view: viewFrame, stereo: (format) => call({ type: 'view_stereo', ...v3(), format: format || 'png', quality: 90, meta: false }),
+                    refold, refoldView: (index) => call({ type: 'refold_view', index }), refoldEnd: () => call({ type: 'refold_end' }),
                     sign: (bytes, mime, name) => signBlob(new Blob([bytes], { type: mime }), OUTPUTS[0], name, mime).then((b) => b.arrayBuffer()) };
 function svExt(o) { return o.ext || ($('sv-format').value === 'jpeg' ? 'jpg' : 'png'); }
 function svName(o, now = new Date()) {
@@ -482,16 +490,30 @@ function svName(o, now = new Date()) {
   if ($('fn-layer').checked) parts.push(o.token);
   return (parts.join('_') || 'stacked') + '.' + svExt(o);
 }
-// the animation's frame order (every Nth frame, last frame always in; back and forth or forward), size and delay
-function animPlan() {
+// the stereo / rocking settings: the shifts as fractions of the width (the card shows percent)
+const v3 = () => ({ method: $('v3-method').value, source: haveDmap() ? $('v3-src').value : 'fused', crop: !!cropArea(), near: $('v3-near').checked, shift: Number($('v3-shift').value) / 100, rock: Number($('v3-rock').value) / 100, views: Math.max(4, Number($('v3-views').textContent)), layout: $('v3-layout').value });
+const refolding = () => $('v3-method').value === 'refold';
+// Zerene's way: the stack folded again, each frame shifted by its index, one accumulator per view
+// (see Refold in lib.rs); the frames are read again. The views wait in the engine until refold_end.
+function refold(shifts, w, h) { const v = v3(); return call({ type: 'refold', files: st.files, shifts, near: v.near, w, h }); }
+// one view of the stacked image, sheared by the engine at w×h (view.rs): {w, h, rgba}. `shift` is the
+// far end's shift as a fraction of the width, positive = seen from the right.
+function viewFrame(shift, w, h) { const v = v3(); return call({ type: 'view', source: v.source, crop: v.crop, w, h, shift, near: v.near }); }
+// the shift of frame i of a rocking cycle of n: a sine sweep of ±a, easing at the ends, closing on itself
+const rockShift = (a, i, n) => a * Math.sin(2 * Math.PI * i / n);
+// the animation's frame order (every Nth frame, last frame always in; back and forth or forward), size and delay;
+// the rocking animation's frames are one cycle of views instead
+function animPlan(o) {
   const [W, H] = outDims(); const edge = Number($('an-edge').value), step = Math.max(1, Number($('an-step').textContent));
   const s = edge ? Math.min(1, edge / Math.max(W, H)) : 1;
   const ow = Math.max(1, Math.round(W * s)), oh = Math.max(1, Math.round(H * s));
+  const delay = Math.max(2, Math.round(100 / Number($('an-fps').value)));
+  if (o && o.rock) return { ow, oh, seq: [...Array(v3().views).keys()], delay };
   const n = st.files.length, fwd = [];
   for (let i = 0; i < n; i += step) fwd.push(i);
   if (n && fwd[fwd.length - 1] !== n - 1) fwd.push(n - 1);
   const seq = $('an-loop').value === 'pingpong' && fwd.length > 2 ? fwd.concat(fwd.slice(1, -1).reverse()) : fwd;
-  return { ow, oh, seq, delay: Math.max(2, Math.round(100 / Number($('an-fps').value))) };
+  return { ow, oh, seq, delay };
 }
 const fmtMB = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB` : `${Math.round(b / 1e3)} KB`;
 async function renderSave() {
@@ -514,6 +536,10 @@ async function renderSave() {
   $('sv-meta').disabled = !have;
   $('sv-meta-info').textContent = !mt ? '—' : have ? `${f0 ? f0.name : 'first frame'}: ${mt.text}` + (!mt.icc && mt.chrm ? ' (no ICC profile: PNG gets a cHRM chunk)' : '') : `nothing found in ${f0 ? f0.name : 'the first frame'}`;
   $('fn-preview').textContent = svName(OUTPUTS[0]);
+  // stereo / rocking: the DFR image is on offer only when it was rendered
+  $('v3-src').querySelector('[value="dmap"]').disabled = !haveDmap(); if (!haveDmap()) $('v3-src').value = 'fused';
+  $('v3-shift-val').textContent = `±${$('v3-shift').value} %`; $('v3-rock-val').textContent = `±${$('v3-rock').value} %`;
+  $('v3-src').disabled = refolding();   // the refold fuses the frames itself
   // the file list
   const list = $('sv-files'); list.innerHTML = '';
   const avail = OUTPUTS.filter((o) => o.avail());
@@ -524,24 +550,28 @@ async function renderSave() {
     const th = document.createElement('canvas'); th.width = 192; th.height = 128;
     const meta = document.createElement('div');
     const nm = document.createElement('div'); nm.className = 'fname'; nm.textContent = ok ? svName(o) : `${o.name.toLowerCase()} — not available`; nm.title = nm.textContent;
-    const ds = document.createElement('div'); ds.className = 'desc'; ds.textContent = `${o.name} · ${o.desc}`;
+    const ds = document.createElement('div'); ds.className = 'desc'; ds.textContent = `${o.name} · ${typeof o.desc === 'function' ? o.desc() : o.desc}`;
     meta.append(nm, ds);
     const state = document.createElement('span'); state.className = 'state'; state.textContent = ok ? (o.anim ? 'GIF' : svExt(o).toUpperCase()) : '';
     row.append(cb, th, meta, state);
-    if (ok) row.addEventListener('click', (e) => { if (e.target !== cb) cb.checked = !cb.checked; if (cb.checked) SV.sel.add(o.id); else SV.sel.delete(o.id); row.classList.toggle('on', cb.checked); saveSaveSettings(); updateSaveButtons(); });
+    if (ok) row.addEventListener('click', (e) => { if (e.target !== cb) cb.checked = !cb.checked; if (cb.checked) SV.sel.add(o.id); else SV.sel.delete(o.id); row.classList.toggle('on', cb.checked); saveSaveSettings(); updateAnimInfo(); updateSaveButtons(); });
     list.appendChild(row);
     if (ok) thumbInto(o, th).catch(() => {});
     else if (o.id === 'dfr') nm.textContent = 'dfr — run with DFR (Run ▾) to render it';
     else if (o.id === 'anim-peak') nm.textContent = 'peaking — no peaking data for these frames';
   }
   $('sv-all').checked = avail.length > 0 && avail.every((o) => SV.sel.has(o.id));
+  updateAnimInfo();
+  updateSaveButtons();
+}
+// the animations' frame count, size and a rough GIF size for the selected ones
+function updateAnimInfo() {
   const plan = animPlan();
-  const anims = avail.filter((o) => o.anim && SV.sel.has(o.id));
-  const est = anims.reduce((b, o) => b + plan.seq.length * plan.ow * plan.oh * (o.id === 'anim-depth' ? 0.15 : 0.7), 0);
-  $('an-info').textContent = `${plan.seq.length} frames of ${plan.ow}×${plan.oh}` + (anims.length ? ` · roughly ${fmtMB(est)} for the ${anims.length} selected animation${anims.length > 1 ? 's' : ''}` : '') +
+  const anims = OUTPUTS.filter((o) => o.anim && o.avail() && SV.sel.has(o.id));
+  const est = anims.reduce((b, o) => { const p = animPlan(o); return b + p.seq.length * p.ow * p.oh * (o.id === 'anim-depth' ? 0.15 : 0.7); }, 0);
+  $('an-info').textContent = `${plan.seq.length} frames of ${plan.ow}×${plan.oh} (rocking: ${v3().views})` + (anims.length ? ` · roughly ${fmtMB(est)} for the ${anims.length} selected animation${anims.length > 1 ? 's' : ''}` : '') +
     (est > 1e9 ? ' — a GIF that large may exhaust the browser: use a smaller long edge or a larger frame step.' : '');
   $('an-info').classList.toggle('warn', est > 1e9);
-  updateSaveButtons();
 }
 function updateSaveButtons() {
   const n = OUTPUTS.filter((o) => o.avail() && SV.sel.has(o.id)).length;
@@ -559,6 +589,17 @@ async function thumbInto(o, cv) {
     c.imageSmoothingEnabled = !pixelated; c.drawImage(bmp, ...srcRect(bmp.width, bmp.height), (cv.width - w) / 2, (cv.height - h) / 2, w, h);
   };
   if (o.kind === 'fused' || o.kind === 'dmap') fit(r[o.kind]);
+  else if (o.kind === 'stereo' || o.rock) {
+    // the views at thumbnail size: the pair side by side (the anaglyph mixed here), the rocking at one extreme
+    const v = v3(), pair = o.kind === 'stereo' && v.layout !== 'anaglyph';
+    const s = Math.min(cv.width / (pair ? 2 * ow : ow), cv.height / oh), tw = Math.max(1, Math.round(ow * s)), th = Math.max(1, Math.round(oh * s));
+    const x0 = (cv.width - (pair ? 2 : 1) * tw) / 2, y0 = (cv.height - th) / 2;
+    if (o.rock) { const f = await viewFrame(-v.rock, tw, th); c.putImageData(new ImageData(new Uint8ClampedArray(f.rgba), f.w, f.h), x0, y0); return; }
+    const l = await viewFrame(-v.shift, tw, th), rr = await viewFrame(v.shift, tw, th);
+    const L = new ImageData(new Uint8ClampedArray(l.rgba), l.w, l.h), R = new ImageData(new Uint8ClampedArray(rr.rgba), rr.w, rr.h);
+    if (pair) { const [a, b] = v.layout === 'cross' ? [R, L] : [L, R]; c.putImageData(a, x0, y0); c.putImageData(b, x0 + tw, y0); }
+    else { for (let i = 0; i < L.data.length; i += 4) { L.data[i + 1] = R.data[i + 1]; L.data[i + 2] = R.data[i + 2]; } c.putImageData(L, x0, y0); }
+  }
   else if (o.kind === 'depth' || o.kind === 'depth16') fit(await depthBitmap(false), true);
   else if (o.kind === 'winner') fit(await winnerBitmap(), true);
   else if (o.id === 'anim-depth') { fit(await depthBitmap(true), true); const ov = await sliceBitmap(mid); if (ov) fit(ov, true); }
@@ -573,8 +614,8 @@ async function winnerBitmap() {
   for (let i = 0; i < w * h; i++) { const g = (d[i] - lo) * k; px[4 * i] = g; px[4 * i + 1] = g; px[4 * i + 2] = g; px[4 * i + 3] = 255; }
   const bmp = await createImageBitmap(new ImageData(px, w, h)); st.depthBmp.set('winner', bmp); return bmp;
 }
-for (const id of svIds) $(id).addEventListener(id === 'sv-quality' || id === 'sv-name' || id === 'cc-name' ? 'input' : 'change', () => { $('sv-qval').textContent = $('sv-quality').value; saveSaveSettings(); renderSave(); if (id === 'sv-crop') draw(); });
-document.querySelectorAll('#savecard [data-step]').forEach((b) => b.addEventListener('click', () => { setStep('an-step', Number($('an-step').textContent) + Number(b.dataset.d)); saveSaveSettings(); renderSave(); }));
+for (const id of svIds) $(id).addEventListener(svLive.includes(id) ? 'input' : 'change', () => { $('sv-qval').textContent = $('sv-quality').value; saveSaveSettings(); renderSave(); if (id === 'sv-crop') draw(); });
+document.querySelectorAll('#savecard [data-step]').forEach((b) => b.addEventListener('click', () => { const id = b.dataset.step; setStep(id, Number($(id).textContent) + Number(b.dataset.d)); saveSaveSettings(); renderSave(); }));
 $('sv-all').addEventListener('change', (e) => { for (const o of OUTPUTS) if (o.avail()) { if (e.target.checked) SV.sel.add(o.id); else SV.sel.delete(o.id); } saveSaveSettings(); renderSave(); });
 function downloadBlob(blob, name) {
   if (window.__saveHook) { window.__saveHook(blob, name); return; }   // tests collect the files instead of downloading
@@ -584,25 +625,44 @@ function downloadBlob(blob, name) {
 }
 // one animation: frames composed here at the output size, encoded by the worker, streamed back
 async function renderAnim(o, progress) {
-  const { ow, oh, seq, delay } = animPlan();
+  const { ow, oh, seq, delay } = animPlan(o);
   const oc = new OffscreenCanvas(ow, oh), c = oc.getContext('2d', { willReadFrequently: true });
+  let refolded = false;
+  if (o.rock && refolding()) {   // one pass over the frames (or a few) before any GIF frame
+    const v = v3();
+    await refold(seq.map((i) => rockShift(v.rock, i, v.views)), ow, oh);
+    refolded = true;
+  }
   await call({ type: 'gif_begin', w: ow, h: oh, loop: true, dither: true });
   const chunks = [];
   try {
     for (let k = 0; k < seq.length; k++) {
       if (SV.cancel) throw new Error('cancelled');
       progress(k, seq.length);
-      await drawAnimFrame(o.id, seq[k], c, ow, oh);
+      await drawAnimFrame(o, seq[k], c, ow, oh);
       const img = c.getImageData(0, 0, ow, oh);
       const r = await call({ type: 'gif_frame', rgba: img.data.buffer, delay }, [img.data.buffer]);
       if (r.bytes.byteLength) chunks.push(r.bytes);
     }
     const r = await call({ type: 'gif_end' }); chunks.push(r.bytes);
   } catch (e) { await call({ type: 'gif_abort' }).catch(() => {}); throw e; }
-  finally { if (o.id !== 'anim-depth') { R.gpuIndex = -1; R.wasmIndex = -1; } }   // the worker's source frame is whatever we exported last
+  finally {
+    if (refolded) await call({ type: 'refold_end' }).catch(() => {});
+    if (o.id !== 'anim-depth' && !o.rock) { R.gpuIndex = -1; R.wasmIndex = -1; }   // the worker's source frame is whatever we exported last
+    else if (refolded) R.gpuIndex = -1;   // the refold's warps went through cur[0]
+  }
   return new Blob(chunks, { type: 'image/gif' });
 }
-async function drawAnimFrame(id, i, c, ow, oh) {
+async function drawAnimFrame(o, i, c, ow, oh) {
+  const id = o.id;
+  if (o.rock) {
+    // view i of the rocking cycle: refolded (at about the output size: scaled here), or sheared by the engine at the output size
+    const v = v3(); const f = refolding() ? await call({ type: 'refold_view', index: i }) : await viewFrame(rockShift(v.rock, i, v.views), ow, oh);
+    const img = new ImageData(new Uint8ClampedArray(f.rgba), f.w, f.h);
+    if (f.w === ow && f.h === oh) c.putImageData(img, 0, 0);
+    else { const bmp = await createImageBitmap(img); c.imageSmoothingEnabled = true; c.drawImage(bmp, 0, 0, ow, oh); bmp.close(); }
+    return;
+  }
   if (id === 'anim-depth') {
     c.imageSmoothingEnabled = false;
     const d = await depthBitmap(true); c.drawImage(d, ...srcRect(d.width, d.height), 0, 0, ow, oh);
@@ -667,8 +727,16 @@ async function saveSelected() {
         mime = 'image/gif';
       } else {
         prog(`encoding ${name}`, 0, 0); setState(o, 'encoding…');
-        const f = o.ext ? 'png' : fmt;
-        const r = await call({ type: 'save', kind: o.kind, format: f, quality: q, meta: $('sv-meta').checked && !$('sv-meta').disabled, crop: !!cropArea() });
+        const f = o.ext ? 'png' : fmt, meta = $('sv-meta').checked && !$('sv-meta').disabled;
+        let r;
+        if (o.kind === 'stereo' && refolding()) {   // the two views folded from the frames at full resolution, then composed
+          const v = v3(); setState(o, 'refolding…');
+          await refold([-v.shift, v.shift], 0, 0);
+          try { r = await call({ type: 'refold_stereo', layout: v.layout, format: f, quality: q, meta }); }
+          finally { await call({ type: 'refold_end' }).catch(() => {}); R.gpuIndex = -1; }
+          prog(`encoding ${name}`, 0, 0); setState(o, 'encoding…');
+        } else if (o.kind === 'stereo') r = await call({ type: 'view_stereo', ...v3(), format: f, quality: q, meta });   // the pair at the crop's full size
+        else r = await call({ type: 'save', kind: o.kind, format: f, quality: q, meta, crop: !!cropArea() });
         mime = f === 'jpeg' ? 'image/jpeg' : 'image/png'; blob = new Blob([r.bytes], { type: mime });
       }
       if (sign) { prog(`signing ${name}`, 0, 0); setState(o, 'signing…'); blob = await signBlob(blob, o, name, mime); }
@@ -684,7 +752,7 @@ async function saveSelected() {
   $('sv-progress').textContent = ''; updateSaveButtons();
 }
 $('sv-go').addEventListener('click', saveSelected);
-$('sv-cancel').addEventListener('click', () => { SV.cancel = true; });
+$('sv-cancel').addEventListener('click', () => { SV.cancel = true; worker.postMessage({ type: 'refold_cancel' }); });
 
 // ---------- depth LUT ----------
 function turbo(t) { // Google Turbo colormap, polynomial fit

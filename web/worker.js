@@ -30,6 +30,7 @@ let thumbJob = null;      // {files, indices, edge, gen} being decoded in the ba
 let thumbGen = 0;
 let sourceGen = -1;       // newest 'load_source' request seen; older ones still queued are skipped
 let slabGen = -1;         // newest 'slab' request seen; an older one still queued, or in progress, is dropped
+let refoldCancel = false; // set by 'refold_cancel': the refold in progress stops at the next frame
 
 // Decode + downscale added frames one by one (yielding between frames so a
 // 'run' or 'cancel' message can interleave); a run pauses this until it ends.
@@ -84,6 +85,7 @@ const rpc = (m, fn) => enqueue(async () => {
 self.onmessage = (ev) => {
   const m = ev.data;
   if (m.type === 'cancel') { cancelled = true; return; }
+  if (m.type === 'refold_cancel') { refoldCancel = true; return; }
   if (m.type === 'clear') { thumbGen++; thumbJob = null; return; }
   if (m.type === 'load_source') sourceGen = Math.max(sourceGen, m.gen);
   if (m.type === 'slab') slabGen = Math.max(slabGen, m.gen);
@@ -92,8 +94,8 @@ self.onmessage = (ev) => {
 
 // ---------- remote calls (Save step) ----------
 // The page composes export frames itself and only needs the engine for what it cannot
-// do: full-resolution aligned frames (plain or In focus), GIF quantisation + LZW, image
-// encoding, and content credentials.
+// do: full-resolution aligned frames (plain or In focus), the stereo / rocking views, GIF
+// quantisation + LZW, image encoding, and content credentials.
 async function handleCall(m) {
   if (m.type === 'save') {
     const bytes = engine.encode(m.kind, m.format || 'png', m.quality || 90, !!m.meta, !!m.crop);
@@ -124,6 +126,52 @@ async function handleCall(m) {
   } else if (m.type === 'gif_abort') {
     if (gifw) { gifw.free(); gifw = null; }
     post({ type: 'gif', rid: m.rid });
+  } else if (m.type === 'view' || m.type === 'view_stereo') {
+    // a synthetic stereo / rocking view (view.rs): the base — the LAP or DFR master and the
+    // depth map, cropped and shrunk to m.w×m.h (0 = the crop's own size) — is prepared once
+    // per size and kept, then sheared by m.shift (a fraction of the width) per call
+    const b = engine.view_prepare(m.source || 'fused', !!m.crop, m.w || 0, m.h || 0);
+    if (m.type === 'view') {
+      const rgba = engine.view_rgba(m.shift, m.near !== false);
+      post({ type: 'view', rid: m.rid, w: b.w, h: b.h, rgba: rgba.buffer }, [rgba.buffer]);
+    } else {
+      const bytes = engine.view_stereo(m.shift, m.near !== false, m.layout || 'sbs', m.format || 'png', m.quality || 90, !!m.meta);
+      post({ type: 'png', rid: m.rid, kind: 'stereo', format: m.format || 'png', bytes: bytes.buffer }, [bytes.buffer]);
+    }
+  } else if (m.type === 'refold') {
+    // Zerene-style synthetic stereo: the stack folded again (m.files, in frame order), each
+    // frame shifted by its index, into one accumulator per view in m.shifts, at about m.w×m.h
+    // (0 = full resolution). As many views per pass over the frames as the GPU budget allows;
+    // progress goes to the page as 'refold-progress'. The views stay in the engine until
+    // 'refold_end': 'refold_view' returns one as RGBA8, 'refold_stereo' encodes views 0 and 1.
+    if (running) throw new Error('a run is in progress');
+    refoldCancel = false;
+    const plan = engine.refold_begin(new Float32Array(m.shifts), m.near !== false, m.w || 0, m.h || 0);
+    const total = plan.passes * m.files.length; let done = 0;
+    try {
+      for (let p = 0; p < plan.passes; p++) {
+        engine.refold_pass_begin(p);
+        let next = readAhead(m.files[0]);
+        for (let i = 0; i < m.files.length; i++) {
+          if (refoldCancel) throw new Error('cancelled');
+          post({ type: 'refold-progress', text: `refold${plan.passes > 1 ? ` ${p + 1}/${plan.passes}` : ''}: ${m.files[i].name}`, done, total });
+          const bytes = new Uint8Array(await next);
+          next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
+          await engine.refold_push(i, bytes); done++;
+        }
+        await engine.refold_pass_finish();
+      }
+    } catch (e) { engine.refold_end(); throw e; }
+    post({ type: 'refold', rid: m.rid, w: plan.w, h: plan.h, k: plan.k, passes: plan.passes });
+  } else if (m.type === 'refold_view') {
+    const r = engine.refold_view(m.index);
+    post({ type: 'view', rid: m.rid, w: r.w, h: r.h, rgba: r.rgba.buffer }, [r.rgba.buffer]);
+  } else if (m.type === 'refold_stereo') {
+    const bytes = engine.refold_stereo(m.layout || 'sbs', m.format || 'png', m.quality || 90, !!m.meta);
+    post({ type: 'png', rid: m.rid, kind: 'stereo', format: m.format || 'png', bytes: bytes.buffer }, [bytes.buffer]);
+  } else if (m.type === 'refold_end') {
+    engine.refold_end();
+    post({ type: 'refold', rid: m.rid });
   } else if (m.type === 'make_cert') {
     const [cert, key] = (await loadCc()).make_cert(m.name, Date.now() / 1000);
     post({ type: 'cert', rid: m.rid, cert, key });

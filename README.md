@@ -114,6 +114,30 @@ app does the same on the GPU (block means of frame 0 kept, one small readback
 per frame), *equalise brightness* in the parameter panel, and each filmstrip
 entry shows its gain.
 
+**Synthetic stereo and rocking** (`view.rs`; `--stereo PCT[:LAYOUT]`,
+`--rocking PCT[:N]`, `--far-first`): the depth map makes the result a relief,
+and a view from the side is that relief sheared — every pixel slides
+sideways in proportion to its depth. Zerene gets the same picture by
+shifting each frame by its index before stacking; Helicon projects the
+textured 3D model it builds from the depth map; lapstack shears the stacked
+image and its depth map in one pass, with Zerene's parameter: the far end of
+the stack moves PCT % of the width relative to the near end (their "maximum
+X shift"; ±3 % suits most subjects — for a scene d deep and w wide a viewing
+angle a is tan(a)·d/w), the middle of the stack staying put. The shear is a
+forward warp per row: consecutive samples less than 2 px apart in the view
+form a patch of surface, rasterised with a nearness test so a near edge
+slides over the background; a larger gap is a depth discontinuity, and the
+hole it opens is filled from the farther side (the background shows
+through, the foreground is not stretched); pixels are sampled linearly.
+`--stereo` writes the views from the left and the right (−PCT / +PCT) as
+`<stem>_stereo.<ext>` — side by side for parallel viewing (`sbs`),
+cross-eyed (`cross`) or as a red–cyan anaglyph; `--rocking` writes N views
+(default 24) whose shift sweeps ±PCT in one sine cycle to
+`<stem>_rocking/view_NN.<ext>` (join them with ffmpeg or ImageMagick). Which
+end is near decides who wins where surfaces overlap: frame 0 is taken as the
+near end (the focus went front to back); `--far-first` says otherwise — the
+symptom of the wrong choice is a relief that looks inside out.
+
 `--save-depth` writes the depth map produced by the depth-from-focus pass
 below (`--depth winner` instead reports the raw winning frame index read
 from pyramid level `--depth-level`, default 2 — the finest level's winner
@@ -273,20 +297,49 @@ output (the run reports the window; the card's *Crop* section shows its size
 and has the switch, and the viewer shows the window as the bright part of
 the image while it is on). Animations, as GIF:
 **Focus depth** in Turbo with the slice sweeping through the frames, the
-**In focus** sweep, and the aligned **Source** frames under their peaking
+**In focus** sweep, the aligned **Source** frames under their peaking
 band, each frame rendered like the viewer shows it (the Source and In focus
 frames are decoded and re-aligned at full resolution by the engine, then
-scaled to the chosen *long edge*); *every Nth frame*, speed and loop
+scaled to the chosen *long edge*), and **Rocking**, the stacked image
+rocking from side to side; *every Nth frame*, speed and loop
 (back and forth or forward) are settings, and the card estimates the size —
 a full-resolution GIF of a long 45 MP stack runs to gigabytes, so pick a
 long edge or a frame step for those. Frames are quantised (median cut,
 Floyd–Steinberg) and LZW-encoded in the worker (`crates/lapstack-web/src/gif.rs`),
 the bytes streaming back so the file never sits in wasm memory whole.
+**Stereo and rocking** are the CLI's synthetic stereo (above) in the
+browser: the card's section has the stereo shift, the pair's layout
+(parallel, cross-eyed, anaglyph), the rocking shift and frames per cycle,
+the image to shear (LAP, or DFR when it was rendered) and the near-end
+switch. The engine cuts the master and the full-resolution depth map to the
+crop and shrinks them to the view size once (`view_prepare`), then shears a
+view per call (`view_rgba` for the GIF's frames at the animation size,
+`view_stereo` for the pair, saved at the crop's size in the chosen format and
+bit depth with the metadata). The **Stereo pair** still and the **Rocking**
+GIF are rows of the file list like the others. The section's *method*
+picks the shear or the **refold**, Zerene's own way: the frames are read
+again and the stack is fused once per view with every frame shifted
+sideways in proportion to its index (`Refold` in `lapstack-web/src/lib.rs`:
+`refold_begin`, one `refold_pass_begin` / `refold_push` per frame /
+`refold_pass_finish` per batch of views, `refold_view` / `refold_stereo`,
+`refold_end`). Each view is then a real LAP stack — no depth map is
+involved, so hair and bristles come out as they would from a camera moved
+to the side — at the cost of one pass over the frames per batch. The stereo
+pair is folded at full resolution (its two accumulators, 1 GB at 45 MP, are
+one batch: the run's own accumulator serves as the first); a rocking
+sequence is folded at the animation's size, each warped frame
+block-averaged by an integer factor and shifted by a whole number of source
+pixels, so a 24-view cycle at 1600 px is one batch and one pass. Views are
+batched to a 1 GB budget of accumulator memory. The refold has the method's
+halo: beside a near object the far frames win (the background is sharp in
+them) and carry the object's defocused copy displaced by the shift, so a
+soft ghost stands next to it, wider with a larger shift and a deeper scene;
+the shear has no halo but only one surface.
 File names are built from tokens joined with `_`, lower case: `lapstack`,
 the EXIF date/time of the first frame (read from the JPEG APP1 / TIFF /
 PNG eXIf structure), a date/time found in the first frame's name, the
-current date/time, a custom text, and the layer name (`lap`, `dfr`, `depth`,
-`depth16`, `winner`, `depth-slice`, `infocus`, `peaking`). The EXIF date
+current date/time, a custom text, and the layer name (`lap`, `dfr`, `stereo`,
+`depth`, `depth16`, `winner`, `depth-slice`, `infocus`, `peaking`, `rocking`). The EXIF date
 falls back to the XMP packet's CreateDate, which is all a raw converter's
 TIFF may have.
 **Content credentials** ([C2PA](https://contentcredentials.org/)) can be

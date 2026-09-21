@@ -30,6 +30,7 @@ pub mod io;
 pub mod meta;
 pub mod pyramid;
 pub mod stack;
+pub mod view;
 
 pub use align::{AlignParams, CancelToken, Cancelled, Sim};
 pub use depth::{DepthMap, DepthParams, FocusMeasure, Upsample};
@@ -37,3 +38,4 @@ pub use fuse::{FuseParams, Fuser, TopRule};
 pub use io::Depth;
 pub use pyramid::Img3;
 pub use stack::{FrameSource, Output, Params, Slab, run, run_with, slab_ranges};
+pub use view::{Layout, View};
