@@ -29,10 +29,42 @@ pub const GAIN_MAX: f32 = 4.0;
 /// Pixels are sampled on this grid: the mean of a 45 MP frame needs no more.
 const STEP: usize = 4;
 
+/// Frame 0 as `gains` reads it: its channels on the sampling grid, 1/STEP² of
+/// the frame, so a streaming run keeps this in place of the frame itself.
+pub struct Reference {
+    w: usize,
+    h: usize,
+    gw: usize,
+    p: [Vec<f32>; 3],
+}
+
+impl Reference {
+    pub fn new(frame: &Img3) -> Reference {
+        let (w, h) = (frame.w, frame.h);
+        let gw = w.div_ceil(STEP);
+        let p = [0, 1, 2].map(|c| {
+            let mut g = Vec::with_capacity(gw * h.div_ceil(STEP));
+            for y in (0..h).step_by(STEP) {
+                g.extend((0..w).step_by(STEP).map(|x| frame.p[c][y * w + x]));
+            }
+            g
+        });
+        Reference { w, h, gw, p }
+    }
+
+    /// The per-channel gains that bring `frame`, already warped by `sim`, to
+    /// the reference's brightness over the pixels the warp covers.
+    pub fn gains(&self, frame: &Img3, sim: &Sim) -> [f32; 3] {
+        assert!(frame.w == self.w && frame.h == self.h, "brightness reference of another size");
+        let (sf, sr, n) = sums(frame, Some(self), sim);
+        ratio(sr, sf, n)
+    }
+}
+
 /// Per-channel sums and the sample count of `frame` over the pixels that `sim`
 /// maps inside the frame (all of them at the identity), on the sampling grid;
 /// `other`, when given, is summed over the same pixels.
-fn sums(frame: &Img3, other: Option<&Img3>, sim: &Sim) -> ([f64; 3], [f64; 3], usize) {
+fn sums(frame: &Img3, other: Option<&Reference>, sim: &Sim) -> ([f64; 3], [f64; 3], usize) {
     let (w, h) = (frame.w, frame.h);
     let inv = (*sim != Sim::id()).then(|| affine_inv(sim.matrix(w, h)));
     let (mut sf, mut so, mut n) = ([0f64; 3], [0f64; 3], 0usize);
@@ -49,7 +81,7 @@ fn sums(frame: &Img3, other: Option<&Img3>, sim: &Sim) -> ([f64; 3], [f64; 3], u
             for c in 0..3 {
                 sf[c] += frame.p[c][i] as f64;
                 if let Some(o) = other {
-                    so[c] += o.p[c][i] as f64;
+                    so[c] += o.p[c][(y / STEP) * o.gw + x / STEP] as f64;
                 }
             }
             n += 1;
@@ -69,8 +101,7 @@ fn ratio(reference: [f64; 3], frame: [f64; 3], n: usize) -> [f32; 3] {
 /// The per-channel gains that bring `frame`, already warped by `sim`, to the
 /// brightness of `reference` over the pixels the warp covers.
 pub fn gains(reference: &Img3, frame: &Img3, sim: &Sim) -> [f32; 3] {
-    let (sf, sr, n) = sums(frame, Some(reference), sim);
-    ratio(sr, sf, n)
+    Reference::new(reference).gains(frame, sim)
 }
 
 /// Channel means of a whole (unwarped) frame, for `gains_to`.

@@ -72,8 +72,8 @@ keep the residual's short side ≥ 32 px (7 levels on 8280×5520, residual
   `avg` = plain mean).
 - The accumulator folds frames in one at a time: only the running fused
   pyramid, one best-energy plane per level and the tiny residuals are held,
-  so memory does not grow with the stack. Without alignment (`--no-align`)
-  frames are decoded on demand with a bounded read-ahead.
+  so memory does not grow with the stack. Frames are decoded on demand with
+  a bounded read-ahead, aligned or not.
 
 **Alignment** (`align.rs`): 4-DOF similarity registration (shift, scale,
 rotation), direct intensity-based, coarse-to-fine on a Gaussian pyramid of
@@ -82,7 +82,16 @@ Nelder-Mead search, chained sequentially to frame 0. `--align-coarsen N`
 stops N levels short of full resolution (the transform is resolution
 independent, so this is a large speed-up at sub-pixel accuracy);
 `--no-shift/--no-scale/--no-rotation` restrict the model; `--save-aligned DIR`
-writes the registered frames.
+writes the registered frames. The stack is streamed through the alignment
+like the browser streams it (`stack::AlignedFrames`): each frame is decoded
+with the read-ahead, registered against the previous aligned frame's luma,
+warped, brought to frame 0's brightness and folded into the fusion, then
+dropped; only the transforms, the gains and frame 0 on the brightness
+sampling grid are kept, so memory is that of a few frames whatever the
+stack's length (a 100-frame 45 MP stack needed over 100 GB resident). The
+passes after the fusion — depth, weighted average, slabs — decode and warp
+the frames again with the transforms found, as they already did without
+alignment.
 
 **Interpolation** (`--interpolation K`; `align::Interp`): the kernel each
 aligned frame is resampled with once its transform is found — the choice
@@ -108,8 +117,8 @@ settings over the same aligned, equalised frames, cropped like the result,
 and written as it is made to DIR (default `<output stem>_slabs`) in the
 output's format with the same metadata, as `slab_01_000-009.tif` and so on
 (0-based frame indices). Slabs are thick planes of focus to retouch from in
-another editor; the browser app makes them on demand instead (below). In the
-streaming path each slab streams its frames from disk again. Where a warped frame does not reach, the warp
+another editor; the browser app makes them on demand instead (below). Each
+slab streams its frames from disk again. Where a warped frame does not reach, the warp
 repeats its edge, so the output (image, depth and confidence maps) is
 **cropped to the largest rectangle every frame covers** with real pixels
 (`align::common_area`: each frame's sound area is a convex quad, cut per pixel
@@ -343,23 +352,33 @@ the confidence map.
 
 ### Performance
 
-On a 25-frame stack of 8280×5520 16-bit TIFFs (RTX 3060, 128-thread host),
-same frames and alignment settings for every row:
+On a stack of 8280×5520 16-bit TIFFs (RTX 3060, 128-thread host), the same
+frames and alignment settings for every row; the whole run, depth pass
+included:
 
-| run | wall | of which align / fuse | peak RSS |
+| run | wall | of which align + fuse / depth | peak RSS |
 |---|--:|--:|--:|
-| `lapstack --align-coarsen 2` (CPU) | 83 s | 56 s / 21 s (0.8 s per frame) | 31 GB |
-| `lapstack --gpu --gpu-align --align-coarsen 2` | 40 s | 32 s / 2.0 s | 31 GB |
-| `lapstack --no-align` on the aligned 16-bit PNGs, CPU or GPU | 26 s | – / 24 s | 4.4 GB |
+| 25 frames, `lapstack --align-coarsen 2` (CPU) | 118 s | 75 s (3.0 s per frame) / 42 s | 5.0 GB |
+| 25 frames, `lapstack --gpu --gpu-align --align-coarsen 2` | 74 s | 30 s (1.2 s per frame) / 42 s | 4.9 GB |
+| 100 frames, CPU | 449 s | 310 s (3.1 s per frame) / 137 s | 5.0 GB |
+| 100 frames, `--gpu --gpu-align` | 265 s | 126 s (1.3 s per frame) / 137 s | 5.2 GB |
+| 25 frames, `lapstack --no-align` on the aligned 16-bit PNGs, CPU or GPU | 26 s | 24 s / – (no depth pass then) | 4.4 GB |
+
+Memory is flat over the stack's length since the frames stream through the
+alignment (above): before that, when every frame was loaded and aligned at
+once, the 25-frame CPU run took 56 s to align and 21 s to fuse at 31 GB
+peak, the CUDA run 32 s and 2.0 s at the same 31 GB, and 100 frames did not
+fit. The depth pass decodes and warps every frame again, about 1.3 s per
+frame here on either path, and is now the larger half of a GPU run.
 
 With `--gpu` (build with `--features gpu`; CUDA is loaded at run time, no
 toolkit needed at build time) the fusion runs in `gpu.rs`: the same kernels
 transcribed to CUDA, the accumulator pyramid, best-energy planes and winner
 map stay on the device, and only the three RGB planes go up per frame and
 the tiny residual comes back. `--gpu-align` runs the aligner's Nelder-Mead
-cost search on the GPU. Both GPU pipelines are then alignment-bound (32 s of
-the 40 s). The streaming row is 16-bit PNG decode-bound (~1 s per frame with
-four decoder threads); uncompressed TIFF input decodes an order of magnitude
+cost search on the GPU; both GPU pipelines are then alignment-bound. The
+`--no-align` row is 16-bit PNG decode-bound (~1 s per frame with four
+decoder threads); uncompressed TIFF input decodes an order of magnitude
 faster.
 
 GPU fusion output is bit-exact with the CPU output (one run out of four
@@ -797,11 +816,10 @@ Measured in headless Chrome on the RTX 3060 (`web/test/headless.mjs`):
 
 | stack | browser | native (`lapstack --gpu --gpu-align`) |
 |---|--:|--:|
-| 25 × 8280×5520 16-bit TIFF, align coarsen 2 | **30 s** (≈1 s/frame: decode 0.4 s, align 0.4 s, fuse 0.1 s) | 40 s |
+| 25 × 8280×5520 16-bit TIFF, align coarsen 2 | **30 s** (≈1 s/frame: decode 0.4 s, align 0.4 s, fuse 0.1 s) | 30 s (align + fuse; the depth pass is another 42 s) |
 | 8 × 1024×768 crops, aligned | 2.0 s | – |
 
-The browser is faster end-to-end because it streams: alignment never waits
-for the whole stack to load, and the per-frame GPU work is the same. Fusion
+Both stream now, and the per-frame GPU work is the same. Fusion
 output matches the native CPU path to one 8-bit step on 0.01 % of pixels
 (`node web/test/headless.mjs`); the aligner produces the same kind of
 transforms as the native one (scale 1.000 → 1.064 over the 25-frame sweep,
@@ -838,6 +856,7 @@ sends).
 ```
 cargo build --release --features gpu -p lapstack-cli
 # Linux: needs libcuda (driver) + libnvrtc (toolkit) on the path, and nvidia_uvm loaded.
+# NixOS: LD_LIBRARY_PATH=/run/opengl-driver/lib:<cudaPackages.cuda_nvrtc's lib output>/lib
 # Windows: nvcuda.dll ships with the display driver; drop the two DLLs from
 # NVIDIA's cuda_nvrtc redist zip (bin/nvrtc64_120_0.dll + nvrtc-builtins) next
 # to lapstack.exe. Match the nvrtc major.minor to the driver's CUDA version

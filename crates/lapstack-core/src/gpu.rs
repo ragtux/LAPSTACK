@@ -17,7 +17,7 @@
 //! per-frame warp stay on the CPU (each is cheap next to the ~200-iteration
 //! cost search); every cost evaluation is one `warp_cost` launch.
 
-use crate::align::{CancelToken, Cancelled, Interp, Sim, affine_inv, gauss_pyramid, luma, nelder_mead, warp_img3, warp_plane};
+use crate::align::{Sim, affine_inv, gauss_pyramid, nelder_mead};
 use crate::fuse::{FuseParams, binomial, fuse_residuals, upsample_index};
 use crate::pyramid::{Img3, auto_levels, half};
 use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, LaunchConfig, PushKernelArg};
@@ -418,47 +418,3 @@ impl GpuAligner {
     }
 }
 
-/// GPU twin of `align::align_stack` (same contract): sequential chaining to
-/// frame 0 with the cost search on CUDA and the warps on the CPU.
-pub fn align_gpu(
-    frames: &[Img3],
-    allow_shift: bool,
-    allow_scale: bool,
-    allow_rotation: bool,
-    coarsen: usize,
-    interp: Interp,
-    cancel: &CancelToken,
-    on_frame: &mut dyn FnMut(usize, Sim),
-) -> Result<(Vec<Img3>, Vec<Sim>), Cancelled> {
-    let aligner = GpuAligner::new().unwrap_or_else(|e| panic!("{e}"));
-    let (w, h) = (frames[0].w, frames[0].h);
-    let n = frames.len();
-    let free = [allow_shift, allow_shift, allow_scale, allow_rotation];
-
-    let ys: Vec<Vec<f32>> = frames.iter().map(luma).collect();
-
-    let mut aligned = vec![frames[0].clone()];
-    let mut params = vec![Sim::id()];
-    let mut prev_ref = ys[0].clone();
-    let mut guess = Sim::id();
-
-    for i in 1..n {
-        cancel.check()?;
-        let sim = aligner.align_pair(&prev_ref, &ys[i], w, h, guess, free, coarsen);
-        params.push(sim);
-        let (mut wimg, valid) = warp_img3(&frames[i], &sim, interp);
-        for c in 0..3 {
-            for p in 0..w * h {
-                if valid[p] == 0 {
-                    wimg.p[c][p] = frames[i].p[c][p];
-                }
-            }
-        }
-        aligned.push(wimg);
-        let (pr, _) = warp_plane(&ys[i], w, h, &sim, w, h, interp);
-        prev_ref = pr;
-        guess = sim;
-        on_frame(i, sim);
-    }
-    Ok((aligned, params))
-}

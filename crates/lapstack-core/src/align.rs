@@ -2,21 +2,19 @@
 // INTERNAL USE ONLY
 
 //! Alignment — 4-DOF similarity registration. Direct intensity-based,
-//! coarse-to-fine, DC-removed-RMS on luminance, sequential chaining to
-//! frame 0. Uses a bounded Nelder-Mead optimiser. The search resamples with
-//! Spline4x4; the aligned frames are resampled with the kernel of the user's
-//! choice (`Interp`, Spline4x4 by default).
+//! coarse-to-fine, DC-removed-RMS on luminance, one frame against the
+//! previous aligned one (`PairAligner`; the chaining to frame 0 is
+//! `stack::AlignedFrames`, which streams the frames). Uses a bounded
+//! Nelder-Mead optimiser. The search resamples with Spline4x4; the aligned
+//! frames are resampled with the kernel of the user's choice (`Interp`,
+//! Spline4x4 by default).
 //!
 //! The registration search runs on its own Gaussian pyramid (Burt's
 //! generating kernel with a = 0.33, border-renormalised, halved while
 //! `h > 64 && w > 8`), independent of the fusion pyramid in `pyramid.rs`.
-//! Also home to the small pieces the pipeline shares: `AlignParams`, the
-//! cooperative `CancelToken` and the `Cancelled` marker.
 
 use crate::pyramid::{Img3, for_rows};
 use rayon::prelude::*;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Copy)]
 pub struct AlignParams {
@@ -110,30 +108,6 @@ impl Interp {
         (self.taps() / 2) as f64
     }
 }
-
-/// Cooperative cancellation flag; clone it into the caller, pass it to the aligner.
-#[derive(Clone, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
-
-impl CancelToken {
-    pub fn new() -> CancelToken {
-        CancelToken::default()
-    }
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
-    }
-    /// Stage-internal check: `cancel.check()?` at frame boundaries.
-    pub fn check(&self) -> Result<(), Cancelled> {
-        if self.is_cancelled() { Err(Cancelled) } else { Ok(()) }
-    }
-}
-
-/// Marker error returned by the alignment stage when the token fired.
-#[derive(Debug)]
-pub struct Cancelled;
 
 #[derive(Clone, Copy, PartialEq)]
 pub struct Sim {
@@ -634,49 +608,26 @@ pub(crate) fn multiscale_align(
     Sim::from_vec(&cur)
 }
 
-/// Register all frames into frame-0 coordinates (sequential chaining), the
-/// aligned frames resampled with `interp`. `on_frame(i, sim)` fires as each
-/// frame lands; `cancel` is checked per frame.
-pub fn align_stack(
-    frames: &[Img3],
-    allow_shift: bool,
-    allow_scale: bool,
-    allow_rotation: bool,
-    coarsen: usize,
-    interp: Interp,
-    cancel: &CancelToken,
-    on_frame: &mut dyn FnMut(usize, Sim),
-) -> Result<(Vec<Img3>, Vec<Sim>), Cancelled> {
-    let (w, h) = (frames[0].w, frames[0].h);
-    // Keep only the luma planes: a full three-plane copy of every frame would
-    // hold an extra ~0.5 GB/frame (45 MP) for the whole alignment.
-    let ys: Vec<Vec<f32>> = frames.iter().map(luma).collect();
-    let free = [allow_shift, allow_shift, allow_scale, allow_rotation];
+/// The search for one frame's transform against the previous aligned
+/// frame's luma: on the CPU, or the CUDA cost search (the `gpu` feature).
+pub enum PairAligner {
+    Cpu,
+    #[cfg(feature = "gpu")]
+    Gpu(crate::gpu::GpuAligner),
+}
 
-    let mut aligned = vec![frames[0].clone()];
-    let mut params = vec![Sim::id()];
-    let mut prev_ref = ys[0].clone();
-    let mut guess = Sim::id();
-
-    for i in 1..frames.len() {
-        cancel.check()?;
-        let sim = multiscale_align(&prev_ref, &ys[i], w, h, guess, free, coarsen);
-        params.push(sim);
-        let (mut wimg, valid) = warp_img3(&frames[i], &sim, interp);
-        for c in 0..3 {
-            for p in 0..w * h {
-                if valid[p] == 0 {
-                    wimg.p[c][p] = frames[i].p[c][p];
-                }
-            }
+impl PairAligner {
+    /// The transform that takes `tg` (a frame's luma) onto `rf` (the previous
+    /// aligned frame's), searched from `guess` over the `free` parameters
+    /// (x shift, y shift, scale, rotation), `coarsen` levels short of full
+    /// resolution.
+    pub fn align_pair(&self, rf: &[f32], tg: &[f32], w: usize, h: usize, guess: Sim, free: [bool; 4], coarsen: usize) -> Sim {
+        match self {
+            PairAligner::Cpu => multiscale_align(rf, tg, w, h, guess, free, coarsen),
+            #[cfg(feature = "gpu")]
+            PairAligner::Gpu(g) => g.align_pair(rf, tg, w, h, guess, free, coarsen),
         }
-        aligned.push(wimg);
-        let (pr, _) = warp_plane(&ys[i], w, h, &sim, w, h, interp);
-        prev_ref = pr;
-        guess = sim;
-        on_frame(i, sim);
     }
-    Ok((aligned, params))
 }
 
 pub fn report(sim: &Sim, w: usize, h: usize) -> String {

@@ -2,13 +2,15 @@
 // INTERNAL USE ONLY
 
 //! Orchestration: decode → (align) → fuse → (depth) → (slabs). Frames are
-//! consumed one at a time, so without alignment the stack is streamed from
-//! disk with a bounded read-ahead and memory stays at a few frames regardless
-//! of stack size (the depth pass, and each slab, stream the frames again).
+//! consumed one at a time, so the stack is streamed from disk with a bounded
+//! read-ahead and memory stays at a few frames regardless of stack size; with
+//! alignment each frame is registered to the previous one and warped as it is
+//! decoded (`AlignedFrames`), and only the transforms are kept. The depth
+//! pass, the weighted average and each slab stream the frames again.
 
 use crate::depth::{self, DepthParams};
 use crate::fuse::{FuseParams, Fuser};
-use crate::align::{self, AlignParams, CancelToken, Rect, Sim, common_area};
+use crate::align::{self, AlignParams, Rect, Sim, common_area};
 use crate::brightness;
 use crate::dust::DustMap;
 use crate::io::{self, Depth};
@@ -137,6 +139,11 @@ pub trait FrameSource {
     /// Level-0 frame dimensions.
     fn dims(&self) -> (usize, usize);
     fn get(&mut self, i: usize) -> Result<Cow<'_, Img3>, String>;
+    /// Log lines the source made while serving frames (a frame's
+    /// registration), taken out once; the caller logs them.
+    fn take_log(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 impl FrameSource for &[Img3] {
@@ -222,6 +229,11 @@ impl LazyFrames {
         }
     }
     fn take(&mut self, i: usize) -> Result<Img3, String> {
+        if let Some((ci, _)) = &self.cur {
+            if *ci == i {
+                return Ok(self.cur.take().unwrap().1);
+            }
+        }
         // drop stale entries (random access is not expected, but stay correct)
         while self.pending.front().is_some_and(|(pi, _)| *pi < i) {
             let (_, jh) = self.pending.pop_front().unwrap();
@@ -272,6 +284,148 @@ impl FrameSource for LazyFrames {
         }
         self.prefetch(i + 1);
         Ok(Cow::Borrowed(&self.cur.as_ref().unwrap().1))
+    }
+}
+
+/// The aligned stack, streamed: every frame is decoded on demand (`LazyFrames`,
+/// with its read-ahead, dust map and size checks), registered to the previous
+/// aligned frame the first time it is asked for — the fusion asks for the
+/// frames in order, first — and warped with its transform every time, then
+/// brought to frame 0's brightness. Between passes only the transforms, the
+/// gains and frame 0 on the brightness grid are kept, so memory is that of a
+/// few frames whatever the stack's length; the depth pass, the weighted
+/// average and the slabs decode and warp the frames again.
+struct AlignedFrames {
+    src: LazyFrames,
+    a: AlignParams,
+    free: [bool; 4],
+    aligner: align::PairAligner,
+    /// The transforms found so far (frame 0's is the identity).
+    sims: Vec<Sim>,
+    /// The previous aligned frame's luma, while the transforms are being found.
+    prev_ref: Option<Vec<f32>>,
+    /// Frame 0 on the brightness grid (`Params::brightness`), and each frame's
+    /// gains once found.
+    reference: Option<brightness::Reference>,
+    brightness: bool,
+    gains: Vec<Option<[f32; 3]>>,
+    save_dir: Option<String>,
+    cur: Option<(usize, Img3)>,
+    /// Each frame's registration as it is found, for `take_log`.
+    lines: Vec<String>,
+}
+
+impl AlignedFrames {
+    fn open(paths: Vec<String>, a: AlignParams, params: &Params) -> Result<AlignedFrames, String> {
+        let src = LazyFrames::open(paths, false, params.dust.as_ref())?;
+        #[cfg(feature = "gpu")]
+        let aligner = if a.gpu { align::PairAligner::Gpu(crate::gpu::GpuAligner::new()?) } else { align::PairAligner::Cpu };
+        #[cfg(not(feature = "gpu"))]
+        let aligner = align::PairAligner::Cpu;
+        let n = src.len();
+        Ok(AlignedFrames {
+            src,
+            a,
+            free: [a.shift, a.shift, a.scale, a.rotation],
+            aligner,
+            sims: Vec::with_capacity(n),
+            prev_ref: None,
+            reference: None,
+            brightness: params.brightness,
+            gains: vec![None; n],
+            save_dir: params.save_aligned.clone(),
+            cur: None,
+            lines: Vec::new(),
+        })
+    }
+
+    /// Frame `i`'s transform: the one found before, or found now against the
+    /// previous aligned frame (the frames come in order the first time).
+    fn register(&mut self, i: usize, img: &Img3) -> Result<Sim, String> {
+        if let Some(s) = self.sims.get(i) {
+            return Ok(*s);
+        }
+        if i != self.sims.len() {
+            return Err(format!("frame {i} asked for before frame {} was aligned", self.sims.len()));
+        }
+        let (w, h) = (img.w, img.h);
+        let y = align::luma(img);
+        let sim = match &self.prev_ref {
+            None => Sim::id(),
+            Some(rf) => self.aligner.align_pair(rf, &y, w, h, *self.sims.last().unwrap(), self.free, self.a.coarsen),
+        };
+        // the next frame is registered to this one as aligned; after the last, nothing is
+        self.prev_ref = (i + 1 < self.src.len()).then(|| if sim == Sim::id() { y } else { align::warp_plane(&y, w, h, &sim, w, h, self.a.interp).0 });
+        self.sims.push(sim);
+        Ok(sim)
+    }
+
+    fn brightness_note(&self) -> Option<String> {
+        if !self.brightness {
+            return None;
+        }
+        let gs: Vec<f32> = self.gains.iter().flatten().flat_map(|g| g.iter().copied()).collect();
+        let (lo, hi) = gs.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+        Some(format!("brightness equalised to frame 0: gains {lo:.3} … {hi:.3}"))
+    }
+}
+
+impl FrameSource for AlignedFrames {
+    fn len(&self) -> usize {
+        self.src.len()
+    }
+    fn dims(&self) -> (usize, usize) {
+        (self.src.w, self.src.h)
+    }
+    fn get(&mut self, i: usize) -> Result<Cow<'_, Img3>, String> {
+        if self.cur.as_ref().is_none_or(|(ci, _)| *ci != i) {
+            let mut img = self.src.take(i)?;
+            self.src.prefetch(i + 1);
+            let (w, h) = (img.w, img.h);
+            let first = self.sims.len() <= i;
+            let sim = self.register(i, &img)?;
+            if sim != Sim::id() {
+                let (mut warped, valid) = align::warp_img3(&img, &sim, self.a.interp);
+                // where the warp reaches outside the frame, the pixel as shot (the edge repeated would smear)
+                for (o, s) in warped.p.iter_mut().zip(&img.p) {
+                    o.par_chunks_mut(w).zip(s.par_chunks(w)).zip(valid.par_chunks(w)).for_each(|((o, s), v)| {
+                        for x in 0..w {
+                            if v[x] == 0 {
+                                o[x] = s[x];
+                            }
+                        }
+                    });
+                }
+                img = warped;
+            }
+            let mut gain = [1f32; 3];
+            if self.brightness {
+                if i == 0 {
+                    self.reference.get_or_insert_with(|| brightness::Reference::new(&img));
+                    self.gains[0] = Some(gain);
+                } else if let Some(r) = &self.reference {
+                    gain = *self.gains[i].get_or_insert_with(|| r.gains(&img, &sim));
+                    brightness::apply(&mut img, gain);
+                }
+            }
+            if first {
+                if i > 0 {
+                    self.lines.push(format!(
+                        "  frame {i:>3}: {}{}",
+                        align::report(&sim, w, h),
+                        if self.brightness { format!("  brightness {}", brightness::describe(gain)) } else { String::new() }
+                    ));
+                }
+                if let Some(dir) = &self.save_dir {
+                    io::save_rgb(&img, &format!("{dir}/aligned_{i:03}.png"), self.src.depth, None)?;
+                }
+            }
+            self.cur = Some((i, img));
+        }
+        Ok(Cow::Borrowed(&self.cur.as_ref().unwrap().1))
+    }
+    fn take_log(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.lines)
     }
 }
 
@@ -331,8 +485,13 @@ fn fuse_range(
     ));
     let t = Instant::now();
     for i in lo..=hi {
-        let f = src.get(i)?;
-        fuser.push(&f)?;
+        {
+            let f = src.get(i)?;
+            fuser.push(&f)?;
+        }
+        for line in src.take_log() {
+            log(line);
+        }
         log(format!("  frame {:>3}/{} folded  ({:.1}s)", i + 1 - lo, hi + 1 - lo, t.elapsed().as_secs_f64()));
     }
     let (img, depth) = fuser.finish()?;
@@ -419,72 +578,26 @@ pub fn run_with(
     let inputs: Vec<String> = inputs.to_vec();
     match params.align {
         Some(a) if inputs.len() > 1 => {
-            // Alignment needs every frame resident.
-            let t = Instant::now();
-            log(format!("loading {} frames ...", inputs.len()));
-            let loaded: Vec<(Img3, Depth)> =
-                inputs.par_iter().map(|p| io::load_rgb(p)).collect::<Result<_, _>>()?;
-            let bit_depth = loaded[0].1;
-            for (i, (_, d)) in loaded.iter().enumerate() {
-                if *d != bit_depth {
-                    log(format!(
-                        "note: {} is {}-bit but frame 0 is {}-bit; writing {}-bit output",
-                        inputs[i], d.bits(), bit_depth.bits(), bit_depth.bits()
-                    ));
-                }
-            }
-            let mut frames: Vec<Img3> = loaded.into_iter().map(|(f, _)| f).collect();
-            let (w, h) = (frames[0].w, frames[0].h);
-            if frames.iter().any(|f| f.w != w || f.h != h) {
-                return Err("frames differ in size; pre-size them to a common resolution".into());
-            }
-            if let Some(d) = &params.dust {
-                // the dust is fixed on the sensor: out before the frames are warped
-                check_dust(d, w, h)?;
-                frames.par_iter_mut().for_each(|f| d.apply(f));
-                log(format!("dust map applied ({}): {}", d.params.mode.name(), d.describe()));
-            }
-            log(format!(
-                "{} frames @ {w}x{h}, {}-bit ({} threads)  ({:.1}s)",
-                frames.len(), bit_depth.bits(), rayon::current_num_threads(), t.elapsed().as_secs_f64()
-            ));
-            let t = Instant::now();
-            log(format!("aligning (shift={} scale={} rot={} coarsen={} {}{}) ...", a.shift, a.scale, a.rotation, a.coarsen, a.interp.name(), if a.gpu && cfg!(feature = "gpu") { ", GPU" } else { "" }));
             if a.gpu && !cfg!(feature = "gpu") {
                 log("--gpu-align requested but built without the 'gpu' feature; aligning on the CPU".into());
             }
-            let mut on_frame = |idx: usize, sim: Sim| log(format!("  frame {idx:>3}: {}", align::report(&sim, w, h)));
-            #[cfg(feature = "gpu")]
-            let res = if a.gpu {
-                crate::gpu::align_gpu(&frames, a.shift, a.scale, a.rotation, a.coarsen, a.interp, &CancelToken::new(), &mut on_frame)
-            } else {
-                align::align_stack(&frames, a.shift, a.scale, a.rotation, a.coarsen, a.interp, &CancelToken::new(), &mut on_frame)
-            };
-            #[cfg(not(feature = "gpu"))]
-            let res = align::align_stack(&frames, a.shift, a.scale, a.rotation, a.coarsen, a.interp, &CancelToken::new(), &mut on_frame);
-            let (mut aligned, sims) = res.map_err(|_| "cancelled".to_string())?;
-            drop(frames);
-            log(format!("aligned  ({:.1}s)", t.elapsed().as_secs_f64()));
-            if params.brightness {
-                // one gain per channel brings each frame to frame 0's brightness over the area it covers
-                let (f0, rest) = aligned.split_at_mut(1);
-                let gains: Vec<[f32; 3]> = rest.par_iter().zip(&sims[1..]).map(|(f, s)| brightness::gains(&f0[0], f, s)).collect();
-                rest.par_iter_mut().zip(&gains).for_each(|(f, g)| brightness::apply(f, *g));
-                let shown: Vec<String> = gains.iter().enumerate().map(|(i, g)| format!("{}:{}", i + 1, brightness::describe(*g))).collect();
-                log(format!("brightness equalised to frame 0: {}", shown.join(" ")));
-            }
             if let Some(dir) = &params.save_aligned {
                 std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
-                for (i, f) in aligned.iter().enumerate() {
-                    io::save_rgb(f, &format!("{dir}/aligned_{i:03}.png"), bit_depth, None)?;
-                }
-                log(format!("wrote aligned frames to {dir}/"));
             }
-            let mut src: &[Img3] = &aligned;
+            let mut src = AlignedFrames::open(inputs.clone(), a, params)?;
+            let (w, h, bit_depth) = (src.src.w, src.src.h, src.src.depth);
+            if let Some(d) = &params.dust {
+                log(format!("dust map applied to each frame as decoded ({}): {}", d.params.mode.name(), d.describe()));
+            }
+            log(format!(
+                "{} frames @ {w}x{h}, {}-bit ({} threads); streaming from disk, each frame aligned as it is folded (shift={} scale={} rot={} coarsen={} {}{})",
+                src.len(), bit_depth.bits(), rayon::current_num_threads(), a.shift, a.scale, a.rotation, a.coarsen, a.interp.name(),
+                if a.gpu && cfg!(feature = "gpu") { ", GPU" } else { "" }
+            ));
             let (image, depth, conf, levels) = fuse_and_depth(&mut src, params, log)?;
             let wav = weighted(&mut src, params, log)?;
             // the borders some frames only reach with smeared edge pixels go
-            let area = common_area(&sims, w, h, a.interp);
+            let area = common_area(&src.sims, w, h, a.interp);
             let (image, depth, conf, wav, crop) = if params.crop && !area.is_full(w, h) {
                 log(format!("cropped to the area every frame covers: {}x{} at ({}, {})", area.w, area.h, area.x, area.y));
                 (image.crop(&area), crop_plane(&depth, w, &area), conf.map(|c| crop_plane(&c, w, &area)), wav.map(|i| i.crop(&area)), Some(area))
@@ -492,7 +605,16 @@ pub fn run_with(
                 (image, depth, conf, wav, None)
             };
             fuse_slabs(&mut src, params, bit_depth, crop.as_ref(), log, on_slab)?;
-            Ok(Output { image, depth, conf, bit_depth, align: sims, levels, crop, wav })
+            for n in &src.src.notes {
+                log(format!("note: {n}"));
+            }
+            if let Some(n) = src.brightness_note() {
+                log(n);
+            }
+            if let Some(dir) = &params.save_aligned {
+                log(format!("wrote aligned frames to {dir}/"));
+            }
+            Ok(Output { image, depth, conf, bit_depth, align: src.sims, levels, crop, wav })
         }
         _ => {
             let mut src = LazyFrames::open(inputs.clone(), params.brightness, params.dust.as_ref())?;
