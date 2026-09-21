@@ -307,7 +307,7 @@ pub fn run(inputs: &[String], params: &Params, log: &mut dyn FnMut(String)) -> R
             if let Some(dir) = &params.save_aligned {
                 std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
                 for (i, f) in aligned.iter().enumerate() {
-                    io::save_rgb(f, &format!("{dir}/aligned_{i:03}.png"), bit_depth)?;
+                    io::save_rgb(f, &format!("{dir}/aligned_{i:03}.png"), bit_depth, None)?;
                 }
                 log(format!("wrote aligned frames to {dir}/"));
             }

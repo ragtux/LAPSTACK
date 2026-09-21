@@ -296,7 +296,7 @@ async function onDone(m) {
   const fused = new OffscreenCanvas(m.w, m.h);
   fused.getContext('2d').putImageData(img, 0, 0);
   st.result = { w: m.w, h: m.h, bits: m.bits, fused, dmap: null, depth: new Float32Array(m.depth), dw: m.depth_w, dh: m.depth_h,
-                winner: new Float32Array(m.winner), ww: m.winner_w, wh: m.winner_h };
+                winner: new Float32Array(m.winner), ww: m.winner_w, wh: m.winner_h, meta: m.meta || null };   // meta: what the first frame carried (EXIF / ICC / XMP sizes)
   resetRetouch();
   const secs = ((performance.now() - st.t0) / 1000).toFixed(1);
   log(`[lapstack] fused ${m.frames} frames -> ${m.w}x${m.h} ${m.bits}-bit  (${secs}s)`);
@@ -353,7 +353,7 @@ const OUTPUTS = [
 ];
 const SV = { sel: new Set(['lap']), exif: null, exifFor: null, exporting: false, cancel: false };
 const SK = 'lapstack.save';
-const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'an-edge', 'an-fps', 'an-loop', 'cc-on', 'cc-name'];
+const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'sv-meta', 'an-edge', 'an-fps', 'an-loop', 'cc-on', 'cc-name'];
 function saveSaveSettings() {
   const o = { sel: [...SV.sel], 'an-step': Number($('an-step').textContent) };
   for (const id of svIds) { const el = $(id); o[id] = el.type === 'checkbox' ? el.checked : el.value; }
@@ -377,15 +377,19 @@ function nameDate(name) {
   if (!m) return null;
   return `${m[1]}${m[2]}${m[3]}` + (m[4] ? `-${m[4]}${m[5]}${m[6] || '00'}` : '');
 }
-// EXIF DateTimeOriginal of a file: the TIFF structure inside a JPEG APP1, a TIFF, or a PNG eXIf chunk
+// EXIF DateTimeOriginal of a file: the TIFF structure inside a JPEG APP1, a TIFF, or a PNG eXIf
+// chunk — or, without one, the XMP packet's CreateDate (a JPEG APP1, TIFF tag 700, a PNG iTXt):
+// raw converters write TIFFs with XMP and no EXIF at all
 async function exifDate(file) {
   try {
     const u8 = new Uint8Array(await file.arrayBuffer()); const dv = new DataView(u8.buffer);
-    let t = -1;
+    let t = -1, xmp = null;   // t: the TIFF structure's offset; xmp: [offset, length] of the packet
+    const isXmp = (p) => u8[p] === 0x68 && u8[p + 1] === 0x74 && u8[p + 2] === 0x74 && u8[p + 3] === 0x70 && u8[p + 28] === 0;   // "http://ns.adobe.com/xap/1.0/\0"
     if (u8[0] === 0xFF && u8[1] === 0xD8) {
       for (let p = 2; p + 4 < u8.length && u8[p] === 0xFF;) {
         const mk = u8[p + 1], len = dv.getUint16(p + 2);
-        if (mk === 0xE1 && u8[p + 4] === 0x45 && u8[p + 5] === 0x78 && u8[p + 6] === 0x69 && u8[p + 7] === 0x66) { t = p + 10; break; }
+        if (mk === 0xE1 && u8[p + 4] === 0x45 && u8[p + 5] === 0x78 && u8[p + 6] === 0x69 && u8[p + 7] === 0x66) { t = p + 10; if (xmp) break; }
+        else if (mk === 0xE1 && isXmp(p + 4)) { xmp = [p + 33, len - 31]; if (t >= 0) break; }
         if (mk === 0xDA) break;
         p += 2 + len;
       }
@@ -393,12 +397,18 @@ async function exifDate(file) {
     else if (u8[0] === 0x89 && u8[1] === 0x50) {
       for (let p = 8; p + 8 <= u8.length;) {
         const len = dv.getUint32(p), type = String.fromCharCode(u8[p + 4], u8[p + 5], u8[p + 6], u8[p + 7]);
-        if (type === 'eXIf') { t = p + 8; break; }
+        if (type === 'eXIf') { t = p + 8; if (xmp) break; }
+        else if (type === 'iTXt' && String.fromCharCode(...u8.subarray(p + 8, p + 25)) === 'XML:com.adobe.xmp' && u8[p + 26] === 0) { xmp = [p + 30, len - 22]; if (t >= 0) break; }   // uncompressed, empty language / translation
         if (type === 'IEND') break;
         p += 12 + len;
       }
     }
-    if (t < 0) return null;
+    const xmpDate = () => {
+      if (!xmp) return null;
+      const m = /CreateDate(?:="|>)(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/.exec(new TextDecoder().decode(u8.subarray(xmp[0], xmp[0] + xmp[1])));
+      return m ? `${m[1]}${m[2]}${m[3]}-${m[4]}${m[5]}${m[6]}` : null;
+    };
+    if (t < 0) return xmpDate();
     const le = u8[t] === 0x49; const g16 = (o) => dv.getUint16(t + o, le), g32 = (o) => dv.getUint32(t + o, le);
     const ifd = (off, want) => {
       const out = {}; if (t + off + 2 > u8.length) return out;
@@ -417,10 +427,20 @@ async function exifDate(file) {
     if (ifd0[0x8769]) { const ex = ifd(ifd0[0x8769], [0x9003, 0x9004]); dt = ex[0x9003] || ex[0x9004]; }
     dt = dt || ifd0[0x0132];
     const m = dt && /^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(dt);
-    return m ? `${m[1]}${m[2]}${m[3]}-${m[4]}${m[5]}${m[6]}` : null;
+    if (m) return `${m[1]}${m[2]}${m[3]}-${m[4]}${m[5]}${m[6]}`;
+    // no EXIF date: a TIFF's XMP is tag 700 of IFD0 (BYTE or UNDEFINED, at the entry's offset)
+    if (t === 0 && !xmp) {
+      const off = g32(4), n = g16(off);
+      for (let i = 0; i < n; i++) {
+        const e = off + 2 + 12 * i; if (e + 12 > u8.length) break;
+        if (g16(e) === 700 && (g16(e + 2) === 1 || g16(e + 2) === 7)) { const cnt = g32(e + 4); xmp = [cnt <= 4 ? e + 8 : g32(e + 8), cnt]; break; }
+      }
+    }
+    return xmpDate();
   } catch { return null; }
 }
-window.__svTest = { exifDate, nameDate };   // tests
+window.__svTest = { exifDate, nameDate, save: (kind, format, quality, meta) => call({ type: 'save', kind, format, quality, meta }),   // tests
+                    sign: (bytes, mime, name) => signBlob(new Blob([bytes], { type: mime }), OUTPUTS[0], name, mime).then((b) => b.arrayBuffer()) };
 function svExt(o) { return o.ext || ($('sv-format').value === 'jpeg' ? 'jpg' : 'png'); }
 function svName(o, now = new Date()) {
   const parts = [];
@@ -455,6 +475,10 @@ async function renderSave() {
   const nd = f0 ? nameDate(f0.name) : null; $('fn-fname-val').textContent = nd || 'none found'; $('fn-fname').disabled = !nd;
   $('fn-now-val').textContent = stamp(new Date());
   const j = $('sv-format').value === 'jpeg'; $('sv-qrow').hidden = !j; $('sv-quality').hidden = !j;
+  // metadata: what the engine found in the first frame (the run reads it); nothing found disables the box
+  const mt = st.result.meta, have = !!(mt && (mt.exif || mt.icc || mt.xmp || mt.chrm));
+  $('sv-meta').disabled = !have;
+  $('sv-meta-info').textContent = !mt ? '—' : have ? `${f0 ? f0.name : 'first frame'}: ${mt.text}` + (!mt.icc && mt.chrm ? ' (no ICC profile: PNG gets a cHRM chunk)' : '') : `nothing found in ${f0 ? f0.name : 'the first frame'}`;
   $('fn-preview').textContent = svName(OUTPUTS[0]);
   // the file list
   const list = $('sv-files'); list.innerHTML = '';
@@ -609,7 +633,7 @@ async function saveSelected() {
       } else {
         prog(`encoding ${name}`, 0, 0); setState(o, 'encoding…');
         const f = o.ext ? 'png' : fmt;
-        const r = await call({ type: 'save', kind: o.kind, format: f, quality: q });
+        const r = await call({ type: 'save', kind: o.kind, format: f, quality: q, meta: $('sv-meta').checked && !$('sv-meta').disabled });
         mime = f === 'jpeg' ? 'image/jpeg' : 'image/png'; blob = new Blob([r.bytes], { type: mime });
       }
       if (sign) { prog(`signing ${name}`, 0, 0); setState(o, 'signing…'); blob = await signBlob(blob, o, name, mime); }

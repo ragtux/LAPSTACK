@@ -18,6 +18,7 @@ fn main() {
     let mut output = "stacked.png".to_string();
     let mut save_depth = false;
     let mut save_conf = false;
+    let mut metadata = true;
     let mut depth_raw: Option<String> = None;
     let mut do_align = true;
     let mut p = Params::default();
@@ -55,6 +56,7 @@ fn main() {
             "--save-aligned" => p.save_aligned = Some(next(&mut i)),
             "--save-depth" => save_depth = true,
             "--save-conf" => save_conf = true,
+            "--no-metadata" => metadata = false,
             "--depth-raw" => depth_raw = Some(next(&mut i)),
             "--depth" => {
                 depth_mode = next(&mut i);
@@ -102,7 +104,12 @@ fn main() {
     let t0 = Instant::now();
     let mut log = |s: String| eprintln!("[lapstack] {s}");
     let out = run(&inputs, &p, &mut log).unwrap_or_else(|e| fail(&e));
-    if let Err(e) = io::save_rgb(&out.image, &output, out.bit_depth) {
+    // the first frame's EXIF, ICC profile and XMP go into the fused image
+    let meta = if metadata { Some(io::load_meta(&inputs[0]).unwrap_or_else(|e| fail(&e))) } else { None };
+    if let Some(m) = &meta {
+        eprintln!("[lapstack] metadata from {}: {}", inputs[0], m.describe());
+    }
+    if let Err(e) = io::save_rgb(&out.image, &output, out.bit_depth, meta.as_ref()) {
         fail(&e);
     }
     eprintln!("[lapstack] fused -> {output}");
@@ -164,6 +171,7 @@ fn help() {
            --save-depth           write the depth map next to the output (8-bit, min-max scaled)\n\
            --depth-raw PATH       write the depth map as 16-bit PNG, fixed scale (65535 = last frame)\n\
            --save-conf            write the depth confidence map (16-bit, 65535 = 1)\n\
+           --no-metadata          do not copy the first frame's EXIF / ICC profile / XMP into the output\n\
            --depth MODE           dff = depth from focus (default) | winner = pyramid winner map\n\
            --depth-level L        (winner) pyramid level the map is read from [2 = 1/4 res]\n\
          Depth from focus (Jeon et al. 2019 focus measure, guided-filter aggregation,\n\

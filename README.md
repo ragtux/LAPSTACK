@@ -38,7 +38,15 @@ target/release/lapstack --gpu --gpu-align --align-coarsen 2 -o out.png frames/*.
 ```
 
 Input is PNG, JPEG or TIFF, 8- or 16-bit; the output keeps the input bit
-depth (16-bit needs PNG or TIFF). `lapstack --help` lists every option.
+depth (16-bit needs PNG or TIFF) and carries the **first frame's metadata**:
+its EXIF (camera, lens, exposure, date, orientation, resolution — rebuilt
+without the MakerNote and thumbnail, Software set to lapstack, the pixel
+dimensions set to the result's), ICC profile and XMP packet, and, for a TIFF
+without a profile, its white point and primaries (`meta.rs`; `--no-metadata`
+turns it off). PNG carries them as eXIf, iCCP / cHRM and iTXt chunks, JPEG as
+APP1 / APP2 segments, TIFF in IFD0 with the Exif and GPS sub-IFDs — TIFF
+output is written by lapstack's own uncompressed writer for that.
+`lapstack --help` lists every option.
 
 **Transform** (`pyramid.rs`): separable kernel `[1 4 6 4 1]/16` (Burt's
 a = 0.375), reflect-101 borders, so REDUCE/EXPAND are plain linear operators
@@ -226,7 +234,10 @@ a thumbnail and the exact file name per output) and the settings. Stills:
 the (retouched) LAP and DFR images as PNG at the input bit depth, 8-bit PNG
 or JPEG with a quality slider; the depth map as an 8-bit gray PNG (min–max
 scaled) or a 16-bit PNG with a fixed scale (65535 = last frame, the same
-encoding as the CLI's `--depth-raw`); the winner map. Animations, as GIF:
+encoding as the CLI's `--depth-raw`); the winner map. The stacked images
+carry the **first frame's EXIF, ICC profile and XMP** like the CLI's output
+(the run reads them from the first frame's bytes; the card's *Metadata*
+section says what was found and has the switch). Animations, as GIF:
 **Focus depth** in Turbo with the slice sweeping through the frames, the
 **In focus** sweep, and the aligned **Source** frames under their peaking
 band, each frame rendered like the viewer shows it (the Source and In focus
@@ -241,7 +252,9 @@ File names are built from tokens joined with `_`, lower case: `lapstack`,
 the EXIF date/time of the first frame (read from the JPEG APP1 / TIFF /
 PNG eXIf structure), a date/time found in the first frame's name, the
 current date/time, a custom text, and the layer name (`lap`, `dfr`, `depth`,
-`depth16`, `winner`, `depth-slice`, `infocus`, `peaking`).
+`depth16`, `winner`, `depth-slice`, `infocus`, `peaking`). The EXIF date
+falls back to the XMP packet's CreateDate, which is all a raw converter's
+TIFF may have.
 **Content credentials** ([C2PA](https://contentcredentials.org/)) can be
 attached to every saved file: a self-signed ES256 certificate is generated
 in the browser for the *signed as* name (kept in localStorage, the key never

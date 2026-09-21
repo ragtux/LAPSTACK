@@ -9,9 +9,11 @@
 //   8-bit in  -> 8-bit out
 //   16-bit in -> 16-bit out  (PNG/TIFF; JPEG has no 16-bit -> written 8-bit)
 
+use crate::meta::{self, Meta};
 use crate::pyramid::Img3;
 use image::{ColorType, DynamicImage, ImageBuffer, Luma, Rgb};
 use rayon::prelude::*;
+use std::io::Cursor;
 
 /// Native storage depth of an image file.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -82,12 +84,24 @@ pub fn load_rgb(path: &str) -> Result<(Img3, Depth), String> {
     Ok((o, depth))
 }
 
+/// Read the metadata (EXIF, ICC profile, XMP) of an input file, see `meta`.
+pub fn load_meta(path: &str) -> Result<Meta, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    Ok(meta::extract(&bytes))
+}
+
 /// Write an `Img3` at the requested depth, downgrading to 8-bit if the output
-/// format cannot store 16-bit samples.
-pub fn save_rgb(img: &Img3, path: &str, depth: Depth) -> Result<(), String> {
+/// format cannot store 16-bit samples. `meta` is carried into the file: PNG
+/// and JPEG through `meta::embed`, TIFF through lapstack's own writer.
+pub fn save_rgb(img: &Img3, path: &str, depth: Depth, meta: Option<&Meta>) -> Result<(), String> {
     let depth = if depth == Depth::Sixteen && ext_supports_16(path) { Depth::Sixteen } else { Depth::Eight };
     let n = img.w * img.h;
     let (w, h) = (img.w as u32, img.h as u32);
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let err = |e: String| format!("cannot write {path}: {e}");
+    let tiff = matches!(ext.as_str(), "tif" | "tiff");
+    let format = image::ImageFormat::from_extension(&ext).ok_or_else(|| err("unknown extension".into()))?;
+    let mut out: Vec<u8> = Vec::new();
     match depth {
         Depth::Sixteen => {
             let mut raw = vec![0u16; n * 3];
@@ -96,10 +110,11 @@ pub fn save_rgb(img: &Img3, path: &str, depth: Depth) -> Result<(), String> {
                     raw[3 * i + c] = (img.p[c][i].clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
                 }
             }
-            ImageBuffer::<Rgb<u16>, _>::from_raw(w, h, raw)
-                .unwrap()
-                .save(path)
-                .map_err(|e| format!("cannot write {path}: {e}"))?;
+            if tiff {
+                meta::write_tiff(&mut out, img.w, img.h, 16, bytemuck_cast(&raw), meta).map_err(|e| err(e.to_string()))?;
+            } else {
+                ImageBuffer::<Rgb<u16>, _>::from_raw(w, h, raw).unwrap().write_to(&mut Cursor::new(&mut out), format).map_err(|e| err(e.to_string()))?;
+            }
         }
         Depth::Eight => {
             let mut raw = vec![0u8; n * 3];
@@ -108,13 +123,23 @@ pub fn save_rgb(img: &Img3, path: &str, depth: Depth) -> Result<(), String> {
                     raw[3 * i + c] = (img.p[c][i].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
                 }
             }
-            ImageBuffer::<Rgb<u8>, _>::from_raw(w, h, raw)
-                .unwrap()
-                .save(path)
-                .map_err(|e| format!("cannot write {path}: {e}"))?;
+            if tiff {
+                meta::write_tiff(&mut out, img.w, img.h, 8, &raw, meta).map_err(|e| err(e.to_string()))?;
+            } else {
+                ImageBuffer::<Rgb<u8>, _>::from_raw(w, h, raw).unwrap().write_to(&mut Cursor::new(&mut out), format).map_err(|e| err(e.to_string()))?;
+            }
         }
     }
-    Ok(())
+    if let (Some(m), false) = (meta, tiff) {
+        out = meta::embed(out, m);
+    }
+    std::fs::write(path, out).map_err(|e| err(e.to_string()))
+}
+
+/// u16 samples as bytes in host order (what `meta::write_tiff` takes).
+fn bytemuck_cast(v: &[u16]) -> &[u8] {
+    // SAFETY: u16 has no padding and any byte pattern is a valid u8; the slice covers the same memory
+    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 2) }
 }
 
 /// Save a plane in `[0, scale]` as a 16-bit grayscale PNG with a FIXED

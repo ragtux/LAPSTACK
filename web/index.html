@@ -198,6 +198,10 @@
       <label id="sv-qrow" hidden>quality <span class="val" id="sv-qval">92</span></label>
       <input type="range" id="sv-quality" min="50" max="100" value="92" hidden>
       <div class="dim small">Depth and winner maps are always PNG; animations are GIF.</div>
+      <div class="section">Metadata</div>
+      <label class="check"><input type="checkbox" id="sv-meta" checked> <span>copy the first frame's EXIF, ICC profile and XMP into the stacked images</span></label>
+      <div class="dim small" id="sv-meta-info">—</div>
+      <div class="dim small">The EXIF is rebuilt with the camera, lens, exposure, date and orientation tags (MakerNote and thumbnail left out) and Software set to lapstack. PNG carries it as eXIf, iCCP and iTXt chunks, JPEG as APP1 / APP2 segments. Maps and animations get none.</div>
       <div class="section">Animations</div>
       <label>long edge <select id="an-edge"><option value="0">full resolution</option><option value="4000">4000 px</option><option value="3000">3000 px</option><option value="2000">2000 px</option><option value="1600">1600 px</option><option value="1200">1200 px</option><option value="800">800 px</option></select></label>
       <label class="stepper">every Nth frame <span><button data-step="an-step" data-d="-1">−</button><span id="an-step" data-min="1" data-max="50">1</span><button data-step="an-step" data-d="1">+</button></span></label>

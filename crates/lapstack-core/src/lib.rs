@@ -26,6 +26,7 @@ pub mod fuse;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod io;
+pub mod meta;
 pub mod pyramid;
 pub mod stack;
 

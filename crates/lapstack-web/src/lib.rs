@@ -162,6 +162,8 @@ struct Run {
     dmap_rgb16: Option<Vec<u16>>,
     /// Retouch: the currently loaded aligned source frame (index, RGB u16).
     src_rgb16: Option<(usize, Vec<u16>)>,
+    /// The first frame's EXIF / ICC profile / XMP, for the saved files.
+    meta: lapstack_core::meta::Meta,
     /// The source frame currently warped into `cur[0]` (`load_source`); In focus renders from it.
     src_gpu: Option<usize>,
     undo: Vec<Patch>,
@@ -294,7 +296,10 @@ impl Engine {
         let t_dec = now();
         if self.run.is_none() {
             let params: Params = serde_json::from_str(params_json).map_err(|e| JsValue::from_str(&format!("params: {e}")))?;
-            self.run = Some(self.setup(frame.w, frame.h, frame.bits, params).map_err(|e| JsValue::from_str(&e))?);
+            let mut run = self.setup(frame.w, frame.h, frame.bits, params).map_err(|e| JsValue::from_str(&e))?;
+            run.meta = lapstack_core::meta::extract(bytes);
+            log(&format!("[lapstack] metadata of the first frame: {}", run.meta.describe()));
+            self.run = Some(run);
         }
         let g = &self.gpu;
         let run = self.run.as_mut().unwrap();
@@ -823,10 +828,25 @@ impl Engine {
         self.run.as_ref().map_or(vec![0, 0], |r| vec![r.undo.len() as u32, r.redo.len() as u32])
     }
 
+    /// What the first frame carried, for the Save step: {exif, icc, xmp, chrm: byte
+    /// counts (0 = absent; chrm 1), text: one line}.
+    pub fn meta_info(&self) -> Result<JsValue, JsValue> {
+        let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no run"))?;
+        let m = &run.meta;
+        let o = js_sys::Object::new();
+        set(&o, "exif", m.exif.as_ref().map_or(0, |v| v.len()) as u32);
+        set(&o, "icc", m.icc.as_ref().map_or(0, |v| v.len()) as u32);
+        set(&o, "xmp", m.xmp.as_ref().map_or(0, |v| v.len()) as u32);
+        set(&o, "chrm", m.chrm.is_some() as u32);
+        set(&o, "text", m.describe());
+        Ok(o.into())
+    }
+
     /// Encode the fused image or the depth map. `format`: "png" (fused at the
     /// input bit depth, depth map 8-bit gray), "png8" (8-bit), "jpeg" (8-bit,
-    /// `quality` 1..100). Returns the file bytes.
-    pub fn encode(&self, kind: &str, format: &str, quality: u8) -> Result<js_sys::Uint8Array, JsValue> {
+    /// `quality` 1..100). With `metadata` the stacked images (not the maps)
+    /// carry the first frame's EXIF / ICC profile / XMP. Returns the file bytes.
+    pub fn encode(&self, kind: &str, format: &str, quality: u8, metadata: bool) -> Result<js_sys::Uint8Array, JsValue> {
         use image::ImageEncoder;
         let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no result"))?;
         let (w, h) = (run.w as u32, run.h as u32);
@@ -884,12 +904,15 @@ impl Engine {
                 }
             }
         }
+        if metadata && matches!(kind, "fused" | "dmap") {
+            out = lapstack_core::meta::embed(out, &run.meta);
+        }
         Ok(js_sys::Uint8Array::from(&out[..]))
     }
 
     /// Kept for the test page: PNG at the input bit depth.
     pub fn encode_png(&self, kind: &str) -> Result<js_sys::Uint8Array, JsValue> {
-        self.encode(kind, "png", 90)
+        self.encode(kind, "png", 90, false)
     }
 
     /// Full-resolution depth map (u16, 65535 = last frame); for tests.
@@ -1006,6 +1029,7 @@ impl Engine {
             undo: Vec::new(),
             redo: Vec::new(),
             undo_bytes: 0,
+            meta: Default::default(),
         })
     }
 }

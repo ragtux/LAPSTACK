@@ -7,6 +7,8 @@ description = "Laplacian-pyramid focus stacking (Burt & Adelson 1983/84; Wang & 
 [dependencies]
 image.workspace = true
 rayon.workspace = true
+# metadata pass-through (meta.rs): PNG iCCP / iTXt are zlib streams
+flate2 = "1"
 cudarc = { workspace = true, optional = true }
 
 [features]

@@ -94,7 +94,7 @@ self.onmessage = (ev) => {
 // encoding, and content credentials.
 async function handleCall(m) {
   if (m.type === 'save') {
-    const bytes = engine.encode(m.kind, m.format || 'png', m.quality || 90);
+    const bytes = engine.encode(m.kind, m.format || 'png', m.quality || 90, !!m.meta);
     post({ type: 'png', rid: m.rid, kind: m.kind, format: m.format || 'png', bytes: bytes.buffer }, [bytes.buffer]);
   } else if (m.type === 'export_source') {
     // the aligned full-res frame (or its In focus rendering, m.focus = focusParams), like load_source
@@ -186,7 +186,8 @@ async function handle(m) {
       if (cancelled) { engine.reset(); post({ type: 'cancelled' }); running = false; return; }
       post({ type: 'stage', text: 'collapsing', done: m.files.length, total: m.files.length });
       const res = await engine.finish();
-      post({ type: 'done', w: res.w, h: res.h, bits: res.bits, frames: res.frames,
+      res.meta = engine.meta_info();   // what the first frame carried, for the Save step
+      post({ type: 'done', w: res.w, h: res.h, bits: res.bits, frames: res.frames, meta: res.meta,
              rgba: res.rgba.buffer, depth_w: res.depth_w, depth_h: res.depth_h, depth: res.depth.buffer,
              winner_w: res.winner_w, winner_h: res.winner_h, winner: res.winner.buffer,
              ms: performance.now() - t0 }, [res.rgba.buffer, res.depth.buffer, res.winner.buffer]);
@@ -235,7 +236,7 @@ async function handle(m) {
       const d = engine.depth_full();
       post({ type: 'depth_full', w: 0, data: d.buffer }, [d.buffer]);
     } else if (m.type === 'save') {
-      const bytes = engine.encode(m.kind, m.format || 'png', m.quality || 90);
+      const bytes = engine.encode(m.kind, m.format || 'png', m.quality || 90, !!m.meta);
       post({ type: 'png', kind: m.kind, format: m.format || 'png', bytes: bytes.buffer }, [bytes.buffer]);
     }
   } catch (e) {
