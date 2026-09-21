@@ -1079,6 +1079,21 @@ function drawCursor(c, d) {
   c.lineWidth = 1.5 / (st.zoom * d); c.strokeStyle = 'rgba(255,255,255,.9)'; c.beginPath(); c.arc(R.cursor[0], R.cursor[1], R.size, 0, 2 * Math.PI); c.stroke();
   c.strokeStyle = 'rgba(0,0,0,.6)'; c.beginPath(); c.arc(R.cursor[0], R.cursor[1], R.size * R.hard, 0, 2 * Math.PI); c.stroke();
 }
+// ctrl+G while retouch is on: the pick crosshair is the pointer's own cursor, so it marks
+// the pane under the hand and nothing in the other one. The two panes hold the same image
+// under the same transform, so this cross, drawn at the pointer in both, puts the pixel
+// about to be picked in front of the Source pane as well — the frame the jump lands on is
+// the one that pane is showing. It stands in for the brush rings, which a pick ignores.
+function drawPick(c, d) {
+  if (!R.cursor) return;
+  const k = st.zoom * d, [x, y] = R.cursor, arm = 14 / k, gap = 4 / k;
+  c.setTransform(k, 0, 0, k, st.ox * d, st.oy * d);
+  c.beginPath();
+  c.moveTo(x - arm, y); c.lineTo(x - gap, y); c.moveTo(x + gap, y); c.lineTo(x + arm, y);
+  c.moveTo(x, y - arm); c.lineTo(x, y - gap); c.moveTo(x, y + gap); c.lineTo(x, y + arm);
+  c.lineWidth = 3.5 / k; c.strokeStyle = 'rgba(0,0,0,.55)'; c.stroke();   // a dark liner, so it reads on a bright image
+  c.lineWidth = 1.5 / k; c.strokeStyle = 'rgba(255,255,255,.95)'; c.stroke();
+}
 // Pane labels: a chip over every visible image. 'a' is the view layer, 'b' the
 // compare partner, plain = neutral (the retouch source). Positions are inline so
 // one element serves the pane centres, the swipe divider and the centred single view.
@@ -1099,6 +1114,10 @@ function draw() {
   const retouch = R.on && !!st.result;
   const split = st.compare && st.cmpMode === 'split' && !!st.result;
   $('vwrap').classList.toggle('split', split); $('vwrap').classList.toggle('paint', retouch); canvas2.hidden = !split;
+  // a pick in retouch mode draws its own cross in both panes: the pointer's native crosshair
+  // stands down for it, so the two panes mark the pixel the same way — but only once the
+  // drawn one has a place to be, so the pointer is never left with no cursor at all
+  $('vwrap').classList.toggle('xhair', retouch && st.pick && !!R.cursor);
   sizeCanvas(canvas, d); if (split) sizeCanvas(canvas2, d);
   const cw = canvas.clientWidth, ch = canvas.clientHeight;
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = '#141416'; ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -1116,10 +1135,12 @@ function draw() {
     const [L, Rt] = st.flipped ? [B, A] : [A, B];
     const labels = st.flipped ? [layerLabel(st.cmp), layerLabel(st.view)] : [layerLabel(st.view), layerLabel(st.cmp)];
     if (retouch) labels[0] += ' — drag to paint, shift+drag pans';
-    drawLayer(L); if (retouch) { hoverDab(ctx, d); drawCursor(ctx, d); }   // the paint pane: the brush's preview under its circle
+    // the paint pane: the brush's preview under its circle — or, while a pick is armed, the
+    // crosshair alone, since the next click jumps to a frame instead of laying a dab down
+    drawLayer(L); if (retouch) { if (st.pick) drawPick(ctx, d); else { hoverDab(ctx, d); drawCursor(ctx, d); } }
     ctx2.setTransform(1, 0, 0, 1, 0, 0); ctx2.fillStyle = '#141416'; ctx2.fillRect(0, 0, canvas2.width, canvas2.height);
     ctx2.setTransform(st.zoom * d, 0, 0, st.zoom * d, st.ox * d, st.oy * d);
-    drawLayer(Rt, ctx2); if (retouch) drawCursor(ctx2, d);
+    drawLayer(Rt, ctx2); if (retouch) { if (st.pick) drawPick(ctx2, d); else drawCursor(ctx2, d); }
     const [k1, k2] = st.flipped ? ['b', 'a'] : ['a', 'b'];
     const [l1, l2] = $('panelabels').children; $('panelabels').hidden = false;
     showLabel(l1, labels[0], k1, { left: '25%', transform: 'translateX(-50%)' });
@@ -1191,6 +1212,7 @@ function setPick(on) {
   st.pick = !!on && !!st.result;
   $('vwrap').classList.toggle('pick', st.pick);
   $('pickhint').hidden = !st.pick;
+  if (R.on) draw();   // retouch draws its own crosshair in both panes: arming and cancelling both change it
 }
 function frameAt(x, y) {
   const r = st.result; if (!r || !r.winner) return -1;

@@ -205,6 +205,8 @@ body.log-collapsed #toasts { bottom: 46px; }
 #vwrap.shift canvas { cursor: move; }
 /* ctrl+G: pick the frame that won a pixel */
 #vwrap.pick canvas { cursor: crosshair; }
+/* except in retouch mode, where the cross is drawn into both panes instead (drawPick) */
+#vwrap.xhair canvas { cursor: none; }
 #corner-br { position: absolute; right: 10px; bottom: 10px; z-index: 3; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
 #pickhint { padding: 6px 12px; border-radius: 8px; background: rgba(20,20,22,.85); border: 1px solid var(--accent); font-size: var(--fs-lg); white-space: nowrap; }
 /* keyboard shortcut card: opaque panel (not glass) so the list stays legible over any image;
