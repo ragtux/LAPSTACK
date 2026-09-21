@@ -473,6 +473,33 @@ blend keeps its own accumulator on the GPU (4 floats per pixel, freed
 afterwards) while the run's fuses the slabs. A single slab of the whole
 stack reproduces the LAP result exactly, which the test page checks.
 
+**Batch** (the same ▾ menu, *split into stacks*): the CLI's `--split` for
+the browser. *Add folder…* takes a whole folder (its subfolders too; a
+dropped folder works the same), files sort by their path so a folder's
+frames stay together, and the rule cuts the list into stacks — every N
+frames, at every pause in the capture times longer than S seconds, or one
+per folder. The filmstrip shows the split at once as a header over each
+stack (its frames, capture times and the pause before it in the tooltip),
+the menu says what it makes (*3 stacks of 25–31 frames · frames 1.0 s
+apart, the longest pause 48 s*, so the threshold can be tuned by eye), and
+the Run button reads *Run LAP ×3*. The capture time comes from EXIF
+DateTimeOriginal, else DateTimeDigitized, DateTime or the XMP CreateDate,
+read through a chunked reader so a 274 MB TIFF whose IFD trails the pixels
+costs a few 64 KB reads; a frame without one uses its file date and the
+menu says so. The batch runs the stacks in turn through the ordinary run
+— each becomes the frame list in hand — and as each finishes saves the
+files ticked in the Save step, with that step's names and settings (the
+*stack number* token, `s01`, goes into the names unless another per-stack
+token — the EXIF date, the date in the name, the first frame's name — is
+on), to a folder chosen with *save to folder…* (the File System Access API,
+Chrome and Edge; the Save step's *folder…* is the same choice) or as
+downloads. A stack that fails is logged and the batch goes on; the banner
+over the filmstrip counts saved and failed, the last stack stays on screen
+with its result, and *all frames* brings every frame back with each
+stack's status in its header. The headless harness exercises it with
+`PAGE=index.html` and a `PRE_EXPR` that sets the rule and a
+`window.__saveHook`, waiting on `window.__batch_done`.
+
 **Retouch** is a mode of the Stack step, not a step of its own: the
 **Retouch** button in the viewer's top-right corner (or `R`) is there
 whenever LAP or DFR is on screen. It turns the view into a side-by-side

@@ -12,6 +12,8 @@
     <span class="title">lapstack</span>
     <button id="add">Add frames…</button>
     <input id="file" type="file" multiple accept=".png,.jpg,.jpeg,.tif,.tiff,image/png,image/jpeg,image/tiff" hidden>
+    <button id="addf" title="add every image in a folder (and its subfolders): with the batch split by folder, each folder is a stack">Add folder…</button>
+    <input id="dir" type="file" webkitdirectory hidden>
     <button id="clear">Clear</button>
     <!-- split Run button: the arrow opens run options (DFR); the label shows the state -->
     <span id="runwrap">
@@ -25,6 +27,18 @@
           <label class="stepper">slab size <span><button data-step="p-dslab-size" data-d="-1">−</button><span id="p-dslab-size" data-min="1" data-max="200">10</span><button data-step="p-dslab-size" data-d="1">+</button></span></label>
           <label class="stepper">overlap <span><button data-step="p-dslab-ov" data-d="-1">−</button><span id="p-dslab-ov" data-min="0" data-max="199">2</span><button data-step="p-dslab-ov" data-d="1">+</button></span></label>
         </div>
+        <!-- batch: the frames cut into stacks (Helicon's split, Zerene's batch), each run in turn and
+             saved as it finishes; the filmstrip shows the split before the run -->
+        <div class="menu-sep"></div>
+        <label class="sel">batch: split into stacks <select id="p-split"><option value="none">no, one stack</option><option value="count">every N frames</option><option value="gap">at every pause in the capture times</option><option value="dir">one per folder</option></select></label>
+        <div id="split-ctl">
+          <label class="stepper" id="split-n-row">frames per stack <span><button data-step="p-split-n" data-d="-1">−</button><span id="p-split-n" data-min="1" data-max="500">30</span><button data-step="p-split-n" data-d="1">+</button></span></label>
+          <label class="stepper" id="split-gap-row">a pause is more than, seconds <span><button data-step="p-split-gap" data-d="-1">−</button><span id="p-split-gap" data-min="1" data-max="600">10</span><button data-step="p-split-gap" data-d="1">+</button></span></label>
+        </div>
+        <div class="dim small" id="split-info">—</div>
+        <div class="dim small">Each stack is run in turn with these settings, and as it finishes the files ticked in the Save step are saved with the Save step's names and settings — to the folder chosen here, or as downloads (the browser may ask to allow several). The filmstrip shows the stacks; the last one stays on screen when the batch is done, with a button back to all the frames. A stack that fails is reported and the batch goes on.</div>
+        <div class="row"><button id="p-dir" title="choose the folder saved files go to, for the batch and the Save step">save to folder…</button><span class="dim small" id="p-dir-name">downloads</span><button id="p-dir-x" title="back to downloads" hidden>×</button></div>
+        <div class="dim small" id="p-dir-note" hidden>This browser cannot open a folder for writing (Chrome and Edge can): the files are downloaded.</div>
       </div>
     </span>
     <button id="cancel" hidden>Cancel</button>
@@ -197,6 +211,8 @@
         <label class="check"><input type="checkbox" id="fn-exif"> <span>EXIF date/time of the first frame</span><span class="dim small" id="fn-exif-val">—</span></label>
         <label class="check"><input type="checkbox" id="fn-fname"> <span>date/time in the first frame's name</span><span class="dim small" id="fn-fname-val">—</span></label>
         <label class="check"><input type="checkbox" id="fn-now"> <span>current date/time</span><span class="dim small" id="fn-now-val">—</span></label>
+        <label class="check"><input type="checkbox" id="fn-first"> <span>the first frame's name</span><span class="dim small" id="fn-first-val">—</span></label>
+        <label class="check"><input type="checkbox" id="fn-stack" checked> <span>stack number, in a batch (s01, s02, …)</span><span class="dim small" id="fn-stack-val">—</span></label>
         <label class="check"><input type="checkbox" id="fn-layer" checked> <span>layer / algorithm (lap, dfr, depth…)</span></label>
       </div>
       <label>custom text <input type="text" id="sv-name" value="" placeholder="optional"></label>
@@ -249,7 +265,7 @@
       <label class="check"><input type="checkbox" id="cc-on"> <span>attach content credentials (C2PA)</span></label>
       <label>signed as <input type="text" id="cc-name" placeholder="your name"></label>
       <div class="dim small">A signed C2PA manifest is embedded in each saved file (<a href="https://contentcredentials.org/" target="_blank" rel="noopener">contentcredentials.org</a>). The certificate is self-signed and made in this browser: verifiers show the manifest, its assertions and the content hash as valid, and the signer as unknown. The key never leaves this browser.</div>
-      <div class="row" id="sv-actions"><button id="sv-go" class="accent">Save selected</button><button id="sv-cancel" hidden>Cancel</button><span id="sv-progress" class="dim small"></span></div>
+      <div class="row" id="sv-actions"><button id="sv-go" class="accent">Save selected</button><button id="sv-cancel" hidden>Cancel</button><span id="sv-progress" class="dim small"></span><span class="grow"></span><span class="dim small" id="sv-dest">→ downloads</span><button id="sv-dir" title="choose the folder saved files go to">folder…</button><button id="sv-dir-x" title="back to downloads" hidden>×</button></div>
     </div>
   </div>
 </div>

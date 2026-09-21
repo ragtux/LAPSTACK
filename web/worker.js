@@ -38,13 +38,13 @@ async function thumbLoop() {
   while (thumbJob && thumbJob.files.length) {
     if (running || !thumbnail) { await new Promise((r) => setTimeout(r, 200)); continue; }
     const job = thumbJob;
-    const f = job.files.shift(), i = job.indices.shift();
+    const f = job.files.shift(), i = job.indices.shift(), uid = job.uids.shift();
     try {
       const bytes = new Uint8Array(await f.arrayBuffer());
       if (job.gen !== thumbGen) return;
       const t = thumbnail(bytes, job.edge);
       const [proxy, strip] = await proxyBitmaps(t.proxy.buffer, t.proxy_w, t.proxy_h);
-      post({ type: 'thumb', index: i, name: f.name, w: t.w, h: t.h, bits: t.bits, proxy, strip }, [proxy, strip]);
+      post({ type: 'thumb', index: i, uid, name: f.name, w: t.w, h: t.h, bits: t.bits, proxy, strip }, [proxy, strip]);
     } catch (e) {
       post({ type: 'thumb-error', index: i, name: f.name, text: (e && e.message) ? e.message : String(e) });
     }
@@ -217,8 +217,8 @@ async function handle(m) {
       engine = await create_engine();
       post({ type: 'ready', info: { ...JSON.parse(engine.info()), ...(ainfo || {}) } });
     } else if (m.type === 'thumbs') {
-      if (thumbJob) { thumbJob.files.push(...m.files); thumbJob.indices.push(...m.indices); }
-      else { thumbJob = { files: [...m.files], indices: [...m.indices], edge: m.edge, gen: thumbGen }; thumbLoop(); }
+      if (thumbJob) { thumbJob.files.push(...m.files); thumbJob.indices.push(...m.indices); thumbJob.uids.push(...m.uids); }
+      else { thumbJob = { files: [...m.files], indices: [...m.indices], uids: [...m.uids], edge: m.edge, gen: thumbGen }; thumbLoop(); }
     } else if (m.type === 'run') {
       if (running) return;
       running = true; cancelled = false;

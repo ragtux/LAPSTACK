@@ -37,6 +37,19 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 .menu .tog { justify-content: flex-start; }
 .menu label.stepper { display: flex; justify-content: space-between; align-items: center; } .menu label.stepper > span { display: inline-flex; align-items: center; gap: 4px; }
 .menu #dslab-ctl[hidden] { display: none; }
+.menu .menu-sep { border-top: 1px solid var(--border); margin: 4px 0; }
+.menu label.sel { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.menu #split-ctl[hidden], .menu #split-ctl label[hidden] { display: none; }
+.menu .row { display: flex; align-items: center; gap: 6px; }
+#sv-actions .grow { flex: 1; }
+/* the filmstrip's stack headers (the batch split) and the batch banner while one is in hand */
+.fs-group { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; padding: 8px 4px 2px; font-size: var(--fs-xs); color: var(--head); border-top: 1px solid var(--border); }
+.fs-group:first-child { border-top: 0; padding-top: 2px; }
+.fs-group .st { color: var(--dim); white-space: nowrap; }
+.fs-group .st.ok { color: #6c6; } .fs-group .st.bad { color: #e66; } .fs-group .st.run { color: var(--accent); }
+.fs-batch { display: flex; flex-direction: column; gap: 4px; padding: 6px; border-radius: 4px; background: var(--widget); font-size: var(--fs-xs); }
+.fs-batch b { color: var(--head); }
+.fs-batch button { align-self: flex-start; padding: 1px 8px; font-size: var(--fs-xs); }
 #main { flex: 1; display: flex; min-height: 0; }
 #left { width: 176px; flex: none; display: flex; flex-direction: column; min-height: 0; background: var(--panel); border-right: 1px solid var(--border); }
 #filmstrip { flex: 1; min-height: 0; overflow-y: auto; padding: 6px; display: flex; flex-direction: column; gap: 6px; }

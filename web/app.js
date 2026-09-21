@@ -92,11 +92,15 @@ const st = {
              slab: null, slabLoading: null, slabProgress: null, slabGen: 0, slabGenMin: 0 },   // see ensureSlab(): the slab held ({lo, hi, canvas}), the one being built ({lo, hi, gen}), its progress
 };
 window.__st = st; window.__draw = () => draw();
+// The batch: the frame list cut into stacks (stacksOf), run in turn. While one is in hand
+// `all` holds every file and st.files the stack being run; `stacks` keeps each stack's
+// status for the filmstrip's headers (lo/hi index into `all`, or st.files once shown again).
+const B = { all: null, frames: null, stacks: [], k: -1, cancelled: false, done: false, t0: 0 };
 const dpr = () => window.devicePixelRatio || 1;
 
 // ---------- settings (persisted) ----------
 const PK = 'lapstack.settings';
-const stepDefaults = { 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5, 'p-dslab-size': 10, 'p-dslab-ov': 2 };
+const stepDefaults = { 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5, 'p-dslab-size': 10, 'p-dslab-ov': 2, 'p-split-n': 30, 'p-split-gap': 10 };
 function readParams() {
   const n = (id) => Number($(id).textContent === 'auto' ? 0 : $(id).textContent);
   return {
@@ -107,6 +111,7 @@ function readParams() {
     render_slabs: $('p-dslabs').checked, slab_size: n('p-dslab-size'), slab_overlap: n('p-dslab-ov'),
     turbo: st.turbo, slice: st.slice, peak_on: st.peak.on, peak_strip: st.peak.strip, peak_thr: st.peak.thr, cmp_mode: st.retouch.on && st.retouch.prev ? st.retouch.prev.cmpMode : st.cmpMode,
     brush_size: st.retouch.size, brush_hard: st.retouch.hard, brush_from: st.retouch.from, brush_slab: n('p-slab'),
+    split: $('p-split').value, split_n: n('p-split-n'), split_gap: n('p-split-gap'),
   };
 }
 function setStep(id, v) {
@@ -125,6 +130,7 @@ function applyParams(p) {
   st.peak.on = p.peak_on ?? false; st.peak.strip = p.peak_strip ?? false; st.peak.thr = p.peak_thr ?? 0.5; st.slice = p.slice ?? true;
   st.retouch.size = p.brush_size ?? 100; st.retouch.hard = p.brush_hard ?? 0.5; st.retouch.from = ['stack', 'slab'].includes(p.brush_from) ? p.brush_from : 'source';
   setStep('p-slab', p.brush_slab ?? 5);
+  $('p-split').value = ['count', 'gap', 'dir'].includes(p.split) ? p.split : 'none'; setStep('p-split-n', p.split_n ?? 30); setStep('p-split-gap', p.split_gap ?? 10);
 }
 function saveParams() { try { localStorage.setItem(PK, JSON.stringify(readParams())); } catch {} }
 try { applyParams(JSON.parse(localStorage.getItem(PK))); } catch {}
@@ -139,10 +145,41 @@ document.querySelectorAll('#params [data-step], #runmenu [data-step]').forEach((
 document.querySelectorAll('#params input, #params select').forEach((el) => el.addEventListener('change', saveParams));
 // the slab half-width is a brush setting: a change moves the slab's range (ensureSlab, via updateTabs)
 document.querySelectorAll('[data-step="p-slab"]').forEach((b) => b.addEventListener('click', () => { updateTabs(); renderFilmstrip(); draw(); }));
-// Run menu (DFR lives here, not in the parameter panel): the Run label shows the state
-const runLabel = () => { $('run').textContent = $('p-dmap').checked ? 'Run LAP + DFR' : 'Run LAP'; $('dslab-ctl').hidden = !$('p-dslabs').checked; };
+// Run menu (DFR and the batch split live here, not in the parameter panel): the Run label
+// shows the state, with the number of stacks a split makes
+const runLabel = () => {
+  const base = $('p-dmap').checked ? 'Run LAP + DFR' : 'Run LAP';
+  const stacks = B.all ? null : stacksOf(st.files), n = stacks ? stacks.length : 0;
+  $('run').textContent = n > 1 ? `${base} ×${n}` : base;
+  $('run').title = n > 1 ? `batch: ${n} stacks, run in turn and saved as they finish` : '';
+  $('dslab-ctl').hidden = !$('p-dslabs').checked;
+  const rule = $('p-split').value;
+  $('split-ctl').hidden = rule === 'none' || rule === 'dir'; $('split-n-row').hidden = rule !== 'count'; $('split-gap-row').hidden = rule !== 'gap';
+  $('split-info').textContent = splitInfo(stacks);
+};
+// what the split makes of the frames in hand, for the Run menu
+function splitInfo(stacks) {
+  const files = B.all || st.files, rule = $('p-split').value;
+  if (!files.length) return rule === 'none' ? '' : 'no frames yet';
+  if (rule === 'none') return `one stack of ${files.length} frames`;
+  if (stacks === null) return 'reading the capture times…';
+  const sizes = stacks.map((s) => s.hi - s.lo + 1), lo = Math.min(...sizes), hi = Math.max(...sizes);
+  let text = `${stacks.length} stack${stacks.length > 1 ? 's' : ''} of ${lo === hi ? lo : `${lo}–${hi}`} frames`;
+  if (rule === 'gap') {
+    const t = files.map((f) => f.ctime ?? f.lastModified / 1000), gaps = t.slice(1).map((v, i) => Math.abs(v - t[i]));
+    const none = files.filter((f) => f.ctime == null).length;
+    if (gaps.length) text += ` · frames ${median(gaps).toFixed(1)} s apart, the longest pause ${Math.max(...gaps).toFixed(1)} s`;
+    if (none) text += ` · ${none} frame${none > 1 ? 's' : ''} without a capture time (their file date is used)`;
+  }
+  return text;
+}
+const median = (a) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[Math.floor(s.length / 2)] : 0; };
 $('p-dmap').addEventListener('change', () => { saveParams(); runLabel(); });
 $('p-dslabs').addEventListener('change', () => { if ($('p-dslabs').checked) $('p-dmap').checked = true; saveParams(); runLabel(); });   // slabs are a way of rendering DFR
+// the split rule: the filmstrip regroups, and the statuses of an earlier batch no longer apply
+const splitChanged = () => { B.stacks = []; saveParams(); ensureTimes(); runLabel(); renderFilmstrip(); };
+$('p-split').addEventListener('change', splitChanged);
+document.querySelectorAll('[data-step="p-split-n"], [data-step="p-split-gap"]').forEach((b) => b.addEventListener('click', splitChanged));
 $('run-more').addEventListener('click', (e) => { e.stopPropagation(); $('runmenu').hidden = !$('runmenu').hidden; });
 $('runmenu').addEventListener('click', (e) => e.stopPropagation());
 document.addEventListener('click', () => { $('runmenu').hidden = true; $('cmp-menu').hidden = true; });
@@ -179,9 +216,9 @@ worker.onmessage = (ev) => {
     case 'thumb-error': log(`[lapstack] cannot decode ${m.name}: ${m.text}`); break;
     case 'done': onDone(m); break;
     case 'done2': onDone2(m); break;
-    case 'render-cancelled': endRun('cancelled (depth-map render)'); log('[lapstack] depth-map render cancelled; the LAP result is kept'); finishRun(); break;
-    case 'cancelled': endRun('cancelled'); log('[lapstack] cancelled'); break;
-    case 'error': endRun('error'); log('[lapstack] error: ' + m.text); toast(/no WebGPU adapter/i.test(m.text) ? 'No WebGPU adapter. ' + gpuHint() : m.text, 0); break;
+    case 'render-cancelled': endRun('cancelled (depth-map render)'); log('[lapstack] depth-map render cancelled; the LAP result is kept'); if (inBatch()) B.cancelled = true; finishRun(); break;
+    case 'cancelled': endRun('cancelled'); log('[lapstack] cancelled'); if (inBatch()) stackFailed('cancelled'); break;
+    case 'error': endRun('error'); log('[lapstack] error: ' + m.text); toast(/no WebGPU adapter/i.test(m.text) ? 'No WebGPU adapter. ' + gpuHint() : m.text, 0); if (inBatch()) stackFailed('error'); break;
     case 'debug': log('[worker] ' + m.text); break;
   }
 };
@@ -201,30 +238,86 @@ function gpuHint() {
 }
 
 // ---------- files / filmstrip ----------
+// A file's path as it was added: folder/name from a folder pick or a dropped folder, else the
+// name; files sort by it (natural order, f2 before f10), so a folder's frames stay together.
+let fileUid = 0;
+const fileKey = (f) => f.relPath || f.webkitRelativePath || f.name;
+const folderOf = (f) => { const k = fileKey(f), i = k.lastIndexOf('/'); return i < 0 ? '' : k.slice(0, i); };
+const stemOf = (name) => name.replace(/\.[^.]+$/, '');
 function addFiles(list) {
-  const files = [...list].filter((f) => /\.(png|jpe?g|tiff?)$/i.test(f.name)).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const files = [...list].filter((f) => /\.(png|jpe?g|tiff?)$/i.test(f.name)).sort((a, b) => fileKey(a).localeCompare(fileKey(b), undefined, { numeric: true }));
   if (!files.length) return;
+  if (st.running || SV.exporting) { toast('Frames can be added once the run or save in progress is done.'); return; }
+  for (const f of files) f.uid = ++fileUid;
+  if (B.all && !st.running) showAll();   // a batch's stack is on screen: the new frames join the whole list
+  B.stacks = [];
   st.files.push(...files);
-  renderFilmstrip();
+  ensureTimes();
+  renderFilmstrip(); runLabel();
   $('run').disabled = st.running || !st.files.length;
   $('tab-source').disabled = false;
   if (st.view === 'source') draw();
   log(`[lapstack] ${files.length} frame(s) added (${st.files.length} total)`);
   for (const f of files) makeThumb(f);
   const indices = files.map((f) => st.files.indexOf(f));
-  worker.postMessage({ type: 'thumbs', files, indices, edge: readParams().proxy_edge });
+  worker.postMessage({ type: 'thumbs', files, indices, uids: files.map((f) => f.uid), edge: readParams().proxy_edge });
+}
+// Every frame's capture time (captureTime: EXIF, else XMP), read once per file, a few small
+// reads each: the split by pause needs them all, the name tokens the first. undefined =
+// still being read, null = none (the file's date stands in).
+let timesPending = 0;
+function ensureTimes() {
+  for (const f of (B.all || st.files)) {
+    if (f.ctime !== undefined || f.ctimeReading) continue;
+    f.ctimeReading = true; timesPending++;
+    captureTime(f).then((t) => { f.ctime = t; }, () => { f.ctime = null; }).then(() => { if (--timesPending === 0) { runLabel(); renderFilmstrip(); } });
+  }
+}
+// The frame list cut into stacks by the Run menu's rule: [{lo, hi, t0?, t1?}] over `files`,
+// null while the capture times a split by pause needs are still being read.
+function stacksOf(files) {
+  const n = files.length; if (!n) return [];
+  const rule = $('p-split').value, out = [];
+  const num = (id) => Number($(id).textContent);
+  if (rule === 'count') { const per = Math.max(1, num('p-split-n')); for (let lo = 0; lo < n; lo += per) out.push({ lo, hi: Math.min(lo + per, n) - 1 }); }
+  else if (rule === 'dir') { let lo = 0; for (let i = 1; i <= n; i++) if (i === n || folderOf(files[i]) !== folderOf(files[lo])) { out.push({ lo, hi: i - 1 }); lo = i; } }
+  else if (rule === 'gap') {
+    if (files.some((f) => f.ctime === undefined)) return null;
+    const gap = num('p-split-gap'), t = files.map((f) => f.ctime ?? f.lastModified / 1000);
+    let lo = 0; for (let i = 1; i <= n; i++) if (i === n || Math.abs(t[i] - t[i - 1]) > gap) { out.push({ lo, hi: i - 1, t0: t[lo], t1: t[i - 1] }); lo = i; }
+  } else out.push({ lo: 0, hi: n - 1 });
+  return out;
+}
+// a dropped folder: its files, walked through the entries API (the entries must be taken
+// before the event returns; the walk itself can wait)
+function droppedFiles(dt) {
+  const entries = [...(dt.items || [])].map((it) => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean);
+  if (!entries.some((e) => e.isDirectory)) return Promise.resolve([...dt.files]);
+  const out = [];
+  const walk = async (e, prefix) => {
+    if (e.isFile) { const f = await new Promise((res, rej) => e.file(res, rej)); f.relPath = prefix + f.name; out.push(f); }
+    else if (e.isDirectory) {
+      const rd = e.createReader();
+      for (;;) { const batch = await new Promise((res, rej) => rd.readEntries(res, rej)); if (!batch.length) break; for (const c of batch) await walk(c, prefix + e.name + '/'); }
+    }
+  };
+  return (async () => { for (const e of entries) await walk(e, ''); return out; })();
 }
 // A proxy arrives as two bitmaps made by the worker (see proxyBitmaps there): full size for
 // the view, and a strip-sized one for its thumb. Drawing the full proxy into the 160x100
 // thumb canvas would cost ~30 ms of main thread per frame when the canvas is flushed.
 const STRIP_W = 160, STRIP_H = 100;
 function onThumb(m) {
-  if (!st.files[m.index] || st.files[m.index].name !== m.name) return; // stale (cleared)
-  const cur = st.frames[m.index];
+  // the file by its id: the list may have been cleared, or a batch may be showing one stack of it
+  let i = st.files.findIndex((f) => f.uid === m.uid), frames = st.frames;
+  if (i < 0 && B.all) { i = B.all.findIndex((f) => f.uid === m.uid); frames = B.frames; }
+  if (i < 0) return; // stale (cleared)
+  const cur = frames[i];
   if (cur && cur.proxy && cur.sim) return; // the run already supplied an aligned proxy
-  st.frames[m.index] = { ...(cur || {}), name: m.name, w: m.w, h: m.h, bits: m.bits, proxy: m.proxy, strip: m.strip };
-  renderThumb(m.index);
-  if (st.view === 'source' && st.selected === m.index) draw();
+  frames[i] = { ...(cur || {}), name: m.name, w: m.w, h: m.h, bits: m.bits, proxy: m.proxy, strip: m.strip };
+  if (frames !== st.frames) return;
+  renderThumb(i);
+  if (st.view === 'source' && st.selected === i) draw();
 }
 async function makeThumb(f) {
   if (!/\.(png|jpe?g)$/i.test(f.name)) return; // the browser cannot decode TIFF; the run supplies a proxy
@@ -237,19 +330,53 @@ async function makeThumb(f) {
 }
 function renderFilmstrip() {
   const fs = $('filmstrip'); fs.innerHTML = '';
-  if (!st.files.length) { fs.innerHTML = '<div class="empty dim">Add frames, or drop them here.</div>'; return; }
-  st.files.forEach((f, i) => fs.appendChild(thumbEl(i)));
+  if (B.all) fs.appendChild(batchBanner());
+  if (!st.files.length) { fs.insertAdjacentHTML('beforeend', '<div class="empty dim">Add frames, or drop them here.</div>'); return; }
+  // the split's stacks head their frames (one stack, or a batch's stack in hand, has no header)
+  const stacks = B.all ? [] : stacksOf(st.files) || [];
+  const heads = new Map();
+  if (stacks.length > 1) stacks.forEach((s, k) => heads.set(s.lo, groupHead(s, k, stacks)));
+  st.files.forEach((f, i) => { if (heads.has(i)) fs.appendChild(heads.get(i)); fs.appendChild(thumbEl(i)); });
+}
+const clock = (t) => { const s = Math.floor(((t % 86400) + 86400) % 86400); return `${pad2(Math.floor(s / 3600))}:${pad2(Math.floor(s / 60) % 60)}:${pad2(s % 60)}`; };
+// a stack's header in the filmstrip: its number and size, the status a batch gave it, and in
+// the tooltip its frames, capture times and the pause before it
+function groupHead(s, k, stacks) {
+  const d = document.createElement('div'); d.className = 'fs-group';
+  const n = s.hi - s.lo + 1, a = document.createElement('span'); a.textContent = `stack ${k + 1}/${stacks.length} · ${n} frame${n > 1 ? 's' : ''}`;
+  let tip = `${fileKey(st.files[s.lo])} .. ${fileKey(st.files[s.hi])}`;
+  if (s.t0 !== undefined) { tip += `\n${clock(s.t0)} .. ${clock(s.t1)}`; if (k > 0) tip += `, ${(s.t0 - stacks[k - 1].t1).toFixed(0)} s after the last`; }
+  d.title = tip;
+  const st_ = document.createElement('span'); st_.className = 'st';
+  const b = B.stacks.find((x) => x.lo === s.lo && x.hi === s.hi);
+  const label = { queued: 'queued', running: 'running…', saving: 'saving…', saved: '✓ saved', done: '✓ done', failed: '✗ failed', 'save-failed': '✗ save failed', cancelled: 'cancelled' };
+  if (b) { st_.textContent = label[b.status] || b.status; st_.className += /saved|done/.test(b.status) ? ' ok' : /fail/.test(b.status) ? ' bad' : b.status === 'running' ? ' run' : ''; }
+  d.append(a, st_);
+  return d;
+}
+// the banner over a batch's stack in hand: where the batch is, and the way back to every frame
+function batchBanner() {
+  const d = document.createElement('div'); d.className = 'fs-batch';
+  const n = B.stacks.length, saved = B.stacks.filter((x) => x.status === 'saved' || x.status === 'done').length, failed = B.stacks.filter((x) => /fail/.test(x.status)).length;
+  const s = B.stacks[B.k], size = s ? s.hi - s.lo + 1 : st.files.length;
+  const line = document.createElement('div');
+  line.innerHTML = B.done
+    ? `<b>Batch done</b> · ${n} stacks, ${saved} saved${failed ? `, ${failed} failed` : ''}${B.cancelled ? ', cancelled' : ''} · showing stack ${Math.min(B.k, n - 1) + 1}`
+    : `<b>Batch ${B.k + 1}/${n}</b> · stack of ${size} frames${saved ? ` · ${saved} saved` : ''}${failed ? ` · ${failed} failed` : ''}`;
+  d.appendChild(line);
+  if (B.done) { const b = document.createElement('button'); b.textContent = 'all frames'; b.title = 'show every frame again, grouped into its stacks (the result on screen is dropped)'; b.addEventListener('click', showAll); d.appendChild(b); }
+  return d;
 }
 // redraw one frame's thumb in place (a run delivers one frame at a time; rebuilding the whole strip
 // each time costs a drawImage per frame on the main thread, which stutters with a long stack)
 function renderThumb(i) {
-  const fs = $('filmstrip');
-  if (fs.children.length !== st.files.length || !fs.children[i]) return renderFilmstrip();
-  fs.replaceChild(thumbEl(i), fs.children[i]);
+  const fs = $('filmstrip'), cur = fs.querySelector(`.thumb[data-i="${i}"]`);
+  if (!cur || fs.querySelectorAll('.thumb').length !== st.files.length) return renderFilmstrip();
+  fs.replaceChild(thumbEl(i), cur);
 }
 function thumbEl(i) {
   const f = st.files[i];
-  const d = document.createElement('div'); d.className = 'thumb' + (i === st.selected && scrubbable() ? ' sel' : '');
+  const d = document.createElement('div'); d.className = 'thumb' + (i === st.selected && scrubbable() ? ' sel' : ''); d.dataset.i = i;
   if (R.on && brushFrom() === 'slab') { const [lo, hi] = slabWanted(); if (i >= lo && i <= hi) d.classList.add('slab'); }   // the frames the brush source is fused from
   const fr = st.frames[i];
   const bmp = fr && (fr.strip || fr.thumb);
@@ -263,7 +390,7 @@ function thumbEl(i) {
     if (peaking) { g.filter = 'none'; g.drawImage(peakThumb(fr, Math.round(r[2]), Math.round(r[3])), r[0], r[1]); }
     d.appendChild(c);
   } else { const ph = document.createElement('div'); ph.className = 'ph'; ph.textContent = fr ? '…' : String(i); d.appendChild(ph); }
-  const n = document.createElement('div'); n.className = 'name'; n.textContent = f.name; d.appendChild(n);
+  const n = document.createElement('div'); n.className = 'name'; n.textContent = f.name; n.title = fileKey(f); d.appendChild(n);
   if (fr && fr.sim) { const s = document.createElement('div'); s.className = 'sim'; s.textContent = `${fr.sim[0].toFixed(1)}, ${fr.sim[1].toFixed(1)} px · ×${fr.sim[2].toFixed(4)} · ${fr.sim[3].toFixed(2)}°`; d.appendChild(s); }
   // the brightness gain on its own line (the registration line fills the column), only when there is one
   if (fr && gainText(fr.gain)) { const s = document.createElement('div'); s.className = 'sim'; s.textContent = `brightness ${gainText(fr.gain)}`; s.title = 'gain that brings this frame to frame 0\'s brightness'; d.appendChild(s); }
@@ -273,10 +400,12 @@ function thumbEl(i) {
 }
 $('add').addEventListener('click', () => $('file').click());
 $('file').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
-$('clear').addEventListener('click', () => { if (st.running || SV.exporting) return; setPick(false); worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); st.step = 'stack'; gotoStep('stack'); renderFilmstrip(); updateTabs(); setView('source'); });
+$('addf').addEventListener('click', () => $('dir').click());
+$('dir').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
+$('clear').addEventListener('click', () => { if (st.running || SV.exporting) return; setPick(false); worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); B.all = null; B.frames = null; B.stacks = []; B.done = false; st.step = 'stack'; gotoStep('stack'); renderFilmstrip(); runLabel(); updateTabs(); setView('source'); });
 document.addEventListener('dragover', (e) => { e.preventDefault(); document.body.classList.add('drop'); });
 document.addEventListener('dragleave', () => document.body.classList.remove('drop'));
-document.addEventListener('drop', (e) => { e.preventDefault(); document.body.classList.remove('drop'); if (!st.running) addFiles(e.dataTransfer.files); });
+document.addEventListener('drop', (e) => { e.preventDefault(); document.body.classList.remove('drop'); if (!st.running) droppedFiles(e.dataTransfer).then(addFiles); });
 
 // ---------- run ----------
 function setProgress(text, done, total) {
@@ -285,6 +414,11 @@ function setProgress(text, done, total) {
 }
 $('run').addEventListener('click', () => {
   if (st.running || SV.exporting || !st.files.length) return;
+  const stacks = B.all ? [] : stacksOf(st.files);
+  if (stacks === null) { toast('The capture times are still being read; try again in a moment.'); return; }
+  if (stacks.length > 1) runBatch(stacks); else startRun();
+});
+function startRun() {
   st.running = true; setPick(false); st.frames = st.frames.map((f) => (f ? { name: f.name, thumb: f.thumb, proxy: f.proxy, strip: f.strip, w: f.w, h: f.h, bits: f.bits } : f)); st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); if (st.step !== 'stack') gotoStep('stack');
   runLabel(); $('runwrap').hidden = true; $('runmenu').hidden = true; $('cancel').hidden = false; $('clear').disabled = true;
   setProgress('starting', 0, st.files.length);
@@ -292,8 +426,76 @@ $('run').addEventListener('click', () => {
   log(`[lapstack] run: ${st.files.length} frames, ${JSON.stringify(params)}`);
   st.t0 = performance.now(); st.rendering = !!params.render_dmap; window.__app_done = null;
   worker.postMessage({ type: 'run', files: st.files, params });
-});
-$('cancel').addEventListener('click', () => worker.postMessage({ type: 'cancel' }));
+}
+$('cancel').addEventListener('click', () => { worker.postMessage({ type: 'cancel' }); if (inBatch() && SV.exporting) { SV.cancel = true; worker.postMessage({ type: 'refold_cancel' }); } });
+// ---------- batch ----------
+// The stacks run in turn through the ordinary run: each becomes the file list in hand, is run,
+// and its ticked outputs are saved (saveSelected, with the Save step's settings) before the
+// next starts. The last stack stays on screen; showAll brings every frame back.
+const inBatch = () => !!B.all && !B.done;
+function runBatch(stacks) {
+  B.all = st.files; B.frames = st.frames; B.stacks = stacks.map((s) => ({ ...s, status: 'queued', files: [] })); B.k = -1; B.cancelled = false; B.done = false; B.t0 = performance.now();
+  window.__batch_done = null;
+  // the file names must differ between stacks: the stack number goes in unless a per-stack token is on
+  if (!['fn-exif', 'fn-fname', 'fn-first', 'fn-stack'].some((id) => $(id).checked)) { $('fn-stack').checked = true; saveSaveSettings(); log('[lapstack] batch: the stack number is added to the file names (no other name token tells the stacks apart)'); }
+  const sel = OUTPUTS.filter((o) => SV.sel.has(o.id)).map((o) => o.token);
+  log(`[lapstack] batch: ${stacks.length} stacks (${splitInfo(stacks)}); saving ${sel.length ? sel.join(', ') : 'nothing — tick files in the Save step'} ${SV.dir ? `to the folder "${SV.dir.name}"` : 'as downloads'}`);
+  nextStack();
+}
+function loadStack(s) {
+  st.files = B.all.slice(s.lo, s.hi + 1); st.frames = B.frames.slice(s.lo, s.hi + 1);
+  st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); st.selected = 0;
+  if (st.step !== 'stack') gotoStep('stack');
+  renderFilmstrip(); updateTabs();
+}
+function nextStack() {
+  B.k++;
+  if (B.cancelled || B.k >= B.stacks.length) return finishBatch();
+  const s = B.stacks[B.k]; s.status = 'running';
+  loadStack(s);
+  log(`[lapstack] batch ${B.k + 1}/${B.stacks.length}: ${st.files.length} frames, ${fileKey(st.files[0])} .. ${fileKey(st.files[st.files.length - 1])}`);
+  startRun();
+}
+// the stack in hand is stacked: save it, then the next (called from finishRun)
+async function stackDone() {
+  const s = B.stacks[B.k];
+  for (let i = 0; i < st.frames.length; i++) if (st.frames[i]) B.frames[s.lo + i] = st.frames[i];   // the aligned proxies, for the grouped list later
+  if (B.cancelled) { s.status = 'cancelled'; return finishBatch(); }
+  if (OUTPUTS.some((o) => o.avail() && SV.sel.has(o.id))) {
+    s.status = 'saving'; renderFilmstrip();
+    const f0 = st.files[0]; SV.exifFor = f0; SV.exif = await exifDate(f0);   // the name tokens read the stack's first frame
+    $('cancel').hidden = false;
+    const status = await saveSelected();
+    $('cancel').hidden = true;
+    s.status = status === 'saved' ? 'saved' : status === 'cancelled' ? 'cancelled' : 'save-failed'; s.files = SV.lastSaved || [];
+    if (status === 'cancelled') B.cancelled = true;
+  } else s.status = 'done';
+  nextStack();
+}
+function stackFailed(why) {
+  const s = B.stacks[B.k]; if (!s || s.status !== 'running') return;
+  s.status = why === 'cancelled' ? 'cancelled' : 'failed';
+  if (why === 'cancelled') B.cancelled = true;
+  nextStack();
+}
+function finishBatch() {
+  const n = B.stacks.length, saved = B.stacks.filter((s) => s.status === 'saved' || s.status === 'done').length, failed = B.stacks.filter((s) => /fail/.test(s.status)).length;
+  const secs = ((performance.now() - B.t0) / 1000).toFixed(1);
+  B.done = true;
+  const files = B.stacks.reduce((a, s) => a + (s.files ? s.files.length : 0), 0);
+  const text = `batch: ${n} stacks, ${saved} done, ${failed} failed${B.cancelled ? ', cancelled' : ''}, ${files} file${files === 1 ? '' : 's'} saved ${SV.dir ? `to "${SV.dir.name}"` : 'as downloads'}  (${secs}s)`;
+  log(`[lapstack] ${text}`); toast(text, failed || B.cancelled ? 0 : 12000);
+  for (const s of B.stacks) if (/fail/.test(s.status)) log(`[lapstack]   stack ${B.stacks.indexOf(s) + 1} (${fileKey(B.all[s.lo])} ..): ${s.status}`);
+  window.__batch_done = JSON.stringify({ ok: !failed && !B.cancelled, stacks: B.stacks.map((s) => ({ lo: s.lo, hi: s.hi, status: s.status, files: s.files })), secs });
+  renderFilmstrip(); runLabel(); updateTabs();
+}
+// every frame again, grouped into its stacks with what the batch made of them; the result goes
+function showAll() {
+  if (!B.all || st.running || SV.exporting) return;
+  st.files = B.all; st.frames = B.frames; B.all = null; B.frames = null; B.done = false;
+  st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); st.selected = 0;
+  st.step = 'stack'; gotoStep('stack'); setView('source'); renderFilmstrip(); runLabel(); updateTabs();
+}
 function endRun(status) {
   st.running = false; $('runwrap').hidden = false; $('cancel').hidden = true; $('clear').disabled = false;
   $('progress').className = status.startsWith('done') ? 'done' : 'error'; $('fill').style.width = '0';
@@ -340,6 +542,7 @@ function finishRun() {
   st.rendering = false;
   setView('fused');
   window.__app_done = JSON.stringify({ ok: true, w: st.result?.w, h: st.result?.h, frames: st.frameCount, dmap: !!(st.result && st.result.dmap), secs: ((performance.now() - st.t0) / 1000).toFixed(1) });
+  if (inBatch()) stackDone();
 }
 // the brightness gain of a frame, for the filmstrip: "×0.983", or the three channels when they differ; '' at unity
 function gainText(g) {
@@ -380,9 +583,9 @@ const OUTPUTS = [
 ];
 const MESH_DESC = { glb: 'glTF binary: the stacked image as a textured relief of its depth map, one file', obj: 'Wavefront OBJ + MTL + texture image: the textured relief as Helicon writes it, three files', stl: 'binary STL: the relief alone, no texture, for printing' };
 const MESH_MIME = { glb: 'model/gltf-binary', obj: 'model/obj', mtl: 'model/mtl', stl: 'model/stl', jpg: 'image/jpeg', png: 'image/png' };
-const SV = { sel: new Set(['lap']), exif: null, exifFor: null, exporting: false, cancel: false };
+const SV = { sel: new Set(['lap']), exif: null, exifFor: null, exporting: false, cancel: false, dir: null, lastSaved: [] };   // dir: the folder saved files go to (File System Access), null = downloads
 const SK = 'lapstack.save';
-const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'sv-meta', 'sv-crop', 'an-edge', 'an-fps', 'an-loop', 'v3-method', 'v3-src', 'v3-shift', 'v3-layout', 'v3-rock', 'v3-near', 'm3-format', 'm3-relief', 'm3-grid', 'm3-tex', 'cc-on', 'cc-name'];
+const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-first', 'fn-stack', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'sv-meta', 'sv-crop', 'an-edge', 'an-fps', 'an-loop', 'v3-method', 'v3-src', 'v3-shift', 'v3-layout', 'v3-rock', 'v3-near', 'm3-format', 'm3-relief', 'm3-grid', 'm3-tex', 'cc-on', 'cc-name'];
 const svSteps = ['an-step', 'v3-views'];   // the card's steppers (a number in a span between − and +)
 const svLive = ['sv-quality', 'sv-name', 'cc-name', 'v3-shift', 'v3-rock', 'm3-relief'];   // re-render on every input, not on change
 // The crop: the run reports the window every aligned frame covers with real pixels
@@ -416,69 +619,87 @@ function nameDate(name) {
   if (!m) return null;
   return `${m[1]}${m[2]}${m[3]}` + (m[4] ? `-${m[4]}${m[5]}${m[6] || '00'}` : '');
 }
-// EXIF DateTimeOriginal of a file: the TIFF structure inside a JPEG APP1, a TIFF, or a PNG eXIf
-// chunk — or, without one, the XMP packet's CreateDate (a JPEG APP1, TIFF tag 700, a PNG iTXt):
-// raw converters write TIFFs with XMP and no EXIF at all
-async function exifDate(file) {
+// Bytes of a File read on demand in 64 KB chunks, so the capture date of a 270 MB TIFF whose
+// IFD trails the pixels costs a few small reads and not the pixels.
+function chunked(file) {
+  const CH = 1 << 16, cache = new Map();
+  const chunk = async (k) => { let c = cache.get(k); if (!c) { c = new Uint8Array(await file.slice(k * CH, (k + 1) * CH).arrayBuffer()); cache.set(k, c); } return c; };
+  return async (off, len) => {   // [off, off + len) as a Uint8Array, short at the end of the file
+    if (off < 0 || off >= file.size) return new Uint8Array(0);
+    len = Math.min(len, file.size - off);
+    const out = new Uint8Array(len);
+    for (let p = off; p < off + len;) { const k = Math.floor(p / CH), c = await chunk(k), q = p - k * CH, n = Math.min(off + len - p, c.length - q); if (n <= 0) break; out.set(c.subarray(q, q + n), p - off); p += n; }
+    return out;
+  };
+}
+// The capture date of a file as EXIF writes it, "YYYY:MM:DD HH:MM:SS", or null: DateTimeOriginal,
+// else DateTimeDigitized, else DateTime — the TIFF structure inside a JPEG APP1, a TIFF, or a
+// PNG eXIf chunk — or, without one, the XMP packet's CreateDate (a JPEG APP1, TIFF tag 700, a
+// PNG iTXt): raw converters write TIFFs with XMP and no EXIF at all.
+async function captureDate(file) {
   try {
-    const u8 = new Uint8Array(await file.arrayBuffer()); const dv = new DataView(u8.buffer);
-    let t = -1, xmp = null;   // t: the TIFF structure's offset; xmp: [offset, length] of the packet
-    const isXmp = (p) => u8[p] === 0x68 && u8[p + 1] === 0x74 && u8[p + 2] === 0x74 && u8[p + 3] === 0x70 && u8[p + 28] === 0;   // "http://ns.adobe.com/xap/1.0/\0"
-    if (u8[0] === 0xFF && u8[1] === 0xD8) {
-      for (let p = 2; p + 4 < u8.length && u8[p] === 0xFF;) {
-        const mk = u8[p + 1], len = dv.getUint16(p + 2);
-        if (mk === 0xE1 && u8[p + 4] === 0x45 && u8[p + 5] === 0x78 && u8[p + 6] === 0x69 && u8[p + 7] === 0x66) { t = p + 10; if (xmp) break; }
-        else if (mk === 0xE1 && isXmp(p + 4)) { xmp = [p + 33, len - 31]; if (t >= 0) break; }
-        if (mk === 0xDA) break;
+    const get = chunked(file);
+    const u16 = (b, o, le) => le ? b[o] | b[o + 1] << 8 : b[o] << 8 | b[o + 1];
+    const u32 = (b, o, le) => le ? (b[o] | b[o + 1] << 8 | b[o + 2] << 16) + b[o + 3] * 16777216 : b[o] * 16777216 + (b[o + 1] << 16 | b[o + 2] << 8 | b[o + 3]);
+    const ascii = (b, o, n) => String.fromCharCode(...b.subarray(o, o + n));
+    const head = await get(0, 8);
+    let t = -1, xmp = null;   // t: the TIFF structure's offset in the file; xmp: [offset, length] of the packet
+    if (head[0] === 0xFF && head[1] === 0xD8) {
+      for (let p = 2; ;) {
+        const h = await get(p, 34); if (h.length < 4 || h[0] !== 0xFF) break;
+        const mk = h[1], len = u16(h, 2, false);
+        if (mk === 0xE1 && ascii(h, 4, 6) === 'Exif\0\0') { t = p + 10; if (xmp) break; }
+        else if (mk === 0xE1 && ascii(h, 4, 29) === 'http://ns.adobe.com/xap/1.0/\0') { xmp = [p + 33, len - 31]; if (t >= 0) break; }
+        if (mk === 0xDA || mk === 0xD9) break;
         p += 2 + len;
       }
-    } else if ((u8[0] === 0x49 && u8[1] === 0x49 && u8[2] === 42) || (u8[0] === 0x4D && u8[1] === 0x4D && u8[3] === 42)) t = 0;
-    else if (u8[0] === 0x89 && u8[1] === 0x50) {
-      for (let p = 8; p + 8 <= u8.length;) {
-        const len = dv.getUint32(p), type = String.fromCharCode(u8[p + 4], u8[p + 5], u8[p + 6], u8[p + 7]);
+    } else if ((head[0] === 0x49 && head[1] === 0x49 && head[2] === 42) || (head[0] === 0x4D && head[1] === 0x4D && head[3] === 42)) t = 0;
+    else if (head[0] === 0x89 && head[1] === 0x50) {
+      for (let p = 8; p + 8 <= file.size;) {
+        const h = await get(p, 30); if (h.length < 8) break;
+        const len = u32(h, 0, false), type = ascii(h, 4, 4);
         if (type === 'eXIf') { t = p + 8; if (xmp) break; }
-        else if (type === 'iTXt' && String.fromCharCode(...u8.subarray(p + 8, p + 25)) === 'XML:com.adobe.xmp' && u8[p + 26] === 0) { xmp = [p + 30, len - 22]; if (t >= 0) break; }   // uncompressed, empty language / translation
+        else if (type === 'iTXt' && h.length >= 27 && ascii(h, 8, 17) === 'XML:com.adobe.xmp' && h[26] === 0) { xmp = [p + 30, len - 22]; if (t >= 0) break; }   // uncompressed, empty language / translation
         if (type === 'IEND') break;
         p += 12 + len;
       }
     }
-    const xmpDate = () => {
+    const xmpDate = async () => {
       if (!xmp) return null;
-      const m = /CreateDate(?:="|>)(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/.exec(new TextDecoder().decode(u8.subarray(xmp[0], xmp[0] + xmp[1])));
-      return m ? `${m[1]}${m[2]}${m[3]}-${m[4]}${m[5]}${m[6]}` : null;
+      const m = /(?:CreateDate|DateTimeOriginal)(?:="|>)(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/.exec(new TextDecoder().decode(await get(xmp[0], Math.min(xmp[1], 1 << 20))));
+      return m ? `${m[1]}:${m[2]}:${m[3]} ${m[4]}:${m[5]}:${m[6]}` : null;
     };
     if (t < 0) return xmpDate();
-    const le = u8[t] === 0x49; const g16 = (o) => dv.getUint16(t + o, le), g32 = (o) => dv.getUint32(t + o, le);
-    const ifd = (off, want) => {
-      const out = {}; if (t + off + 2 > u8.length) return out;
-      const n = g16(off);
-      for (let i = 0; i < n; i++) {
-        const e = off + 2 + 12 * i; if (t + e + 12 > u8.length) break;
-        const tag = g16(e), type = g16(e + 2), cnt = g32(e + 4);
+    const th = await get(t, 8); const le = th[0] === 0x49;
+    // the wanted tags of the IFD at off (TIFF-relative): ASCII as a string, SHORT / LONG as a number, BYTE / UNDEFINED as [offset, count]
+    const ifd = async (off, want) => {
+      const out = {}; const nb = await get(t + off, 2); if (nb.length < 2) return out;
+      const n = u16(nb, 0, le), es = await get(t + off + 2, 12 * n);
+      for (let i = 0; i + 12 <= es.length; i += 12) {
+        const tag = u16(es, i, le), type = u16(es, i + 2, le), cnt = u32(es, i + 4, le);
         if (!want.includes(tag)) continue;
-        if (type === 2) { const p = cnt <= 4 ? e + 8 : g32(e + 8); out[tag] = String.fromCharCode(...u8.subarray(t + p, t + p + Math.min(cnt, 40))).replace(/\0[\s\S]*$/, ''); }
-        else out[tag] = type === 3 ? g16(e + 8) : g32(e + 8);
+        const p = cnt <= 4 ? t + off + 2 + i + 8 : t + u32(es, i + 8, le);
+        if (type === 2) { const b = await get(p, Math.min(cnt, 40)); out[tag] = ascii(b, 0, b.length).replace(/\0[\s\S]*$/, ''); }
+        else if (type === 1 || type === 7) out[tag] = [p, cnt];
+        else out[tag] = type === 3 ? u16(es, i + 8, le) : u32(es, i + 8, le);
       }
       return out;
     };
-    const ifd0 = ifd(g32(4), [0x0132, 0x8769]);
+    const ifd0 = await ifd(u32(th, 4, le), [0x0132, 0x8769, 700]);
     let dt = null;
-    if (ifd0[0x8769]) { const ex = ifd(ifd0[0x8769], [0x9003, 0x9004]); dt = ex[0x9003] || ex[0x9004]; }
+    if (ifd0[0x8769]) { const ex = await ifd(ifd0[0x8769], [0x9003, 0x9004]); dt = ex[0x9003] || ex[0x9004]; }
     dt = dt || ifd0[0x0132];
     const m = dt && /^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(dt);
-    if (m) return `${m[1]}${m[2]}${m[3]}-${m[4]}${m[5]}${m[6]}`;
-    // no EXIF date: a TIFF's XMP is tag 700 of IFD0 (BYTE or UNDEFINED, at the entry's offset)
-    if (t === 0 && !xmp) {
-      const off = g32(4), n = g16(off);
-      for (let i = 0; i < n; i++) {
-        const e = off + 2 + 12 * i; if (e + 12 > u8.length) break;
-        if (g16(e) === 700 && (g16(e + 2) === 1 || g16(e + 2) === 7)) { const cnt = g32(e + 4); xmp = [cnt <= 4 ? e + 8 : g32(e + 8), cnt]; break; }
-      }
-    }
+    if (m && m[1] !== '0000') return `${m[1]}:${m[2]}:${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
+    if (t === 0 && !xmp && Array.isArray(ifd0[700])) xmp = ifd0[700];   // a TIFF's XMP is tag 700 of IFD0 (BYTE or UNDEFINED, at the entry's offset)
     return xmpDate();
   } catch { return null; }
 }
-window.__svTest = { exifDate, nameDate, save: (kind, format, quality, meta, crop) => call({ type: 'save', kind, format, quality, meta, crop }),   // tests
+// the date as a file-name token, "YYYYMMDD-HHMMSS"
+async function exifDate(file) { const d = await captureDate(file); return d ? d.replace(/^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})$/, '$1$2$3-$4$5$6') : null; }
+// the date as seconds by the camera's clock (no time zone: only differences between frames are used)
+async function captureTime(file) { const m = /^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(await captureDate(file) || ''); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) / 1000 : null; }
+window.__svTest = { exifDate, nameDate, captureTime, stacksOf, SV, B, save: (kind, format, quality, meta, crop) => call({ type: 'save', kind, format, quality, meta, crop }),   // tests
                     mesh: (stem, format, extra) => { const m = m3(), v = v3(); return call({ type: 'mesh', stem, format, source: v.source, crop: v.crop, grid: m.grid, relief: m.relief, near: v.near, texture_edge: m.tex, texture: 'jpeg', quality: 90, ...(extra || {}) }); },
                     view: viewFrame, stereo: (format) => call({ type: 'view_stereo', ...v3(), format: format || 'png', quality: 90, meta: false }),
                     refold, refoldView: (index) => call({ type: 'refold_view', index }), refoldEnd: () => call({ type: 'refold_end' }),
@@ -490,6 +711,8 @@ function svName(o, now = new Date()) {
   if ($('fn-exif').checked && SV.exif) parts.push(SV.exif);
   if ($('fn-fname').checked && st.files[0]) { const d = nameDate(st.files[0].name); if (d) parts.push(d); }
   if ($('fn-now').checked) parts.push(stamp(now));
+  if ($('fn-first').checked && st.files[0]) { const c = clean(stemOf(st.files[0].name)); if (c) parts.push(c); }
+  if ($('fn-stack').checked && B.all) parts.push('s' + pad2(B.k + 1));
   const custom = clean($('sv-name').value); if (custom) parts.push(custom);
   if ($('fn-layer').checked) parts.push(o.token);
   return (parts.join('_') || 'stacked') + '.' + svExt(o);
@@ -548,6 +771,8 @@ async function renderSave() {
   $('fn-exif-val').textContent = SV.exif || (f0 ? 'none found' : '—'); $('fn-exif').disabled = !SV.exif;
   const nd = f0 ? nameDate(f0.name) : null; $('fn-fname-val').textContent = nd || 'none found'; $('fn-fname').disabled = !nd;
   $('fn-now-val').textContent = stamp(new Date());
+  $('fn-first-val').textContent = f0 ? clean(stemOf(f0.name)) || 'none' : '—'; $('fn-first').disabled = !f0;
+  $('fn-stack-val').textContent = B.all ? 's' + pad2(B.k + 1) : 'in a batch';
   const j = $('sv-format').value === 'jpeg'; $('sv-qrow').hidden = !j; $('sv-quality').hidden = !j;
   // metadata: what the engine found in the first frame (the run reads it); nothing found disables the box
   const mt = st.result.meta, have = !!(mt && (mt.exif || mt.icc || mt.xmp || mt.chrm));
@@ -663,12 +888,38 @@ async function winnerBitmap() {
 for (const id of svIds) $(id).addEventListener(svLive.includes(id) ? 'input' : 'change', () => { $('sv-qval').textContent = $('sv-quality').value; saveSaveSettings(); renderSave(); if (id === 'sv-crop') draw(); });
 document.querySelectorAll('#savecard [data-step]').forEach((b) => b.addEventListener('click', () => { const id = b.dataset.step; setStep(id, Number($(id).textContent) + Number(b.dataset.d)); saveSaveSettings(); renderSave(); }));
 $('sv-all').addEventListener('change', (e) => { for (const o of OUTPUTS) if (o.avail()) { if (e.target.checked) SV.sel.add(o.id); else SV.sel.delete(o.id); } saveSaveSettings(); renderSave(); });
-function downloadBlob(blob, name) {
+// a finished file: into the chosen folder when there is one, else a download
+async function downloadBlob(blob, name) {
   if (window.__saveHook) { window.__saveHook(blob, name); return; }   // tests collect the files instead of downloading
+  if (SV.dir) {
+    try {
+      const fh = await SV.dir.getFileHandle(name, { create: true }), w = await fh.createWritable();
+      await w.write(blob); await w.close();
+      log(`[lapstack] saved ${SV.dir.name}/${name} (${fmtMB(blob.size)})`);
+      return;
+    } catch (e) { log(`[lapstack] cannot write ${name} to the folder "${SV.dir.name}" (${e.message}); downloading it instead`); }
+  }
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 60000);
   log(`[lapstack] saved ${name} (${fmtMB(blob.size)})`);
 }
+// the destination: a folder picked with the File System Access API (Chrome, Edge), for the
+// batch and the Save step alike, until the page is reloaded
+async function pickDir() {
+  try { SV.dir = await window.showDirectoryPicker({ mode: 'readwrite' }); log(`[lapstack] saved files go to the folder "${SV.dir.name}"`); }
+  catch (e) { if (e.name !== 'AbortError') toast('Cannot open that folder: ' + e.message); }
+  renderDest();
+}
+function renderDest() {
+  const name = SV.dir ? `the folder "${SV.dir.name}"` : 'downloads';
+  $('p-dir-name').textContent = name; $('sv-dest').textContent = '→ ' + name;
+  $('p-dir-x').hidden = !SV.dir; $('sv-dir-x').hidden = !SV.dir;
+}
+if (window.showDirectoryPicker) {
+  for (const id of ['p-dir', 'sv-dir']) $(id).addEventListener('click', pickDir);
+  for (const id of ['p-dir-x', 'sv-dir-x']) $(id).addEventListener('click', () => { SV.dir = null; renderDest(); });
+} else { $('p-dir').hidden = true; $('sv-dir').hidden = true; $('p-dir-note').hidden = false; }
+renderDest();
 // one animation: frames composed here at the output size, encoded by the worker, streamed back
 async function renderAnim(o, progress) {
   const { ow, oh, seq, delay } = animPlan(o);
@@ -755,9 +1006,10 @@ async function signBlob(blob, o, name, mime) {
   return new Blob([r.bytes], { type: mime });
 }
 async function saveSelected() {
-  if (SV.exporting || !st.result || st.running) return;
+  if (SV.exporting || !st.result || st.running) return 'skipped';
   const items = OUTPUTS.filter((o) => o.avail() && SV.sel.has(o.id));
-  if (!items.length) return;
+  if (!items.length) return 'skipped';
+  const saved = []; SV.lastSaved = saved;
   SV.exporting = true; SV.cancel = false; updateSaveButtons(); $('run').disabled = true; $('clear').disabled = true;
   const now = new Date(), fmt = $('sv-format').value, q = Number($('sv-quality').value), sign = $('cc-on').checked;
   const setState = (o, t) => { const row = $('sv-files').querySelector(`[data-id="${o.id}"] .state`); if (row) row.textContent = t; };
@@ -773,7 +1025,7 @@ async function saveSelected() {
         const m = m3(), v = v3();
         const r = await call({ type: 'mesh', stem: name.slice(0, name.lastIndexOf('.')), format: m.format, source: v.source, crop: v.crop, grid: m.grid, relief: m.relief, near: v.near, texture_edge: m.tex, texture: fmt === 'jpeg' ? 'jpeg' : 'png', quality: q });
         let total = 0;
-        for (const f of r.files) { const b = new Blob([f.bytes], { type: MESH_MIME[f.name.slice(f.name.lastIndexOf('.') + 1)] || 'application/octet-stream' }); downloadBlob(b, f.name); total += b.size; }
+        for (const f of r.files) { const b = new Blob([f.bytes], { type: MESH_MIME[f.name.slice(f.name.lastIndexOf('.') + 1)] || 'application/octet-stream' }); await downloadBlob(b, f.name); saved.push(f.name); total += b.size; }
         setState(o, `saved · ${fmtMB(total)}${r.files.length > 1 ? ` in ${r.files.length} files` : ''}`);
         continue;
       }
@@ -796,7 +1048,7 @@ async function saveSelected() {
         mime = f === 'jpeg' ? 'image/jpeg' : 'image/png'; blob = new Blob([r.bytes], { type: mime });
       }
       if (sign) { prog(`signing ${name}`, 0, 0); setState(o, 'signing…'); blob = await signBlob(blob, o, name, mime); }
-      downloadBlob(blob, name); setState(o, `saved · ${fmtMB(blob.size)}`);
+      await downloadBlob(blob, name); saved.push(name); setState(o, `saved · ${fmtMB(blob.size)}`);
     }
   } catch (e) {
     status = SV.cancel ? 'cancelled' : 'error';
@@ -806,6 +1058,7 @@ async function saveSelected() {
   SV.exporting = false; $('run').disabled = !st.files.length; $('clear').disabled = false;
   $('progress').className = status === 'saved' ? 'done' : 'error'; $('fill').style.width = '0'; setStatus(status);
   $('sv-progress').textContent = ''; updateSaveButtons();
+  return status;
 }
 $('sv-go').addEventListener('click', saveSelected);
 $('sv-cancel').addEventListener('click', () => { SV.cancel = true; worker.postMessage({ type: 'refold_cancel' }); });
