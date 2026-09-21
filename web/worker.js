@@ -236,7 +236,7 @@ async function handle(m) {
         post({ type: 'stage', text: `decoding ${f.name}`, done: i, total: m.files.length });
         const bytes = new Uint8Array(await next);
         next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
-        const r = await engine.push(bytes, params);
+        const r = await engine.push(bytes, params, m.sims && m.sims[i] ? new Float64Array(m.sims[i]) : new Float64Array(0));   // a project's registration, or the search
         const peak = r.peak;
         const [proxy, strip] = await proxyBitmaps(r.proxy.buffer, r.proxy_w, r.proxy_h);
         post({ type: 'frame', index: r.index, name: f.name, w: r.w, h: r.h, bits: r.bits, proxy, strip,
@@ -288,6 +288,39 @@ async function handle(m) {
         post({ type: 'done2', w: r.w, h: r.h, rgba: r.rgba.buffer, ms: performance.now() - t1 }, [r.rgba.buffer]);
       }
       running = false;
+    } else if (m.type === 'replay') {
+      // A project's retouch strokes applied again, in order, to the run just made: each
+      // stroke's source is brought back first — the frame decoded and warped (load_source),
+      // the slab fused (slab_begin … slab_finish) — then the stroke goes through the engine
+      // like a live one, and its patch reaches the page the same way. m.strokes: [{target,
+      // from, index?, lo?, hi?, dabs}], m.files: the frames in order.
+      if (running) return;
+      let done = 0, skipped = 0;
+      for (const s of m.strokes) {
+        post({ type: 'stage', text: `retouch ${done + skipped + 1}/${m.strokes.length}`, done: done + skipped, total: m.strokes.length });
+        try {
+          if (s.from === 'source') {
+            if (engine.source_index() !== s.index) await engine.load_source(s.index, new Uint8Array(await m.files[s.index].arrayBuffer()), true);
+          } else if (s.from === 'slab') {
+            const r = engine.slab_range();
+            if (!(r[0] === s.lo && r[1] === s.hi)) {
+              engine.slab_begin(s.lo, s.hi);
+              for (let i = s.lo; i <= s.hi; i++) await engine.slab_push(i, new Uint8Array(await m.files[i].arrayBuffer()));
+              await engine.slab_finish();
+            }
+          }
+          const r = engine.stroke(new Float32Array(s.dabs), s.target, s.from);
+          const hist = engine.history();
+          if (r) { const rgba = r.rgba; post({ type: 'patch', target: r.target, x: r.x, y: r.y, w: r.w, h: r.h, rgba: rgba.buffer, undo: hist[0], redo: hist[1], replay: true }, [rgba.buffer]); }
+          else post({ type: 'patch', x: 0, y: 0, w: 0, h: 0, rgba: null, undo: hist[0], redo: hist[1], replay: true });
+          done++;
+        } catch (e) {   // its source is not to be had: the stroke is skipped, with the empty patch every stroke answers with (the page's history keeps step)
+          skipped++; const hist = engine.history();
+          post({ type: 'patch', x: 0, y: 0, w: 0, h: 0, rgba: null, undo: hist[0], redo: hist[1], replay: true });
+          post({ type: 'debug', text: `replay: stroke ${done + skipped} skipped: ${(e && e.message) || e}` });
+        }
+      }
+      post({ type: 'replayed', done, skipped });
     } else if (m.type === 'keep') {
       // the run's LAP or DFR master becomes a kept result (the page sends this before the
       // next run, or when it lets a result go): the engine takes it out of the run

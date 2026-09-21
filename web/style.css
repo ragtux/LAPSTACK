@@ -60,6 +60,8 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #filmstrip .empty { padding: 12px; text-align: center; }
 .thumb { border: 2px solid transparent; border-radius: 4px; padding: 3px; cursor: pointer; background: var(--widget); position: relative; }
 /* an excluded frame: dashed, dimmed, in its place; its tools stay visible so the way back is seen */
+.thumb.missing .ph { color: #e66; font-size: var(--fs-xs); }   /* a project's frame not yet found */
+.fs-batch .bad { color: #e66; }
 .thumb.off { border-style: dashed; border-color: var(--border); cursor: default; }
 .thumb.off canvas, .thumb.off .ph, .thumb.off .name { opacity: .4; }
 .thumb.dragging { opacity: .35; }

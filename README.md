@@ -600,6 +600,34 @@ stacks are saved as they finish (the result on screen when a batch starts
 is kept). With no run's result on hand the Stack group and the Save step
 still open on the kept ones.
 
+**Project files** (*Open project…* / *Save project…* in the toolbar): a
+project is one JSON file, `<name>.lapstack.json`, holding what it takes to
+come back to a session — the frames (names, paths, sizes, which are
+excluded), every setting of the panel and the Save step, the last run's
+registration (each frame's shift, scale and rotation, as the filmstrip
+shows them) and its retouch strokes (target, source and dabs, kept in step
+with undo and redo). The images are not in it: a result is saved as a file,
+or loaded again as a kept result. Opening a project clears the session and
+puts placeholders in the filmstrip, in the project's order; the frames come
+from the folders the browser remembers — *Add folder…* and a dropped folder
+go through the File System Access API in Chrome and Edge, and the folder's
+handle is stored in the browser (IndexedDB) under an id the project names,
+so the banner over the filmstrip offers *open folder "shoot"* and, once
+reading is allowed, the frames are read from it — or they are added by
+hand and matched by name and size (files not in the project are left out).
+*Run* then makes the stack again with the registration as it was: the
+frames' transforms go to the engine (`push` takes them) and the alignment
+search, most of a frame's time, is skipped (*reuse the project's
+registration* in the Run menu turns that off; a changed frame list turns it
+off by itself), and the retouch strokes are painted again in order, each
+from its source brought back — a frame decoded and warped, a slab fused,
+the other stacked image, a kept result of the same label if one is loaded —
+through the worker's `replay`, so the retouched image comes back pixel for
+pixel (`web/test/headless.mjs` with a project script checks it). A stroke
+whose source is not on hand is left out and the log says why. Saving again
+after the run writes this session's run and strokes; saving before it keeps
+the project's own.
+
 **Depth slice**: with `slice` on, the Depth view (gray or Turbo) paints a
 60 % magenta band over the pixels the depth map assigns to the scrubbed
 frame (rounded), so scrolling through the stack sweeps the band through the

@@ -77,6 +77,7 @@ const st = {
   off: [],              // excluded frames, {f, fr, at}: the file, its thumb entry, and the index of st.files it sits before (see frameList)
   frames: [],           // per processed frame: {name, w, h, proxy: ImageBitmap, sim}
   result: null,         // {w, h, bits, fused: OffscreenCanvas, dmap: OffscreenCanvas|null, depth: Float32Array, dw, dh, winner: Float32Array, ww, wh}
+  dirs: [],             // folders opened through the File System Access API, {id, name, handle}: a frame's f.dir, remembered for a project
   kept: [],             // results kept past their run, see keepResult: {id, kind, label, w, h, bits, canvas, crop, meta, params, frames, first, last, secs, when}
   runs: 0,              // runs started this session: a kept result is named after its run
   depthBmp: new Map(),  // 'lut' -> ImageBitmap of the depth map (gray | turbo)
@@ -94,8 +95,13 @@ const st = {
              gpuIndex: -1, prefetch: -1, ahead: null, dir: 1, lastSel: -1,     // see ensureSource(): the frame the worker holds on the GPU, the one being prefetched, the read-ahead slot, the scrub direction
              slab: null, slabLoading: null, slabProgress: null, slabGen: 0, slabGenMin: 0 },   // see ensureSlab(): the slab held ({lo, hi, canvas}), the one being built ({lo, hi, gen}), its progress
 };
+// The project open (see the project files section): its run to make again ({params, frames: names, sims, …},
+// runFrames: those names for the replay), its strokes to paint again, how many frames are still to add,
+// and its folders ({id, name, handle, state}).
+const PJ = { name: null, run: null, runFrames: null, strokes: [], missing: 0, dirs: [] };
 window.__st = st; window.__draw = () => draw();
 // more hooks for the headless harness (web/test/headless.mjs)
+window.__addFiles = (l) => addFiles(l); window.__projectData = () => projectData().data; window.__openProject = (f) => openProject(f); window.__PJ = PJ; window.__R = st.retouch;
 window.__gotoStep = (s) => gotoStep(s); window.__call = (m) => call(m); window.__loadKeptFile = (f) => loadKeptFile(f); window.__setStep = (id, v) => setStep(id, v); window.__updateTabs = () => updateTabs(); window.__imageDims = () => imageDims();
 // The batch: the frame list cut into stacks (stacksOf), run in turn. While one is in hand
 // `all` holds every file and st.files the stack being run; `stacks` keeps each stack's
@@ -219,6 +225,7 @@ worker.onmessage = (ev) => {
     case 'slab-progress': onSlabProgress(m); break;
     case 'refold-progress': setProgress(m.text, m.done, m.total); $('sv-progress').textContent = m.text; break;
     case 'patch': onPatch(m); break;
+    case 'replayed': endRun(`done, ${m.done} retouch stroke${m.done === 1 ? '' : 's'} painted again${m.skipped ? `, ${m.skipped} skipped` : ''}`); log(`[lapstack] project retouch: ${m.done} strokes painted again${m.skipped ? `, ${m.skipped} skipped (see the worker's notes above)` : ''}`); renderFilmstrip(); finishRun(); break;
     case 'thumb-error': log(`[lapstack] cannot decode ${m.name}: ${m.text}`); break;
     case 'done': onDone(m); break;
     case 'done2': onDone2(m); break;
@@ -254,13 +261,14 @@ function addFiles(list) {
   const files = [...list].filter((f) => /\.(png|jpe?g|tiff?)$/i.test(f.name)).sort((a, b) => fileKey(a).localeCompare(fileKey(b), undefined, { numeric: true }));
   if (!files.length) return;
   if (st.running || SV.exporting) { toast('Frames can be added once the run or save in progress is done.'); return; }
+  if (PJ.missing) return fillProject(files);   // a project is open: the files stand in for its frames
   for (const f of files) f.uid = ++fileUid;
   if (B.all && !st.running) showAll();   // a batch's stack is on screen: the new frames join the whole list
   B.stacks = [];
   st.files.push(...files);
   ensureTimes();
   renderFilmstrip(); runLabel();
-  $('run').disabled = st.running || !st.files.length;
+  $('run').disabled = st.running || !st.files.length; $('pj-save').disabled = false;
   $('tab-source').disabled = false;
   if (st.view === 'source') draw();
   log(`[lapstack] ${files.length} frame(s) added (${st.files.length} total)`);
@@ -275,6 +283,7 @@ let timesPending = 0;
 function ensureTimes() {
   for (const f of (B.all || st.files)) {
     if (f.ctime !== undefined || f.ctimeReading) continue;
+    if (f.missing) { f.ctime = null; continue; }   // a project's frame not found yet
     f.ctimeReading = true; timesPending++;
     captureTime(f).then((t) => { f.ctime = t; }, () => { f.ctime = null; }).then(() => { if (--timesPending === 0) { runLabel(); renderFilmstrip(); } });
   }
@@ -297,9 +306,18 @@ function stacksOf(files) {
 // a dropped folder: its files, walked through the entries API (the entries must be taken
 // before the event returns; the walk itself can wait)
 function droppedFiles(dt) {
-  const entries = [...(dt.items || [])].map((it) => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean);
+  const items = [...(dt.items || [])];
+  const handles = items.map((it) => (it.kind === 'file' && it.getAsFileSystemHandle) ? it.getAsFileSystemHandle().catch(() => null) : null);   // taken now: the event is over once we wait
+  const entries = items.map((it) => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean);
   if (!entries.some((e) => e.isDirectory)) return Promise.resolve([...dt.files]);
   const out = [];
+  // with handles (Chrome, Edge) the folders are walked through them and remembered (see addDirHandle)
+  if (handles.some(Boolean)) return (async () => {
+    const hs = await Promise.all(handles);
+    if (!hs.some((h) => h && h.kind === 'directory')) return [...dt.files];
+    for (const h of hs) { if (!h) continue; if (h.kind === 'directory') await walkHandle(h, h.name + '/', out, remember(h)); else { const f = await h.getFile(); f.relPath = f.name; out.push(f); } }
+    return out;
+  })();
   const walk = async (e, prefix) => {
     if (e.isFile) { const f = await new Promise((res, rej) => e.file(res, rej)); f.relPath = prefix + f.name; out.push(f); }
     else if (e.isDirectory) {
@@ -330,7 +348,7 @@ function onThumb(m) {
   if (st.view === 'source' && st.selected === i) draw();
 }
 async function makeThumb(f) {
-  if (!/\.(png|jpe?g)$/i.test(f.name)) return; // the browser cannot decode TIFF; the run supplies a proxy
+  if (f.missing || !/\.(png|jpe?g)$/i.test(f.name)) return; // the browser cannot decode TIFF; the run supplies a proxy
   try {
     const bmp = await createImageBitmap(f, { resizeWidth: 320, resizeQuality: 'medium' });
     const i = st.files.indexOf(f);
@@ -342,6 +360,7 @@ async function makeThumb(f) {
 function renderFilmstrip() {
   const fs = $('filmstrip'); fs.innerHTML = '';
   if (B.all) fs.appendChild(batchBanner());
+  if (PJ.name && (PJ.missing || PJ.run || PJ.strokes.length)) fs.appendChild(projectBanner());
   if (!st.files.length && !st.off.length) { fs.insertAdjacentHTML('beforeend', '<div class="empty dim">Add frames, or drop them here.</div>'); return; }
   if (!B.all) fs.appendChild(frameTools());
   // the split's stacks head their frames (one stack, or a batch's stack in hand, has no header)
@@ -393,7 +412,7 @@ function renderThumb(i) {
 // the thumb of the run's frame i, or (i = -1) of the excluded entry o (see frameList)
 function thumbEl(i, o = null) {
   const f = o ? o.f : st.files[i];
-  const d = document.createElement('div'); d.className = 'thumb' + (!o && i === st.selected && scrubbable() ? ' sel' : '') + (o ? ' off' : ''); d.dataset.uid = f.uid; if (!o) d.dataset.i = i;
+  const d = document.createElement('div'); d.className = 'thumb' + (!o && i === st.selected && scrubbable() ? ' sel' : '') + (o ? ' off' : '') + (f.missing ? ' missing' : ''); d.dataset.uid = f.uid; if (!o) d.dataset.i = i;
   if (!o && R.on && brushFrom() === 'slab') { const [lo, hi] = slabWanted(); if (i >= lo && i <= hi) d.classList.add('slab'); }   // the frames the brush source is fused from
   const fr = o ? o.fr : st.frames[i];
   const bmp = fr && (fr.strip || fr.thumb);
@@ -406,7 +425,7 @@ function thumbEl(i, o = null) {
     g.drawImage(bmp, ...r);
     if (peaking) { g.filter = 'none'; g.drawImage(peakThumb(fr, Math.round(r[2]), Math.round(r[3])), r[0], r[1]); }
     d.appendChild(c);
-  } else { const ph = document.createElement('div'); ph.className = 'ph'; ph.textContent = fr ? '…' : o ? '' : String(i); d.appendChild(ph); }
+  } else { const ph = document.createElement('div'); ph.className = 'ph'; ph.textContent = fr ? '…' : f.missing ? 'missing' : o ? '' : String(i); d.appendChild(ph); }
   const n = document.createElement('div'); n.className = 'name'; n.textContent = f.name; n.title = fileKey(f); d.appendChild(n);
   if (fr && fr.sim) { const s = document.createElement('div'); s.className = 'sim'; s.textContent = `${fr.sim[0].toFixed(1)}, ${fr.sim[1].toFixed(1)} px · ×${fr.sim[2].toFixed(4)} · ${fr.sim[3].toFixed(2)}°`; d.appendChild(s); }
   // the brightness gain on its own line (the registration line fills the column), only when there is one
@@ -431,9 +450,16 @@ function thumbEl(i, o = null) {
 }
 $('add').addEventListener('click', () => $('file').click());
 $('file').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
-$('addf').addEventListener('click', () => $('dir').click());
+$('addf').addEventListener('click', () => { if (window.showDirectoryPicker) showDirectoryPicker({ mode: 'read' }).then(addDirHandle).catch((e) => { if (e.name !== 'AbortError') toast('Cannot open that folder: ' + e.message); }); else $('dir').click(); });
 $('dir').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
-$('clear').addEventListener('click', () => { if (st.running || SV.exporting) return; setPick(false); worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.off = []; st.result = null; dropAllKept(); st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); B.all = null; B.frames = null; B.stacks = []; B.done = false; st.step = 'stack'; gotoStep('stack'); renderFilmstrip(); runLabel(); updateTabs(); setView('source'); });
+function clearAll() {
+  if (st.running || SV.exporting) return false;
+  setPick(false); worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.off = []; st.result = null; dropAllKept(); st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); B.all = null; B.frames = null; B.stacks = []; B.done = false;
+  PJ.name = null; PJ.run = null; PJ.strokes = []; PJ.missing = 0; PJ.dirs = []; $('pj-reuse-row').hidden = true; $('pj-save').disabled = true;
+  st.step = 'stack'; gotoStep('stack'); renderFilmstrip(); runLabel(); updateTabs(); setView('source');
+  return true;
+}
+$('clear').addEventListener('click', clearAll);
 document.addEventListener('dragover', (e) => { if (fsDrag !== null) return; e.preventDefault(); document.body.classList.add('drop'); });
 document.addEventListener('dragleave', () => document.body.classList.remove('drop'));
 document.addEventListener('drop', (e) => { if (fsDrag !== null) return; e.preventDefault(); document.body.classList.remove('drop'); if (!st.running) droppedFiles(e.dataTransfer).then(addFiles); });
@@ -636,6 +662,164 @@ $('filmstrip').addEventListener('dragover', (e) => {
 });
 $('filmstrip').addEventListener('drop', (e) => { if (fsDrag === null) return; e.preventDefault(); e.stopPropagation(); if (dropMark) dropFrame(fsDrag, dropMark); fsDrag = null; clearDropMark(); });
 
+// ---------- folders (File System Access API: Chrome, Edge) ----------
+// Add folder… goes through the picker when the browser has one, and a dropped folder's handle
+// is taken too, so the folder can be remembered for a project (IndexedDB 'lapstack' / 'dirs',
+// by an id the project file names); each frame keeps its folder (f.dir) and its path in it
+// (f.relPath). Without handles the frames of a project are added by hand and matched by name.
+function remember(h) { const dir = { id: crypto.randomUUID(), name: h.name, handle: h }; st.dirs.push(dir); return dir; }
+async function walkHandle(h, prefix, out, dir) {
+  for await (const [name, e] of h.entries()) {
+    if (e.kind === 'file') { const f = await e.getFile(); f.relPath = prefix + name; f.dir = dir; out.push(f); }
+    else if (e.kind === 'directory') await walkHandle(e, prefix + name + '/', out, dir);
+  }
+}
+async function addDirHandle(h) { const out = []; await walkHandle(h, h.name + '/', out, remember(h)); addFiles(out); }
+const idb = () => new Promise((res, rej) => { const r = indexedDB.open('lapstack', 1); r.onupgradeneeded = () => r.result.createObjectStore('dirs'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+async function idbPut(id, v) { const db = await idb(); await new Promise((res, rej) => { const t = db.transaction('dirs', 'readwrite'); t.objectStore('dirs').put(v, id); t.oncomplete = res; t.onerror = () => rej(t.error); }); }
+async function idbGet(id) { const db = await idb(); return new Promise((res, rej) => { const r = db.transaction('dirs').objectStore('dirs').get(id); r.onsuccess = () => res(r.result || null); r.onerror = () => rej(r.error); }); }
+
+// ---------- project files ----------
+// A project is one JSON file, <name>.lapstack.json: the frames (names, paths, sizes; which are
+// excluded), every setting of the panel and the Save step, the last run's registration (each
+// frame's shift, scale and rotation) and its retouch strokes (target, source, dabs) — what it
+// takes to come back to a session. Opening it puts placeholders in the filmstrip; the frames
+// come from the folders the browser remembers (a button per folder asks for the permission),
+// or are added by hand and matched by name and size. Run then repeats the stack with the
+// registration as it was (no search: most of a frame's time), and the strokes are painted
+// again in order, each from its source brought back — a frame decoded and warped, a slab
+// fused, the other result, a kept result of the same label. The images are not in the file:
+// a result is saved as a file, or loaded again as a kept result.
+const strokeRecord = () => {   // the stroke about to be sent, as the project keeps it
+  const from = brushFrom(), rec = { target: target(), from: from.startsWith('kept:') ? 'kept' : from, dabs: Array.from(R.dabs, (v, i) => (i % 4 === 3 ? Math.round(v * 1000) / 1000 : Math.round(v * 10) / 10)) };
+  if (from === 'source') rec.index = st.selected;
+  else if (from === 'slab') { const [lo, hi] = R.slab ? [R.slab.lo, R.slab.hi] : slabWanted(); rec.lo = lo; rec.hi = hi; }
+  else if (rec.from === 'kept') rec.label = keptOf(from).label;
+  return rec;
+};
+function sendHistory(op) { R.ops.push({ op }); worker.postMessage({ type: op }); }
+function projectData() {
+  const dirs = [], dirIx = (f) => { if (!f.dir) return null; let i = dirs.indexOf(f.dir); if (i < 0) { i = dirs.length; dirs.push(f.dir); } return i; };
+  const frames = frameList().map((e) => ({ name: e.f.name, path: e.f.relPath || e.f.webkitRelativePath || e.f.name, size: e.f.size, modified: e.f.lastModified, dir: dirIx(e.f), ...(e.on ? {} : { off: true }) }));
+  const r = st.result;
+  const run = r ? { params: r.params, frames: st.files.map((f) => f.name), w: r.w, h: r.h, bits: r.bits, sims: st.frames.map((f) => (f && f.sim) || null), gains: st.frames.map((f) => (f && f.gain) || null), dmap: !!r.dmap, secs: r.secs, when: r.when } : PJ.run;   // no result of this session: the project's own run stays, with its strokes
+  const data = { lapstack_project: 1, saved: new Date().toISOString(), name: PJ.name, frames, dirs: dirs.map((d) => ({ id: d.id, name: d.name })), params: readParams(), save: saveSettingsData(), run, strokes: r ? R.strokes : PJ.strokes };
+  return { data, dirs };
+}
+async function saveProject() {
+  if (!st.files.length && !st.off.length) return;
+  const { data, dirs } = projectData();
+  if (!PJ.name) PJ.name = clean(stemOf((st.files[0] || st.off[0].f).name)) || 'stack';
+  data.name = PJ.name;
+  const name = `${PJ.name}.lapstack.json`, blob = new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' });
+  for (const d of dirs) await idbPut(d.id, d.handle).catch((e) => log(`[lapstack] cannot remember the folder "${d.name}": ${e.message}`));
+  const what = `${data.frames.length} frames, ${data.run ? 'the registration' : 'no run'}, ${data.strokes.length} retouch stroke${data.strokes.length === 1 ? '' : 's'}`;
+  if (window.showSaveFilePicker && !window.__saveHook) {
+    try {
+      const fh = await showSaveFilePicker({ suggestedName: name, types: [{ description: 'lapstack project', accept: { 'application/json': ['.json'] } }] });
+      const w = await fh.createWritable(); await w.write(blob); await w.close();
+      log(`[lapstack] project saved as ${fh.name}: ${what}`); return;
+    } catch (e) { if (e.name === 'AbortError') return; log(`[lapstack] cannot write the project there (${e.message}); downloading it instead`); }
+  }
+  await downloadBlob(blob, name);
+  log(`[lapstack] project ${name}: ${what}`);
+}
+async function openProject(file) {
+  if (st.running || SV.exporting) { toast('A project can be opened once the run or save in progress is done.'); return; }
+  let p = null;
+  try { p = JSON.parse(await file.text()); } catch {}
+  if (!p || p.lapstack_project !== 1 || !Array.isArray(p.frames)) { toast(`${file.name} is not a lapstack project file.`); return; }
+  if (!clearAll()) return;
+  PJ.name = p.name || stemOf(file.name).replace(/\.lapstack$/i, ''); PJ.run = p.run && Array.isArray(p.run.frames) ? p.run : null; PJ.strokes = Array.isArray(p.strokes) ? p.strokes : [];
+  PJ.dirs = (p.dirs || []).map((d) => ({ id: d.id, name: d.name, handle: null, state: 'none' }));
+  applyParams({ ...readParams(), ...(p.params || {}) }); saveParams(); applySaveSettings(p.save); saveSaveSettings();
+  // placeholders for the frames, in their order, until the files are found
+  setFrameList(p.frames.map((fr) => ({ f: { name: String(fr.name), relPath: fr.path || fr.name, size: fr.size, lastModified: fr.modified, dirIx: fr.dir, missing: true, uid: ++fileUid }, fr: undefined, on: !fr.off })));
+  PJ.missing = p.frames.length;
+  $('pj-reuse-row').hidden = !PJ.run; $('pj-save').disabled = false;
+  log(`[lapstack] project ${PJ.name}: ${p.frames.length} frames${PJ.run ? `, the registration of a run of ${PJ.run.frames.length}` : ''}, ${PJ.strokes.length} retouch stroke${PJ.strokes.length === 1 ? '' : 's'}${p.saved ? `, saved ${p.saved.slice(0, 16).replace('T', ' ')}` : ''}`);
+  // the folders this browser remembers: read at once where the permission still holds, else a button asks
+  for (const d of PJ.dirs) {
+    try { d.handle = await idbGet(d.id); } catch {}
+    if (!d.handle) continue;
+    d.state = 'ask';
+    try { if ((await d.handle.queryPermission({ mode: 'read' })) === 'granted') await openDir(d); } catch {}
+  }
+  renderFilmstrip(); runLabel(); updateTabs(); setView('source');
+}
+async function openDir(d) {   // a remembered folder's frames, for the project's placeholders
+  try { if ((await d.handle.queryPermission({ mode: 'read' })) !== 'granted' && (await d.handle.requestPermission({ mode: 'read' })) !== 'granted') { d.state = 'denied'; renderFilmstrip(); return; } }
+  catch (e) { d.state = 'denied'; log(`[lapstack] folder "${d.name}": ${e.message}`); renderFilmstrip(); return; }
+  d.state = 'open';
+  const dir = { id: d.id, name: d.handle.name, handle: d.handle }; st.dirs.push(dir);
+  const out = []; await walkHandle(d.handle, d.handle.name + '/', out, dir);
+  if (PJ.missing) fillProject(out); else renderFilmstrip();
+}
+// the files stand in for the project's placeholders they match — by name and size, the path
+// deciding between twins — and the rest are left out
+function fillProject(files) {
+  const list = frameList(), taken = new Set(); let found = 0, extra = 0;
+  for (const f of files) {
+    const cands = list.filter((e) => e.f.missing && !taken.has(e) && e.f.name === f.name && (!e.f.size || e.f.size === f.size));
+    const e = cands.find((e) => e.f.relPath === (f.relPath || f.webkitRelativePath || f.name)) || cands[0];
+    if (!e) { extra++; continue; }
+    f.uid = e.f.uid; if (!f.relPath && e.f.relPath !== e.f.name) f.relPath = e.f.relPath; e.f = f; taken.add(e); found++;
+  }
+  setFrameList(list); PJ.missing = list.filter((e) => e.f.missing).length;
+  const added = [...taken].map((e) => e.f);
+  ensureTimes(); renderFilmstrip(); runLabel(); $('run').disabled = st.running || !st.files.length; $('tab-source').disabled = !st.files.length;
+  if (st.view === 'source') draw();
+  for (const f of added) makeThumb(f);
+  if (added.length) worker.postMessage({ type: 'thumbs', files: added, indices: added.map((f) => st.files.indexOf(f)), uids: added.map((f) => f.uid), edge: readParams().proxy_edge });
+  log(`[lapstack] project ${PJ.name}: ${found} frame${found === 1 ? '' : 's'} found${extra ? `, ${extra} file${extra === 1 ? '' : 's'} not in the project left out` : ''}${PJ.missing ? `, ${PJ.missing} still missing` : ' — all of them'}`);
+}
+// the project's registration for the run about to start: only for its own frames, in its order
+function projectSims() {
+  const r = PJ.run; if (!r || !Array.isArray(r.sims) || !$('p-align').checked || !$('pj-reuse').checked) return null;
+  if (r.frames.length !== st.files.length || r.frames.some((n, i) => n !== st.files[i].name) || r.sims.some((s) => !Array.isArray(s) || s.length !== 4)) return null;
+  return r.sims;
+}
+// the project's strokes painted again onto the run just made (the worker's 'replay'); the ones
+// whose source is not on hand are left out and said so
+function replayStrokes() {
+  const strokes = PJ.strokes; PJ.strokes = [];
+  const same = !!PJ.runFrames && PJ.runFrames.length === st.files.length && PJ.runFrames.every((n, i) => n === st.files[i].name);
+  const send = [], why = [];
+  for (const s of strokes) {
+    if (!s || !Array.isArray(s.dabs) || !s.dabs.length) continue;
+    const rec = { ...s };
+    if (s.target === 'dmap' && !haveDmap()) { why.push('DFR was not rendered'); continue; }
+    if (s.from === 'source' || s.from === 'slab') { if (!same) { why.push('the frames are not the run\'s'); continue; } if (s.from === 'source' ? !st.files[s.index] : !(st.files[s.lo] && st.files[s.hi] && s.lo <= s.hi)) { why.push('a frame is out of range'); continue; } }
+    else if (s.from === 'dmap' || s.from === 'fused') { if (s.from === 'dmap' && !haveDmap()) { why.push('DFR was not rendered'); continue; } }
+    else if (s.from === 'kept') { const k = st.kept.find((k) => k.label === s.label); if (!k || !keptUsable(k)) { why.push(`no kept result "${s.label}"`); continue; } rec.from = keptId(k); }
+    else { why.push(`unknown source ${s.from}`); continue; }
+    send.push(rec);
+  }
+  if (why.length) log(`[lapstack] project retouch: ${why.length} stroke${why.length === 1 ? '' : 's'} left out (${[...new Set(why)].join('; ')})`);
+  if (!send.length) { finishRun(); return; }
+  for (const s of send) R.ops.push({ op: 'stroke', rec: { ...s, from: s.from.startsWith('kept:') ? 'kept' : s.from } });
+  st.running = true; $('runwrap').hidden = true; $('clear').disabled = true; setProgress('retouch', 0, send.length);
+  log(`[lapstack] project retouch: painting ${send.length} stroke${send.length === 1 ? '' : 's'} again …`);
+  worker.postMessage({ type: 'replay', strokes: send, files: st.files });
+}
+// the banner over the filmstrip while a project is being put back together
+function projectBanner() {
+  const d = document.createElement('div'); d.className = 'fs-batch';
+  const n = st.files.length + st.off.length, line = document.createElement('div'), b = document.createElement('b'); b.textContent = `Project ${PJ.name}`; line.appendChild(b);
+  line.appendChild(document.createTextNode(` · ${n} frame${n === 1 ? '' : 's'}${st.off.length ? `, ${st.off.length} off` : ''}`));
+  if (PJ.missing) { const s = document.createElement('span'); s.className = 'bad'; s.textContent = `, ${PJ.missing} missing`; line.appendChild(s); }
+  d.appendChild(line);
+  const note = (t) => { const e = document.createElement('div'); e.className = 'dim'; e.textContent = t; d.appendChild(e); };
+  for (const dir of PJ.dirs.filter((x) => x.handle && x.state === 'ask')) { const bt = document.createElement('button'); bt.textContent = `open folder "${dir.name}"`; bt.title = 'the browser remembers this folder of the project: allow reading it and its frames are taken from there'; bt.addEventListener('click', () => openDir(dir)); d.appendChild(bt); }
+  if (PJ.dirs.some((x) => x.state === 'denied')) note('a folder could not be read: add its frames by hand');
+  if (PJ.missing) note(`Add the missing frames (Add frames…, Add folder…, or drop them); they are matched by name${PJ.dirs.some((x) => x.state === 'ask') ? ', or open the folder above' : ''}.`);
+  else if (PJ.run || PJ.strokes.length) note(`Run makes the stack again${projectSims() ? ' with the registration as it was, no search' : ''}${PJ.strokes.length ? `, then paints its ${PJ.strokes.length} retouch stroke${PJ.strokes.length === 1 ? '' : 's'} again` : ''}.`);
+  return d;
+}
+$('pj-open').addEventListener('click', () => $('pj-file').click());
+$('pj-file').addEventListener('change', (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) openProject(f); });
+$('pj-save').addEventListener('click', () => { if (!st.running && !SV.exporting) saveProject(); });
+
 // ---------- run ----------
 function setProgress(text, done, total) {
   $('progress').className = 'running'; setStatus(`${text} ${total ? `${done}/${total}` : ''}`);
@@ -643,6 +827,7 @@ function setProgress(text, done, total) {
 }
 $('run').addEventListener('click', () => {
   if (st.running || SV.exporting || !st.files.length) return;
+  if (PJ.missing) { toast(`${PJ.missing} of the project's frames are still missing: add them first (they are matched by name).`); return; }
   const stacks = B.all ? [] : stacksOf(st.files);
   if (stacks === null) { toast('The capture times are still being read; try again in a moment.'); return; }
   if (stacks.length > 1) runBatch(stacks); else startRun();
@@ -656,7 +841,10 @@ function startRun() {
   log(`[lapstack] run: ${st.files.length} frames, ${JSON.stringify(params)}`);
   st.t0 = performance.now(); st.rendering = !!params.render_dmap; window.__app_done = null;
   st.runNo = ++st.runs; st.runParams = params; st.runFirst = st.files[0] ? st.files[0].name : ''; st.runLast = st.files.length ? st.files[st.files.length - 1].name : '';
-  worker.postMessage({ type: 'run', files: st.files, params });
+  const sims = projectSims();   // a project's registration for these very frames, else the search
+  PJ.runFrames = PJ.run ? PJ.run.frames : null; $('pj-reuse-row').hidden = true;
+  if (sims) log(`[lapstack] registration from project ${PJ.name}: no alignment search`);
+  worker.postMessage({ type: 'run', files: st.files, params, sims });
 }
 $('cancel').addEventListener('click', () => { worker.postMessage({ type: 'cancel' }); if (inBatch() && SV.exporting) { SV.cancel = true; worker.postMessage({ type: 'refold_cancel' }); } });
 // ---------- batch ----------
@@ -774,6 +962,8 @@ async function onDone2(m) {
 function finishRun() {
   st.rendering = false;
   setView('fused');
+  if (PJ.run && st.result && !inBatch()) PJ.run = null;   // the project's run has been made again: the result is the session's now
+  if (PJ.strokes.length && st.result && !inBatch()) { replayStrokes(); return; }   // finishRun is called again by 'replayed'
   window.__app_done = JSON.stringify({ ok: true, w: st.result?.w, h: st.result?.h, frames: st.frameCount, dmap: !!(st.result && st.result.dmap), secs: ((performance.now() - st.t0) / 1000).toFixed(1) });
   if (inBatch()) stackDone();
 }
@@ -837,14 +1027,19 @@ function saveSaveSettings() {
   for (const id of svIds) { const el = $(id); o[id] = el.type === 'checkbox' ? el.checked : el.value; }
   try { localStorage.setItem(SK, JSON.stringify(o)); } catch {}
 }
-try {
-  const o = JSON.parse(localStorage.getItem(SK));
-  if (o) {
-    for (const id of svIds) if (id in o) { const el = $(id); if (el.type === 'checkbox') el.checked = !!o[id]; else el.value = o[id]; }
-    for (const id of svSteps) if (o[id]) setStep(id, Number(o[id]));
-    if (Array.isArray(o.sel)) SV.sel = new Set(o.sel);
-  }
-} catch {}
+function saveSettingsData() {
+  const o = { sel: [...SV.sel] };
+  for (const id of svSteps) o[id] = Number($(id).textContent);
+  for (const id of svIds) { const el = $(id); o[id] = el.type === 'checkbox' ? el.checked : el.value; }
+  return o;
+}
+function applySaveSettings(o) {
+  if (!o) return;
+  for (const id of svIds) if (id in o) { const el = $(id); if (el.type === 'checkbox') el.checked = !!o[id]; else el.value = o[id]; }
+  for (const id of svSteps) if (o[id]) setStep(id, Number(o[id]));
+  if (Array.isArray(o.sel)) SV.sel = new Set(o.sel);
+}
+try { applySaveSettings(JSON.parse(localStorage.getItem(SK))); } catch {}
 // file-name tokens: joined with "_", lower case, anything else becomes "_"
 const pad2 = (n) => String(n).padStart(2, '0');
 const stamp = (d) => `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
@@ -1505,7 +1700,7 @@ function srcPut(i, cv) {
 }
 function srcClear() { for (const cv of srcCache.values()) cv.width = 1; srcCache.clear(); }
 window.__srcCache = srcCache; window.__srcBudget = (b) => { SRC_BUDGET = b; };
-function resetRetouch() { srcClear(); slabDrop(); R.slabLoading = null; R.slabProgress = null; R.slabGen++; R.slabGenMin = R.slabGen; R.on = false; R.prev = null; R.cursor = null; R.hold = false; R.wasmIndex = -1; R.gpuIndex = -1; R.loading = -1; R.prefetch = -1; R.ahead = null; R.gen++; R.genMin = R.gen; R.undo = 0; R.redo = 0; R.painting = false; R.dabs = []; }
+function resetRetouch() { srcClear(); slabDrop(); R.slabLoading = null; R.slabProgress = null; R.slabGen++; R.slabGenMin = R.slabGen; R.on = false; R.prev = null; R.cursor = null; R.hold = false; R.wasmIndex = -1; R.gpuIndex = -1; R.loading = -1; R.prefetch = -1; R.ahead = null; R.gen++; R.genMin = R.gen; R.undo = 0; R.redo = 0; R.painting = false; R.dabs = []; R.strokes = []; R.redone = []; R.ops = []; }
 let srcTimer = null;
 // The Source and In focus layers are drawn from the proxy (proxy_edge px long
 // side) until the full-res aligned frame arrives, so a run's result is never
@@ -1661,6 +1856,9 @@ $('bs-kept-sel').addEventListener('change', (e) => setBrushFrom('kept', Number(e
 $('bs-slab').addEventListener('click', () => setBrushFrom('slab'));
 function onPatch(m) {
   R.undo = m.undo; R.redo = m.redo; updateTabs();
+  // the project's record of the retouch: each stroke, undo and redo sent answers with one patch, in order (rgba null = nothing changed)
+  const op = R.ops.shift();
+  if (op && m.rgba) { if (op.op === 'stroke') { R.strokes.push(op.rec); R.redone = []; } else if (op.op === 'undo') { const s = R.strokes.pop(); if (s) R.redone.push(s); } else if (op.op === 'redo') { const s = R.redone.pop(); if (s) R.strokes.push(s); } }
   if (!m.rgba || !st.result) return;
   R.hold = true;   // an undo under the cursor has to be visible: the hover preview, which would paint the same pixels straight back over it, waits for the next pointer move
   const cv = m.target === 'dmap' ? st.result.dmap : st.result.fused; if (!cv) return;
@@ -1729,7 +1927,7 @@ function addDab(x, y) {
 function endStroke() {
   if (!R.painting) return;
   R.painting = false;
-  if (R.dabs.length) worker.postMessage({ type: 'stroke', dabs: new Float32Array(R.dabs), target: target(), from: brushFrom() });
+  if (R.dabs.length) { R.ops.push({ op: 'stroke', rec: strokeRecord() }); worker.postMessage({ type: 'stroke', dabs: new Float32Array(R.dabs), target: target(), from: brushFrom() }); }
   R.dabs = []; R.last = null;
 }
 window.__retouchStroke = (pts) => { R.painting = true; R.dabs = []; R.last = null; for (const [x, y] of pts) addDab(x, y); endStroke(); };
@@ -1744,7 +1942,7 @@ function setBrush(size, hard) {
 }
 $('br-size-in').addEventListener('input', (e) => setBrush(sizeFromSlider(Number(e.target.value)), R.hard));
 $('br-hard-in').addEventListener('input', (e) => setBrush(R.size, Number(e.target.value) / 100));
-$('undo').addEventListener('click', () => worker.postMessage({ type: 'undo' })); $('redo').addEventListener('click', () => worker.postMessage({ type: 'redo' }));
+$('undo').addEventListener('click', () => sendHistory('undo')); $('redo').addEventListener('click', () => sendHistory('redo'));
 // Enter: make sure a stack layer is the view and put Source beside it, side by side;
 // the compare state it replaces comes back on exit. Leaving the Stack group, the stack
 // step, or losing the result all end the mode (updateTabs).
@@ -2259,8 +2457,8 @@ for (const id of ['scrub', 'filmstrip']) $(id).addEventListener('wheel', (e) => 
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox' && e.target.type !== 'range') return;
   if (e.target.tagName === 'SELECT') return;
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); worker.postMessage({ type: e.shiftKey ? 'redo' : 'undo' }); return; }
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); worker.postMessage({ type: 'redo' }); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); sendHistory(e.shiftKey ? 'redo' : 'undo'); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); sendHistory('redo'); return; }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') {
     e.preventDefault();
     if (!st.result) { toast('Run first: the sharpest frame comes from the run\'s winner map.', 3000); return; }

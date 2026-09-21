@@ -698,7 +698,9 @@ impl Engine {
     /// Decode, align (chained to frame 0) and fold one frame. The first call
     /// sets up the run from `params_json`. Returns {index, w, h, bits,
     /// proxy_w, proxy_h, proxy: Uint8Array (RGBA8), sim: [dx_px, dy_px, scale, rot_deg], ms}.
-    pub async fn push(&mut self, bytes: &[u8], params_json: &str) -> Result<JsValue, JsValue> {
+    /// `given`: the frame's registration in that same form, from a project file,
+    /// used in place of the search (empty = search).
+    pub async fn push(&mut self, bytes: &[u8], params_json: &str, given: &[f64]) -> Result<JsValue, JsValue> {
         let t0 = now();
         let frame = decode::decode(bytes).map_err(|e| JsValue::from_str(&e))?;
         let t_dec = now();
@@ -724,7 +726,9 @@ impl Engine {
         // ---- align: luma pyramid of the new frame, NM search against the previous (warped) frame
         let mut sim = Sim::id();
         let mut t_align = now();
-        if run.params.align && run.count > 0 {
+        if run.params.align && run.count > 0 && given.len() == 4 {
+            sim = Sim { xoff: given[0] / w as f64, yoff: given[1] / h as f64, scale: given[2], rot: given[3].to_radians() };
+        } else if run.params.align && run.count > 0 {
             let tgt = run.tgt_pyr.as_ref().unwrap();
             let mut rec = g.rec();
             rec.dispatch("luma_u16", [None, None, Some(&tgt.lv[0].0), None, None, Some(&run.up)], P { w: w as u32, h: h as u32, ..Default::default() }, grid1(n));

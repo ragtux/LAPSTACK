@@ -15,10 +15,13 @@
     <button id="addf" title="add every image in a folder (and its subfolders): with the batch split by folder, each folder is a stack">Add folder…</button>
     <input id="dir" type="file" webkitdirectory hidden>
     <button id="clear">Clear</button>
+    <span class="seg" id="pjseg"><button id="pj-open" title="open a project file (.lapstack.json): its frames, settings, registration and retouch strokes">Open project…</button><button id="pj-save" title="save the session as a project file: the frames (which are excluded), every setting, the run's registration and the retouch strokes; the frames' folders are remembered in this browser (Chrome, Edge) so the project opens them again" disabled>Save project…</button></span>
+    <input type="file" id="pj-file" accept=".json,application/json" hidden>
     <!-- split Run button: the arrow opens run options (DFR); the label shows the state -->
     <span id="runwrap">
       <span class="seg" id="runseg"><button id="run" class="accent" disabled>Run LAP</button><button id="run-more" class="accent" title="run options" aria-haspopup="true">▾</button></span>
       <div id="runmenu" class="menu" hidden>
+        <label class="tog" id="pj-reuse-row" hidden title="the project's run found each frame's shift, scale and rotation: use them again instead of searching (the alignment is most of a frame's time)"><input type="checkbox" id="pj-reuse" checked> reuse the project's registration</label>
         <label class="tog"><input type="checkbox" id="p-dmap"> DFR (depth map)</label>
         <div class="dim small">Render a second stacked image from the focus depth map: each pixel blends the frames nearest its depth. DFR will be shown side by side with LAP. Increases run time by ~25%.</div>
         <label class="tog"><input type="checkbox" id="p-dslabs"> from slabs</label>
