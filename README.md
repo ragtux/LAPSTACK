@@ -150,6 +150,26 @@ implementation on wasm32 and panics there, so a shim reads zero on wasm
 (`vendor/rawler/LAPSTACK-PATCH.md` says how to move to a newer rawler);
 without the feature a raw file is refused.
 
+**Weighted average** (`wav.rs`; `--wav`, `--wav-power P`, `--wav-smooth R`):
+Helicon Focus's method A as a second image, `<stem>_wav.<ext>` — every
+frame's pixels averaged with weights that follow their local contrast, so
+the frame in focus at a pixel counts most and the rest fade in with their
+sharpness. No pixel is ever picked outright: the seams and halos a
+winner-take-all rule can leave cannot arise, and where nothing is sharp (a
+flat area) the frames simply average and the noise drops by the square root
+of their number — at the cost of some softness where a hard pick would have
+kept one frame's detail. It suits short, smooth, low-contrast or noisy
+stacks; the pyramid is the sharper tool, and the browser's retouch brushes
+one into the other. The contrast is the depth pass's focus measure (the
+ring difference filter on the luma, so `--wav` needs the depth-from-focus
+pass, not `--depth winner`), block-averaged to the depth pass's working
+grid, box-smoothed there by `--wav-smooth` grid pixels (Helicon's
+"smoothing", default 1), raised to `--wav-power` (default 2; 1 = plain
+contrast weighting, higher = a keener pick of the sharpest frame) and taken
+back to full resolution bilinearly; a floor of (1e-4)^P keeps a flat pixel
+from dividing by zero, so there every frame weighs the same. One more pass
+over the frames.
+
 **Frame list** (`--skip LIST`, `--reverse`): `--skip` leaves frames out of the
 list — 1-based positions and ranges, comma-separated (`--skip 3,7-9,12`),
 counted after directories are expanded and before any split, each skipped
@@ -543,6 +563,19 @@ through `editFrames`). An edit after a run drops the result — the result's
 frame indices are the list's — and the status bar and log say so; the
 aligned proxies stay as the thumbs. A batch's stack in hand cannot be edited
 (*all frames* first), nor can the list while a run or save is going.
+
+**WAV** (the same ▾ menu, *WAV (weighted average)*, with *contrast power*
+and *weight smoothing*): the CLI's `--wav` in the browser — a third stacked
+image, made in one more pass over the frames after LAP (and DFR): each frame
+is decoded again, warped with the run's registration, its contrast taken on
+the GPU with the depth pass's focus measure on the working grid
+(box-smoothed, raised to the power, `record_weight` in
+`lapstack-web/src/depth.rs`) and blended in with that weight (`wav_acc`;
+`render_push` in its wav mode, the same accumulator as DFR's). WAV is a
+layer of the Stack group, the retouch's third target — the brush's *Result*
+source lists the run's other images and the kept results together — a row of
+the Save step, an image for the stereo, rocking and 3D model, and a kept
+result like the others.
 
 **Batch** (the same ▾ menu, *split into stacks*): the CLI's `--split` for
 the browser. *Add folder…* takes a whole folder (its subfolders too; a

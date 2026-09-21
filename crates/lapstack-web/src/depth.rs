@@ -28,6 +28,9 @@ pub struct DepthGpu {
     slice: wgpu::Buffer,
     /// Per frame: the block-averaged focus measure, quantised (values, scale).
     pub slices: Vec<(Vec<u16>, f32)>,
+    /// Two working-grid planes for the weighted average's smoothed weight map.
+    wtmp: wgpu::Buffer,
+    wgrid: wgpu::Buffer,
 }
 
 /// Working-grid buffers for the finish stage (allocated only then).
@@ -65,6 +68,8 @@ impl DepthGpu {
             ntaps: taps.len() as u32,
             slice: g.buffer_f32("depth slice", dw * dh),
             slices: Vec::new(),
+            wtmp: g.buffer_f32("wav tmp", dw * dh),
+            wgrid: g.buffer_f32("wav grid", dw * dh),
         })
     }
 
@@ -83,6 +88,20 @@ impl DepthGpu {
             P { w: w as u32, h: h as u32, ow: self.dw as u32, oh: self.dh as u32, klen: self.k as u32, ..Default::default() },
             grid2(self.dw, self.dh),
         );
+    }
+
+    /// The contrast of the frame in `luma` (w×h f32) on the working grid, box-smoothed
+    /// by `smooth` grid pixels: the weighted average's weight map (`wav_acc`), in the
+    /// buffer returned. `tmp` is a w×h f32 scratch.
+    pub fn record_weight<'a>(&'a self, rec: &mut Rec<'_>, luma: &wgpu::Buffer, tmp: &wgpu::Buffer, w: usize, h: usize, smooth: u32) -> &'a wgpu::Buffer {
+        self.record_measure(rec, luma, tmp, w, h);
+        if smooth == 0 {
+            return &self.slice;
+        }
+        let pg = P { w: self.dw as u32, h: self.dh as u32, klen: smooth, ..Default::default() };
+        rec.dispatch("box_h", [Some(&self.slice), Some(&self.wtmp), None, None, None, None], pg, grid2(self.dw, self.dh));
+        rec.dispatch("box_v", [None, Some(&self.wtmp), Some(&self.wgrid), None, None, None], pg, grid2(self.dw, self.dh));
+        &self.wgrid
     }
 
     /// Read the recorded slice back and keep it (quantised).

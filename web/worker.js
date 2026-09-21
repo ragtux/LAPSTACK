@@ -282,12 +282,28 @@ async function handle(m) {
             post({ type: 'stage', text: `rendering from depth map: ${m.files[i].name}`, done: i, total: m.files.length });
             const bytes = new Uint8Array(await next);
             next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
-            await engine.render_push(i, bytes, isRaw(m.files[i].name));
+            await engine.render_push(i, bytes, isRaw(m.files[i].name), false, 0, 0);
           }
         }
         if (cancelled) { engine.render_cancel(); post({ type: 'render-cancelled' }); running = false; return; }
-        const r = await engine.render_finish();
+        const r = await engine.render_finish(false);
         post({ type: 'done2', w: r.w, h: r.h, rgba: r.rgba.buffer, ms: performance.now() - t1 }, [r.rgba.buffer]);
+      }
+      // optional third image: the weighted average (Helicon's method A) — the frames decoded
+      // once more, each weighed by its contrast (the depth pass's focus measure) into one average
+      if (m.params.render_wav) {
+        const t2 = performance.now();
+        let next = readAhead(m.files[0]);
+        for (let i = 0; i < m.files.length; i++) {
+          if (cancelled) break;
+          post({ type: 'stage', text: `weighted average: ${m.files[i].name}`, done: i, total: m.files.length });
+          const bytes = new Uint8Array(await next);
+          next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
+          await engine.render_push(i, bytes, isRaw(m.files[i].name), true, m.params.wav_power ?? 2, m.params.wav_smooth ?? 1);
+        }
+        if (cancelled) { engine.render_cancel(); post({ type: 'render-cancelled' }); running = false; return; }
+        const r = await engine.render_finish(true);
+        post({ type: 'done3', w: r.w, h: r.h, rgba: r.rgba.buffer, ms: performance.now() - t2 }, [r.rgba.buffer]);
       }
       running = false;
     } else if (m.type === 'replay') {

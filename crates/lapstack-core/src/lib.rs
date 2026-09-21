@@ -36,6 +36,7 @@ pub mod raw;
 pub mod pyramid;
 pub mod stack;
 pub mod view;
+pub mod wav;
 
 pub use align::{AlignParams, CancelToken, Cancelled, Sim};
 pub use batch::{Split, Stack};

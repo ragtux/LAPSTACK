@@ -172,6 +172,8 @@ struct Run {
     /// Depth-map rendering (second pass): frames folded so far, and the result.
     render_count: usize,
     dmap_rgb16: Option<Vec<u16>>,
+    /// The weighted average (`render_push` in its wav mode), Helicon's method A.
+    wav_rgb16: Option<Vec<u16>>,
     /// The slabbed depth-map rendering in progress (`render_slabs_begin`).
     srender: Option<SlabRender>,
     /// Retouch: the currently loaded aligned source frame (index, RGB u16).
@@ -220,8 +222,8 @@ struct Slab {
 /// One retouch stroke's effect on the fused image: the bbox and its pixels
 /// before and after (RGB u16, row-major within the bbox).
 struct Patch {
-    /// Which result was painted: false = pyramid, true = depth-map rendering.
-    dmap: bool,
+    /// Which result was painted: an index into `KINDS`.
+    target: u8,
     x: usize,
     y: usize,
     w: usize,
@@ -419,7 +421,37 @@ fn rgba8_of(rgb: &[u16], n: usize) -> Vec<u8> {
     }
     rgba
 }
-fn patch_obj(img: &[u16], iw: usize, dmap: bool, x: usize, y: usize, w: usize, h: usize) -> JsValue {
+/// The stacked images a run can hold, by name: the pyramid result, the depth-map
+/// rendering, the weighted average — the retouch targets, the encoder's kinds, the
+/// stereo / mesh sources, what `keep` takes.
+const KINDS: [&str; 3] = ["fused", "dmap", "wav"];
+fn kind_index(kind: &str) -> u8 {
+    KINDS.iter().position(|k| *k == kind).unwrap_or(0) as u8
+}
+fn missing(kind: &str) -> &'static str {
+    match kind {
+        "dmap" => "no depth-map rendering",
+        "wav" => "no weighted average",
+        _ => "not finished",
+    }
+}
+fn master_slot<'a>(run: &'a mut Run, kind: &str) -> &'a mut Option<Vec<u16>> {
+    match kind {
+        "dmap" => &mut run.dmap_rgb16,
+        "wav" => &mut run.wav_rgb16,
+        _ => &mut run.fused_rgb16,
+    }
+}
+fn master<'a>(run: &'a Run, kind: &str) -> Result<&'a [u16], JsValue> {
+    match kind {
+        "dmap" => &run.dmap_rgb16,
+        "wav" => &run.wav_rgb16,
+        _ => &run.fused_rgb16,
+    }
+    .as_deref()
+    .ok_or_else(|| JsValue::from_str(missing(kind)))
+}
+fn patch_obj(img: &[u16], iw: usize, kind: &str, x: usize, y: usize, w: usize, h: usize) -> JsValue {
     let mut rgba = vec![0u8; w * h * 4];
     for r in 0..h {
         let src = &img[((y + r) * iw + x) * 3..((y + r) * iw + x + w) * 3];
@@ -432,7 +464,7 @@ fn patch_obj(img: &[u16], iw: usize, dmap: bool, x: usize, y: usize, w: usize, h
         }
     }
     let o = js_sys::Object::new();
-    set(&o, "target", if dmap { "dmap" } else { "fused" });
+    set(&o, "target", kind);
     set(&o, "x", x as u32);
     set(&o, "y", y as u32);
     set(&o, "w", w as u32);
@@ -657,12 +689,12 @@ impl Engine {
         self.run = None;
     }
 
-    /// Keep the run's `kind` (fused | dmap) master under `id`, taking it out of the
+    /// Keep the run's `kind` (fused | dmap | wav) master under `id`, taking it out of the
     /// run — one about to be reset, or whose result the page has let go. Returns
     /// false when there is none to keep.
     pub fn keep(&mut self, id: u32, kind: &str) -> bool {
         let Some(run) = self.run.as_mut() else { return false };
-        let Some(rgb16) = (if kind == "dmap" { run.dmap_rgb16.take() } else { run.fused_rgb16.take() }) else { return false };
+        let Some(rgb16) = master_slot(run, kind).take() else { return false };
         self.kept.retain(|k| k.id != id);
         self.kept.push(Kept { id, w: run.w, h: run.h, bits: run.bits, rgb16, crop: run.crop, meta: run.meta.clone() });
         run.view_base = None;
@@ -916,7 +948,12 @@ impl Engine {
     /// decoded again and warped with the run's registration, into the
     /// accumulator with weight `1 − |index − depth|` per pixel. The first call
     /// starts the pass. Returns {index, ms}.
-    pub async fn render_push(&mut self, index: usize, bytes: &[u8], raw: bool) -> Result<JsValue, JsValue> {
+    /// `wav`: the weighted average instead (Helicon's method A, twin of core `wav.rs`):
+    /// the re-warped frame is weighed by its contrast — the depth pass's focus measure
+    /// on the working grid, box-smoothed by `smooth` grid pixels, raised to `power`,
+    /// plus a floor of (1e-4)^power so a flat pixel averages every frame — into the
+    /// same accumulator; `render_finish(true)` normalises it into `wav_rgb16`.
+    pub async fn render_push(&mut self, index: usize, bytes: &[u8], raw: bool, wav: bool, power: f32, smooth: u32) -> Result<JsValue, JsValue> {
         let t0 = now();
         let frame = decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
@@ -938,12 +975,24 @@ impl Engine {
         }
         record_rewarp(g, run, &mut rec, index, 0.0).map_err(|e| JsValue::from_str(&e))?;
         run.src_gpu = None;
-        rec.dispatch(
-            "dmap_acc",
-            [Some(&run.cur[0]), Some(&run.acc[0]), Some(&run.best[0]), None, Some(&run.en2), None],
-            P { w: w as u32, h: h as u32, f0: index as f32, f1: index as f32, ..Default::default() },
-            grid1(n),
-        );
+        if wav {
+            let dff = run.dff.as_ref().ok_or_else(|| JsValue::from_str("the weighted average needs the depth-from-focus pass"))?;
+            rec.dispatch("luma_f32", [Some(&run.cur[0]), None, Some(&run.en), None, None, None], P { w: w as u32, h: h as u32, ..Default::default() }, grid1(n));
+            let weight = dff.record_weight(&mut rec, &run.en, &run.tmp_full, w, h, smooth);
+            rec.dispatch(
+                "wav_acc",
+                [Some(&run.cur[0]), Some(&run.acc[0]), Some(&run.best[0]), None, Some(weight), None],
+                P { w: w as u32, h: h as u32, ow: dff.dw as u32, oh: dff.dh as u32, klen: dff.k as u32, f0: power.max(0.0), f1: 1e-4f32.powf(power.max(0.0)), ..Default::default() },
+                grid1(n),
+            );
+        } else {
+            rec.dispatch(
+                "dmap_acc",
+                [Some(&run.cur[0]), Some(&run.acc[0]), Some(&run.best[0]), None, Some(&run.en2), None],
+                P { w: w as u32, h: h as u32, f0: index as f32, f1: index as f32, ..Default::default() },
+                grid1(n),
+            );
+        }
         rec.submit();
         run.render_count += 1;
         let o = js_sys::Object::new();
@@ -1032,7 +1081,7 @@ impl Engine {
 
     /// Normalise the depth-map rendering (from frames, or from slabs) and read
     /// it back: {w, h, rgba, ms}.
-    pub async fn render_finish(&mut self) -> Result<JsValue, JsValue> {
+    pub async fn render_finish(&mut self, wav: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
         let g = &self.gpu;
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
@@ -1054,13 +1103,17 @@ impl Engine {
             }
         };
         let mut rec = g.rec();
-        rec.dispatch("dmap_norm", [None, Some(acc), Some(wt), None, None, None], pw, grid1(n));
+        rec.dispatch(if wav { "wav_norm" } else { "dmap_norm" }, [None, Some(acc), Some(wt), None, None, None], pw, grid1(n));
         rec.submit();
         let (rgba, v16) = readback_image(g, run, acc).await.map_err(|e| JsValue::from_str(&e))?;
         drop(sr);
-        run.dmap_rgb16 = Some(v16);
+        if wav {
+            run.wav_rgb16 = Some(v16);
+        } else {
+            run.dmap_rgb16 = Some(v16);
+        }
         run.render_count = 0;
-        log(&format!("[lapstack] depth-map rendering finished from {what} ({:.0} ms)", now() - t0));
+        log(&format!("[lapstack] {} finished from {what} ({:.0} ms)", if wav { "weighted average" } else { "depth-map rendering" }, now() - t0));
         let o = js_sys::Object::new();
         set(&o, "w", w as u32);
         set(&o, "h", h as u32);
@@ -1288,7 +1341,7 @@ impl Engine {
         let Engine { run, kept, .. } = self;
         let run = run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         let (w, h) = (run.w, run.h);
-        let dmap = target == "dmap";
+        let kind = if KINDS.contains(&target) { target } else { "fused" };
         if from == target {
             return Err(JsValue::from_str("the brush source is the paint target"));
         }
@@ -1305,23 +1358,7 @@ impl Engine {
             None => None,
         };
         run.edits += 1;
-        // target and source as one pair per case: they are different fields of the run,
-        // which the borrow checker only sees when both are named in the same expression
-        const NO_FUSED: &str = "not finished";
-        const NO_DMAP: &str = "no depth-map rendering";
-        const NO_SRC: &str = "no source loaded";
-        const NO_SLAB: &str = "no slab";
-        let err = |m: &str| JsValue::from_str(m);
-        let (fused, src): (&mut Vec<u16>, &[u16]) = match (dmap, from) {
-            (false, "dmap") => (run.fused_rgb16.as_mut().ok_or_else(|| err(NO_FUSED))?, run.dmap_rgb16.as_deref().ok_or_else(|| err(NO_DMAP))?),
-            (true, "fused") => (run.dmap_rgb16.as_mut().ok_or_else(|| err(NO_DMAP))?, run.fused_rgb16.as_deref().ok_or_else(|| err(NO_FUSED))?),
-            (false, _) if kept_src.is_some() => (run.fused_rgb16.as_mut().ok_or_else(|| err(NO_FUSED))?, kept_src.unwrap()),
-            (true, _) if kept_src.is_some() => (run.dmap_rgb16.as_mut().ok_or_else(|| err(NO_DMAP))?, kept_src.unwrap()),
-            (false, "slab") => (run.fused_rgb16.as_mut().ok_or_else(|| err(NO_FUSED))?, &run.slab_rgb16.as_ref().ok_or_else(|| err(NO_SLAB))?.2),
-            (true, "slab") => (run.dmap_rgb16.as_mut().ok_or_else(|| err(NO_DMAP))?, &run.slab_rgb16.as_ref().ok_or_else(|| err(NO_SLAB))?.2),
-            (false, _) => (run.fused_rgb16.as_mut().ok_or_else(|| err(NO_FUSED))?, &run.src_rgb16.as_ref().ok_or_else(|| err(NO_SRC))?.1),
-            (true, _) => (run.dmap_rgb16.as_mut().ok_or_else(|| err(NO_DMAP))?, &run.src_rgb16.as_ref().ok_or_else(|| err(NO_SRC))?.1),
-        };
+        // the bbox of the stroke, before anything is taken out of the run
         // bbox of the stroke
         let (mut x0, mut y0, mut x1, mut y1) = (w as f32, h as f32, 0f32, 0f32);
         for d in dabs.chunks_exact(4) {
@@ -1338,6 +1375,24 @@ impl Engine {
             return Ok(JsValue::NULL);
         }
         let (bw, bh) = (ex - bx, ey - by);
+        // The target's master is taken out of the run while it is painted, so the source —
+        // another master, the loaded frame, the slab, a kept result — can be borrowed
+        // from the run alongside it; it goes back before the undo record is pushed.
+        let err = |m: &str| JsValue::from_str(m);
+        let mut fused = master_slot(run, kind).take().ok_or_else(|| err(missing(kind)))?;
+        let src_res: Result<&[u16], JsValue> = match (kept_src, from) {
+            (Some(k), _) => Ok(k),
+            (None, "fused" | "dmap" | "wav") => master(run, from),
+            (None, "slab") => run.slab_rgb16.as_ref().map(|s| &s.2[..]).ok_or_else(|| err("no slab")),
+            (None, _) => run.src_rgb16.as_ref().map(|s| &s.1[..]).ok_or_else(|| err("no source loaded")),
+        };
+        let src = match src_res {
+            Ok(s) => s,
+            Err(e) => {
+                *master_slot(run, kind) = Some(fused);
+                return Err(e);
+            }
+        };
         let mut before = Vec::with_capacity(bw * bh * 3);
         for r in 0..bh {
             before.extend_from_slice(&fused[((by + r) * w + bx) * 3..((by + r) * w + bx + bw) * 3]);
@@ -1366,8 +1421,10 @@ impl Engine {
         for r in 0..bh {
             after.extend_from_slice(&fused[((by + r) * w + bx) * 3..((by + r) * w + bx + bw) * 3]);
         }
+        let out = patch_obj(&fused, w, kind, bx, by, bw, bh);
+        *master_slot(run, kind) = Some(fused);
         run.undo_bytes += 2 * before.len() * 2;
-        run.undo.push(Patch { dmap, x: bx, y: by, w: bw, h: bh, before, after });
+        run.undo.push(Patch { target: kind_index(kind), x: bx, y: by, w: bw, h: bh, before, after });
         for p in run.redo.drain(..) {
             let _ = p;
         }
@@ -1375,7 +1432,7 @@ impl Engine {
             let p = run.undo.remove(0);
             run.undo_bytes -= 2 * p.before.len() * 2;
         }
-        Ok(patch_obj(fused, w, dmap, bx, by, bw, bh))
+        Ok(out)
     }
 
     fn restore(&mut self, redo: bool) -> Result<JsValue, JsValue> {
@@ -1383,12 +1440,13 @@ impl Engine {
         let w = run.w;
         run.edits += 1;
         let Some(p) = (if redo { run.redo.pop() } else { run.undo.pop() }) else { return Ok(JsValue::NULL) };
-        let fused = if p.dmap { run.dmap_rgb16.as_mut() } else { run.fused_rgb16.as_mut() }.ok_or_else(|| JsValue::from_str("not finished"))?;
+        let kind = KINDS[p.target as usize];
+        let fused = master_slot(run, kind).as_mut().ok_or_else(|| JsValue::from_str(missing(kind)))?;
         let pixels = if redo { &p.after } else { &p.before };
         for r in 0..p.h {
             fused[((p.y + r) * w + p.x) * 3..((p.y + r) * w + p.x + p.w) * 3].copy_from_slice(&pixels[r * p.w * 3..(r + 1) * p.w * 3]);
         }
-        let out = patch_obj(fused, w, p.dmap, p.x, p.y, p.w, p.h);
+        let out = patch_obj(fused, w, kind, p.x, p.y, p.w, p.h);
         if redo { run.undo.push(p) } else { run.redo.push(p) }
         Ok(out)
     }
@@ -1455,9 +1513,8 @@ impl Engine {
         let err = |e: image::ImageError| JsValue::from_str(&format!("encode: {e}"));
         let mut out = Vec::new();
         let (pixels8, pixels16, color): (Vec<u8>, Option<std::borrow::Cow<'_, [u16]>>, image::ExtendedColorType) = match kind {
-            "fused" | "dmap" => {
-                let v = if kind == "dmap" { run.dmap_rgb16.as_ref() } else { run.fused_rgb16.as_ref() }
-                    .ok_or_else(|| JsValue::from_str(if kind == "dmap" { "no depth-map rendering" } else { "not finished" }))?;
+            "fused" | "dmap" | "wav" => {
+                let v = master(run, kind)?;
                 let v: std::borrow::Cow<'_, [u16]> = match &area { Some(r) => std::borrow::Cow::Owned(cut(v, 3, r)), None => std::borrow::Cow::Borrowed(v) };
                 if format == "png" && run.bits == 16 {
                     (Vec::new(), Some(v), image::ExtendedColorType::Rgb16)
@@ -1487,7 +1544,7 @@ impl Engine {
                 let range = (hi as f32 - lo as f32).max(1e-6);
                 (full.iter().map(|&v| ((v - lo) as f32 / range * 255.0 + 0.5) as u8).collect(), None, image::ExtendedColorType::L8)
             }
-            _ => return Err(JsValue::from_str("kind must be fused|dmap|depth|depth16|winner")),
+            _ => return Err(JsValue::from_str("kind must be fused|dmap|wav|depth|depth16|winner")),
         };
         match format {
             "jpeg" => {
@@ -1502,7 +1559,7 @@ impl Engine {
                 }
             }
         }
-        if metadata && matches!(kind, "fused" | "dmap") {
+        if metadata && matches!(kind, "fused" | "dmap" | "wav") {
             out = lapstack_core::meta::embed(out, &run.meta);
         }
         Ok(js_sys::Uint8Array::from(&out[..]))
@@ -1524,10 +1581,7 @@ impl Engine {
             let area = if crop { run.crop } else { None }.unwrap_or(Rect::full(run.w, run.h));
             let (ow, oh) = if ow == 0 || oh == 0 { (area.w, area.h) } else { (ow as usize, oh as usize) };
             let same = area.is_full(run.w, run.h) && ow == run.w && oh == run.h;
-            let src = match source {
-                "dmap" => run.dmap_rgb16.as_deref().ok_or_else(|| JsValue::from_str("no depth-map rendering"))?,
-                _ => run.fused_rgb16.as_deref().ok_or_else(|| JsValue::from_str("not finished"))?,
-            };
+            let src = master(run, source)?;
             // full-resolution depth, 65535 = last frame: the DFF map, or the winner map upsampled
             let full = depth_full_u16(run)?;
             let rgb = (!same).then(|| view::shrink(src, run.w, &area, 3, ow, oh));
@@ -1547,7 +1601,7 @@ impl Engine {
         let b = run.view_base.as_ref().ok_or_else(|| JsValue::from_str("no view prepared"))?;
         let rgb: &[u16] = match &b.rgb {
             Some(v) => v,
-            None => if b.key.0 == "dmap" { run.dmap_rgb16.as_deref() } else { run.fused_rgb16.as_deref() }.ok_or_else(|| JsValue::from_str("not finished"))?,
+            None => master(run, &b.key.0)?,
         };
         let z: &[u16] = match &b.z {
             Some(v) => v,
@@ -1592,10 +1646,7 @@ impl Engine {
     pub fn mesh(&self, stem: &str, format: &str, source: &str, crop: bool, grid: u32, relief: f32, near_first: bool, texture_edge: u32, texture: &str, quality: u8) -> Result<JsValue, JsValue> {
         let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no result"))?;
         let area = if crop { run.crop } else { None }.unwrap_or(Rect::full(run.w, run.h));
-        let src = match source {
-            "dmap" => run.dmap_rgb16.as_deref().ok_or_else(|| JsValue::from_str("no depth-map rendering"))?,
-            _ => run.fused_rgb16.as_deref().ok_or_else(|| JsValue::from_str("not finished"))?,
-        };
+        let src = master(run, source)?;
         let t0 = now();
         let full = depth_full_u16(run)?;
         let mp = MeshParams { grid: grid as usize, relief, near_first };
@@ -1969,6 +2020,7 @@ impl Engine {
             dff,
             render_count: 0,
             dmap_rgb16: None,
+            wav_rgb16: None,
             srender: None,
             src_rgb16: None,
             slab: None,

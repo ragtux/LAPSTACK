@@ -40,6 +40,9 @@ pub struct Params {
     /// settings, and hand each to `run_with`'s callback — thick planes of
     /// focus to retouch from elsewhere. `None` = no slabs.
     pub slabs: Option<(usize, usize)>,
+    /// The weighted average (`wav.rs`, Helicon's method A) as a second image,
+    /// from the depth pass's focus measure: needs `depth`.
+    pub wav: Option<crate::wav::WavParams>,
 }
 
 /// The slab ranges of a `count`-frame stack: `size` frames each, consecutive
@@ -83,7 +86,7 @@ impl Default for Params {
             depth: Some(DepthParams::default()),
             crop: true,
             brightness: true,
-            slabs: None,
+            slabs: None, wav: None,
         }
     }
 }
@@ -157,6 +160,8 @@ pub struct Output {
     /// The window of the full frame the outputs were cropped to (`Params::crop`),
     /// `None` when nothing was cut.
     pub crop: Option<Rect>,
+    /// The weighted average (`Params::wav`), cropped like `image`.
+    pub wav: Option<Img3>,
 }
 
 /// Decoder threads kept in flight ahead of the fuser (each holds one decoded
@@ -338,6 +343,19 @@ fn fuse_and_depth(
     }
 }
 
+/// The weighted average of `Params::wav`, another pass over the frames; it
+/// borrows the depth pass's focus measure, so it needs `Params::depth`.
+fn weighted(src: &mut dyn FrameSource, params: &Params, log: &mut dyn FnMut(String)) -> Result<Option<Img3>, String> {
+    match (&params.wav, &params.depth) {
+        (Some(wp), Some(dp)) => Ok(Some(crate::wav::weighted_average(src, dp, wp, log)?)),
+        (Some(_), None) => {
+            log("the weighted average needs the depth-from-focus pass (not the winner map): skipped".into());
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
 /// After the result: the slabs of `Params::slabs`, each fused on its own
 /// over the same (aligned, equalised) frames, cropped like the result, and
 /// handed to `on_slab` one at a time — none is kept.
@@ -436,16 +454,17 @@ pub fn run_with(
             }
             let mut src: &[Img3] = &aligned;
             let (image, depth, conf, levels) = fuse_and_depth(&mut src, params, log)?;
+            let wav = weighted(&mut src, params, log)?;
             // the borders some frames only reach with smeared edge pixels go
             let area = common_area(&sims, w, h);
-            let (image, depth, conf, crop) = if params.crop && !area.is_full(w, h) {
+            let (image, depth, conf, wav, crop) = if params.crop && !area.is_full(w, h) {
                 log(format!("cropped to the area every frame covers: {}x{} at ({}, {})", area.w, area.h, area.x, area.y));
-                (image.crop(&area), crop_plane(&depth, w, &area), conf.map(|c| crop_plane(&c, w, &area)), Some(area))
+                (image.crop(&area), crop_plane(&depth, w, &area), conf.map(|c| crop_plane(&c, w, &area)), wav.map(|i| i.crop(&area)), Some(area))
             } else {
-                (image, depth, conf, None)
+                (image, depth, conf, wav, None)
             };
             fuse_slabs(&mut src, params, bit_depth, crop.as_ref(), log, on_slab)?;
-            Ok(Output { image, depth, conf, bit_depth, align: sims, levels, crop })
+            Ok(Output { image, depth, conf, bit_depth, align: sims, levels, crop, wav })
         }
         _ => {
             let mut src = LazyFrames::open(inputs.clone(), params.brightness)?;
@@ -455,6 +474,7 @@ pub fn run_with(
             ));
             let bit_depth = src.depth;
             let (image, depth, conf, levels) = fuse_and_depth(&mut src, params, log)?;
+            let wav = weighted(&mut src, params, log)?;
             fuse_slabs(&mut src, params, bit_depth, None, log, on_slab)?;
             for n in &src.notes {
                 log(format!("note: {n}"));
@@ -462,7 +482,7 @@ pub fn run_with(
             if let Some(n) = src.brightness_note() {
                 log(n);
             }
-            Ok(Output { image, depth, conf, bit_depth, align: vec![Sim::id(); inputs.len()], levels, crop: None })
+            Ok(Output { image, depth, conf, bit_depth, align: vec![Sim::id(); inputs.len()], levels, crop: None, wav })
         }
     }
 }

@@ -752,6 +752,32 @@ fn dmap_acc(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups
         o[i] += t;
     }
 }
+// ---- weighted average (twin of lapstack-core/src/wav.rs): the re-warped frame `a` (3
+// planes) accumulates into b (3 planes) and its weight into o, weighed by the contrast
+// map `wt` on the ow×oh grid of klen-pixel blocks (bilinear, samples at block centres),
+// raised to f0, plus the floor f1.
+@compute @workgroup_size(256)
+fn wav_acc(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = gid1(g, nwg); let n = p.w * p.h; if (i >= n) { return; }
+    let x = i % p.w; let y = i / p.w;
+    let k = f32(p.klen);
+    let gx = clamp((f32(x) + 0.5) / k - 0.5, 0.0, f32(p.ow - 1u));
+    let gy = clamp((f32(y) + 0.5) / k - 0.5, 0.0, f32(p.oh - 1u));
+    let x0 = u32(floor(gx)); let y0 = u32(floor(gy));
+    let x1 = min(x0 + 1u, p.ow - 1u); let y1 = min(y0 + 1u, p.oh - 1u);
+    let fx = gx - f32(x0); let fy = gy - f32(y0);
+    let v = mix(mix(wt[y0 * p.ow + x0], wt[y0 * p.ow + x1], fx), mix(wt[y1 * p.ow + x0], wt[y1 * p.ow + x1], fx), fy);
+    let wgt = pow(max(v, 0.0), p.f0) + p.f1;
+    b[i] += wgt * a[i]; b[n + i] += wgt * a[n + i]; b[2u * n + i] += wgt * a[2u * n + i];
+    o[i] += wgt;
+}
+// b (3 planes) /= o (the weight floor keeps it above zero), clamped to [0,1]
+@compute @workgroup_size(256)
+fn wav_norm(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = gid1(g, nwg); let n = p.w * p.h; if (i >= n) { return; }
+    let d = 1.0 / max(o[i], 1e-30);
+    b[i] = clamp(b[i] * d, 0.0, 1.0); b[n + i] = clamp(b[n + i] * d, 0.0, 1.0); b[2u * n + i] = clamp(b[2u * n + i] * d, 0.0, 1.0);
+}
 // b (3 planes) /= max(o, 1e-6), clamped to [0,1]
 @compute @workgroup_size(256)
 fn dmap_norm(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
