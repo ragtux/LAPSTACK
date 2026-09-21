@@ -296,7 +296,8 @@ async function onDone(m) {
   const fused = new OffscreenCanvas(m.w, m.h);
   fused.getContext('2d').putImageData(img, 0, 0);
   st.result = { w: m.w, h: m.h, bits: m.bits, fused, dmap: null, depth: new Float32Array(m.depth), dw: m.depth_w, dh: m.depth_h,
-                winner: new Float32Array(m.winner), ww: m.winner_w, wh: m.winner_h, meta: m.meta || null };   // meta: what the first frame carried (EXIF / ICC / XMP sizes)
+                winner: new Float32Array(m.winner), ww: m.winner_w, wh: m.winner_h, meta: m.meta || null,   // meta: what the first frame carried (EXIF / ICC / XMP sizes)
+                crop: m.crop ? { x: m.crop[0], y: m.crop[1], w: m.crop[2], h: m.crop[3] } : null };            // crop: the window every aligned frame covers, null = all of it
   resetRetouch();
   const secs = ((performance.now() - st.t0) / 1000).toFixed(1);
   log(`[lapstack] fused ${m.frames} frames -> ${m.w}x${m.h} ${m.bits}-bit  (${secs}s)`);
@@ -353,7 +354,14 @@ const OUTPUTS = [
 ];
 const SV = { sel: new Set(['lap']), exif: null, exifFor: null, exporting: false, cancel: false };
 const SK = 'lapstack.save';
-const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'sv-meta', 'an-edge', 'an-fps', 'an-loop', 'cc-on', 'cc-name'];
+const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'sv-meta', 'sv-crop', 'an-edge', 'an-fps', 'an-loop', 'cc-on', 'cc-name'];
+// The crop: the run reports the window every aligned frame covers with real pixels
+// (outside it some frame only has its smeared edge). With the Save card's switch on,
+// every saved file is cut to it and the viewer shows it as the bright window.
+const cropArea = () => (st.result && st.result.crop && $('sv-crop').checked) ? st.result.crop : null;
+const outDims = () => { const r = cropArea(); return r ? [r.w, r.h] : imageDims(); };
+// the crop as a source rectangle in a bitmap's own pixels (bitmaps come at frame, proxy or grid resolution)
+const srcRect = (bw, bh) => { const r = cropArea(); if (!r) return [0, 0, bw, bh]; const k = bw / st.result.w, l = bh / st.result.h; return [r.x * k, r.y * l, r.w * k, r.h * l]; };
 function saveSaveSettings() {
   const o = { sel: [...SV.sel], 'an-step': Number($('an-step').textContent) };
   for (const id of svIds) { const el = $(id); o[id] = el.type === 'checkbox' ? el.checked : el.value; }
@@ -439,7 +447,7 @@ async function exifDate(file) {
     return xmpDate();
   } catch { return null; }
 }
-window.__svTest = { exifDate, nameDate, save: (kind, format, quality, meta) => call({ type: 'save', kind, format, quality, meta }),   // tests
+window.__svTest = { exifDate, nameDate, save: (kind, format, quality, meta, crop) => call({ type: 'save', kind, format, quality, meta, crop }),   // tests
                     sign: (bytes, mime, name) => signBlob(new Blob([bytes], { type: mime }), OUTPUTS[0], name, mime).then((b) => b.arrayBuffer()) };
 function svExt(o) { return o.ext || ($('sv-format').value === 'jpeg' ? 'jpg' : 'png'); }
 function svName(o, now = new Date()) {
@@ -454,7 +462,7 @@ function svName(o, now = new Date()) {
 }
 // the animation's frame order (every Nth frame, last frame always in; back and forth or forward), size and delay
 function animPlan() {
-  const [W, H] = imageDims(); const edge = Number($('an-edge').value), step = Math.max(1, Number($('an-step').textContent));
+  const [W, H] = outDims(); const edge = Number($('an-edge').value), step = Math.max(1, Number($('an-step').textContent));
   const s = edge ? Math.min(1, edge / Math.max(W, H)) : 1;
   const ow = Math.max(1, Math.round(W * s)), oh = Math.max(1, Math.round(H * s));
   const n = st.files.length, fwd = [];
@@ -467,7 +475,11 @@ const fmtMB = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${(b 
 async function renderSave() {
   if (st.step !== 'save' || !st.result) return;
   const strokes = R.undo;
-  $('sv-info').textContent = `${st.result.w}×${st.result.h}, ${st.result.bits}-bit input, ${st.files.length} frames` + (strokes ? `, ${strokes} retouch stroke${strokes > 1 ? 's' : ''}` : '');
+  const cr = st.result.crop;
+  $('sv-crop').disabled = !cr;
+  $('sv-crop-info').textContent = cr ? `${cr.w}×${cr.h} of ${st.result.w}×${st.result.h}, from (${cr.x}, ${cr.y}) — the bright window in the viewer` : 'the aligned frames cover the whole image: nothing to cut';
+  const [ow, oh] = outDims();
+  $('sv-info').textContent = `${st.result.w}×${st.result.h}, ${st.result.bits}-bit input, ${st.files.length} frames` + (cropArea() ? `, saved as ${ow}×${oh}` : '') + (strokes ? `, ${strokes} retouch stroke${strokes > 1 ? 's' : ''}` : '');
   // tokens: EXIF is read once per first frame (async: the name preview refreshes when it lands)
   const f0 = st.files[0];
   if (f0 && SV.exifFor !== f0) { SV.exifFor = f0; SV.exif = null; exifDate(f0).then((d) => { if (SV.exifFor === f0) { SV.exif = d; renderSave(); } }); }
@@ -519,9 +531,10 @@ async function thumbInto(o, cv) {
   const c = cv.getContext('2d'); c.fillStyle = '#111'; c.fillRect(0, 0, cv.width, cv.height);
   const r = st.result; if (!r) return;
   const mid = Math.floor((st.files.length - 1) / 2);
+  const [ow, oh] = outDims();
   const fit = (bmp, pixelated = false) => {
-    const s = Math.min(cv.width / r.w, cv.height / r.h), w = r.w * s, h = r.h * s;
-    c.imageSmoothingEnabled = !pixelated; c.drawImage(bmp, (cv.width - w) / 2, (cv.height - h) / 2, w, h);
+    const s = Math.min(cv.width / ow, cv.height / oh), w = ow * s, h = oh * s;
+    c.imageSmoothingEnabled = !pixelated; c.drawImage(bmp, ...srcRect(bmp.width, bmp.height), (cv.width - w) / 2, (cv.height - h) / 2, w, h);
   };
   if (o.kind === 'fused' || o.kind === 'dmap') fit(r[o.kind]);
   else if (o.kind === 'depth' || o.kind === 'depth16') fit(await depthBitmap(false), true);
@@ -538,7 +551,7 @@ async function winnerBitmap() {
   for (let i = 0; i < w * h; i++) { const g = (d[i] - lo) * k; px[4 * i] = g; px[4 * i + 1] = g; px[4 * i + 2] = g; px[4 * i + 3] = 255; }
   const bmp = await createImageBitmap(new ImageData(px, w, h)); st.depthBmp.set('winner', bmp); return bmp;
 }
-for (const id of svIds) $(id).addEventListener(id === 'sv-quality' || id === 'sv-name' || id === 'cc-name' ? 'input' : 'change', () => { $('sv-qval').textContent = $('sv-quality').value; saveSaveSettings(); renderSave(); });
+for (const id of svIds) $(id).addEventListener(id === 'sv-quality' || id === 'sv-name' || id === 'cc-name' ? 'input' : 'change', () => { $('sv-qval').textContent = $('sv-quality').value; saveSaveSettings(); renderSave(); if (id === 'sv-crop') draw(); });
 document.querySelectorAll('#savecard [data-step]').forEach((b) => b.addEventListener('click', () => { setStep('an-step', Number($('an-step').textContent) + Number(b.dataset.d)); saveSaveSettings(); renderSave(); }));
 $('sv-all').addEventListener('change', (e) => { for (const o of OUTPUTS) if (o.avail()) { if (e.target.checked) SV.sel.add(o.id); else SV.sel.delete(o.id); } saveSaveSettings(); renderSave(); });
 function downloadBlob(blob, name) {
@@ -570,8 +583,8 @@ async function renderAnim(o, progress) {
 async function drawAnimFrame(id, i, c, ow, oh) {
   if (id === 'anim-depth') {
     c.imageSmoothingEnabled = false;
-    c.drawImage(await depthBitmap(true), 0, 0, ow, oh);
-    const ov = await sliceBitmap(i); if (ov) c.drawImage(ov, 0, 0, ow, oh);
+    const d = await depthBitmap(true); c.drawImage(d, ...srcRect(d.width, d.height), 0, 0, ow, oh);
+    const ov = await sliceBitmap(i); if (ov) c.drawImage(ov, ...srcRect(ov.width, ov.height), 0, 0, ow, oh);
     return;
   }
   // the aligned full-res frame, plain or In focus, from the engine (a decode + warp per frame)
@@ -579,9 +592,9 @@ async function drawAnimFrame(id, i, c, ow, oh) {
   const r = await call({ type: 'export_source', index: i, bytes, focus: id === 'anim-focus' ? focusParams() : null }, [bytes]);
   const img = new ImageData(new Uint8ClampedArray(r.rgba), r.w, r.h);
   c.imageSmoothingEnabled = true;
-  if (r.w === ow && r.h === oh) c.putImageData(img, 0, 0);
-  else { const bmp = await createImageBitmap(img); c.drawImage(bmp, 0, 0, ow, oh); bmp.close(); }
-  if (id === 'anim-peak') { const f = st.frames[i]; if (f && f.peak) c.drawImage(await peakBitmap(f), 0, 0, ow, oh); }
+  if (r.w === ow && r.h === oh && !cropArea()) c.putImageData(img, 0, 0);
+  else { const bmp = await createImageBitmap(img); c.drawImage(bmp, ...srcRect(r.w, r.h), 0, 0, ow, oh); bmp.close(); }
+  if (id === 'anim-peak') { const f = st.frames[i]; if (f && f.peak) { const pk = await peakBitmap(f); c.drawImage(pk, ...srcRect(pk.width, pk.height), 0, 0, ow, oh); } }
 }
 // content credentials: a self-signed certificate per signer name, kept in this browser
 const CC_KEY = 'lapstack.cc';
@@ -606,7 +619,7 @@ async function signBlob(blob, o, name, mime) {
     title: name,
     assertions: [
       { label: 'c2pa.actions', data: { actions: [{ action: 'c2pa.created', digitalSourceType: 'http://cv.iptc.org/newscodes/digitalsourcetype/compositeCapture', softwareAgent: { name: 'lapstack', version: '0.1.0' } }] } },
-      { label: 'org.lapstack.stack', data: { output: o.token, frames: st.files.map((f) => f.name), align: p.align, levels: p.levels, energy_radius: p.energy_radius, top: p.top, top_radius: p.top_radius, use_chroma: p.use_chroma, retouch_strokes: R.undo } },
+      { label: 'org.lapstack.stack', data: { output: o.token, frames: st.files.map((f) => f.name), align: p.align, levels: p.levels, energy_radius: p.energy_radius, top: p.top, top_radius: p.top_radius, use_chroma: p.use_chroma, retouch_strokes: R.undo, crop: cropArea() ? [cropArea().x, cropArea().y, cropArea().w, cropArea().h] : null } },
     ],
   };
   const bytes = await blob.arrayBuffer();
@@ -633,7 +646,7 @@ async function saveSelected() {
       } else {
         prog(`encoding ${name}`, 0, 0); setState(o, 'encoding…');
         const f = o.ext ? 'png' : fmt;
-        const r = await call({ type: 'save', kind: o.kind, format: f, quality: q, meta: $('sv-meta').checked && !$('sv-meta').disabled });
+        const r = await call({ type: 'save', kind: o.kind, format: f, quality: q, meta: $('sv-meta').checked && !$('sv-meta').disabled, crop: !!cropArea() });
         mime = f === 'jpeg' ? 'image/jpeg' : 'image/png'; blob = new Blob([r.bytes], { type: mime });
       }
       if (sign) { prog(`signing ${name}`, 0, 0); setState(o, 'signing…'); blob = await signBlob(blob, o, name, mime); }
@@ -1101,6 +1114,17 @@ function layerFor(tab) {
   }
   return { bmp: full || bmp, w, h, overlay };
 }
+// The crop window over a drawn layer: the border outside it dimmed, a hairline on its
+// edge — in image space, so it sits on the same pixels in every pane and at every zoom.
+function drawCrop(c = ctx) {
+  const r = cropArea(); if (!r) return;
+  const [W, H] = imageDims();
+  c.fillStyle = 'rgba(0,0,0,.55)';
+  c.fillRect(0, 0, W, r.y); c.fillRect(0, r.y + r.h, W, H - r.y - r.h);
+  c.fillRect(0, r.y, r.x, r.h); c.fillRect(r.x + r.w, r.y, W - r.x - r.w, r.h);
+  const lw = 1 / (st.zoom * dpr());
+  c.lineWidth = lw; c.strokeStyle = 'rgba(255,255,255,.75)'; c.strokeRect(r.x - lw / 2, r.y - lw / 2, r.w + lw, r.h + lw);
+}
 function drawLayer(L, c = ctx) {
   if (!L) return;
   c.imageSmoothingEnabled = !L.pixelated && st.zoom * L.bmp.width / L.w < 1.0 ? true : !L.pixelated;
@@ -1224,10 +1248,10 @@ function draw() {
     const [L, Rt] = st.flipped ? [B, A] : [A, B];
     const labels = st.flipped ? [layerLabel(st.cmp), layerLabel(st.view)] : [layerLabel(st.view), layerLabel(st.cmp)];
     if (retouch) { labels[0] += ' — drag to paint, shift+drag pans'; if (!labels[1].includes(' — ')) labels[1] += brushFrom() === 'source' ? ' — brush source, wheel scrubs' : ' — brush source'; }   // a loading hint keeps its line
-    drawLayer(L); if (retouch) paintMarks(ctx, d, true);   // the paint pane: the hover preview lands here
+    drawLayer(L); drawCrop(ctx); if (retouch) paintMarks(ctx, d, true);   // the paint pane: the hover preview lands here
     ctx2.setTransform(1, 0, 0, 1, 0, 0); ctx2.fillStyle = '#141416'; ctx2.fillRect(0, 0, canvas2.width, canvas2.height);
     ctx2.setTransform(st.zoom * d, 0, 0, st.zoom * d, st.ox * d, st.oy * d);
-    drawLayer(Rt, ctx2); if (retouch) paintMarks(ctx2, d, false);
+    drawLayer(Rt, ctx2); drawCrop(ctx2); if (retouch) paintMarks(ctx2, d, false);
     const [k1, k2] = st.flipped ? ['b', 'a'] : ['a', 'b'];
     const [l1, l2] = $('panelabels').children; $('panelabels').hidden = false;
     showLabel(l1, labels[0], k1, { left: '25%', transform: 'translateX(-50%)' });
@@ -1242,6 +1266,7 @@ function draw() {
     const xs = (st.divider * cw - st.ox) / st.zoom; // divider in image px
     ctx.save(); ctx.beginPath(); ctx.rect(-1e6, -1e6, 1e6 + xs, 2e6); ctx.clip(); drawLayer(left); ctx.restore();
     ctx.save(); ctx.beginPath(); ctx.rect(xs, -1e6, 1e6, 2e6); ctx.clip(); drawLayer(right); ctx.restore();
+    drawCrop();
     $('divider').hidden = false; $('divider').style.left = `${st.divider * cw - 1}px`;
     // the two chips ride the divider, one on each side; each drops out as its side closes
     const x = st.divider * cw;
@@ -1251,7 +1276,7 @@ function draw() {
     showLabel(l1, x > 40 ? n1 : '', k1, { right: `${Math.round(cw - x + 8)}px` });
     showLabel(l2, cw - x > 40 ? n2 : '', k2, { left: `${Math.round(x + 8)}px` });
   } else {
-    drawLayer(A); $('divider').hidden = true;
+    drawLayer(A); drawCrop(); $('divider').hidden = true;
     const [l1, l2] = $('panelabels').children; $('panelabels').hidden = false;
     showLabel(l1, layerLabel(st.view), 'a', { left: '50%', transform: 'translateX(-50%)' });
     showLabel(l2, '', '', {});

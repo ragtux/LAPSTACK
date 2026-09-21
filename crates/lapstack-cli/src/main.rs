@@ -57,6 +57,7 @@ fn main() {
             "--save-depth" => save_depth = true,
             "--save-conf" => save_conf = true,
             "--no-metadata" => metadata = false,
+            "--no-crop" => p.crop = false,
             "--depth-raw" => depth_raw = Some(next(&mut i)),
             "--depth" => {
                 depth_mode = next(&mut i);
@@ -172,6 +173,7 @@ fn help() {
            --depth-raw PATH       write the depth map as 16-bit PNG, fixed scale (65535 = last frame)\n\
            --save-conf            write the depth confidence map (16-bit, 65535 = 1)\n\
            --no-metadata          do not copy the first frame's EXIF / ICC profile / XMP into the output\n\
+           --no-crop              keep the full frame instead of cropping to the area every aligned frame covers\n\
            --depth MODE           dff = depth from focus (default) | winner = pyramid winner map\n\
            --depth-level L        (winner) pyramid level the map is read from [2 = 1/4 res]\n\
          Depth from focus (Jeon et al. 2019 focus measure, guided-filter aggregation,\n\

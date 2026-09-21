@@ -27,6 +27,19 @@ impl Img3 {
     pub fn zeros(w: usize, h: usize) -> Img3 {
         Img3 { w, h, p: [vec![0.0; w * h], vec![0.0; w * h], vec![0.0; w * h]] }
     }
+    /// The `r` window of the image (`r` must lie inside it).
+    pub fn crop(&self, r: &crate::align::Rect) -> Img3 {
+        Img3 { w: r.w, h: r.h, p: [crop_plane(&self.p[0], self.w, r), crop_plane(&self.p[1], self.w, r), crop_plane(&self.p[2], self.w, r)] }
+    }
+}
+
+/// The `r` window of a `w`-wide plane.
+pub fn crop_plane<T: Copy>(p: &[T], w: usize, r: &crate::align::Rect) -> Vec<T> {
+    let mut out = Vec::with_capacity(r.w * r.h);
+    for y in r.y..r.y + r.h {
+        out.extend_from_slice(&p[y * w + r.x..y * w + r.x + r.w]);
+    }
+    out
 }
 
 /// Separable generating kernel, Wang & Chang eq. (2): binomial [1 4 6 4 1]/16.

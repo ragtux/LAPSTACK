@@ -19,6 +19,7 @@ use gpu::{Gpu, P, grid1, grid2};
 use depth::DepthGpu;
 use lapstack_core::depth::{DepthParams, FocusMeasure, Upsample};
 use lapstack_core::fuse::{FuseParams, TopRule, binomial, fuse_residuals, upsample_index};
+use lapstack_core::align::{Rect, common_area};
 use lapstack_core::pyramid::{Img3, auto_levels, half};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
@@ -164,6 +165,9 @@ struct Run {
     src_rgb16: Option<(usize, Vec<u16>)>,
     /// The first frame's EXIF / ICC profile / XMP, for the saved files.
     meta: lapstack_core::meta::Meta,
+    /// The area every aligned frame covers with real pixels (`finish`); the
+    /// saved images are cropped to it on request. `None` = the whole frame.
+    crop: Option<Rect>,
     /// The source frame currently warped into `cur[0]` (`load_source`); In focus renders from it.
     src_gpu: Option<usize>,
     undo: Vec<Patch>,
@@ -504,6 +508,13 @@ impl Engine {
         set(&o, "h", h as u32);
         set(&o, "bits", run.bits);
         set(&o, "frames", run.count as u32);
+        // the window every frame covers without a smeared edge: [x, y, w, h], or null for the whole frame
+        let area = common_area(&run.sims, w, h);
+        run.crop = (!area.is_full(w, h)).then_some(area);
+        match run.crop {
+            Some(r) => set(&o, "crop", js_sys::Array::from_iter([r.x, r.y, r.w, r.h].iter().map(|&v| JsValue::from(v as u32)))),
+            None => set(&o, "crop", JsValue::NULL),
+        }
         set(&o, "rgba", js_sys::Uint8Array::from(&rgba[..]));
         set(&o, "depth_w", dw as u32);
         set(&o, "depth_h", dh as u32);
@@ -845,17 +856,28 @@ impl Engine {
     /// Encode the fused image or the depth map. `format`: "png" (fused at the
     /// input bit depth, depth map 8-bit gray), "png8" (8-bit), "jpeg" (8-bit,
     /// `quality` 1..100). With `metadata` the stacked images (not the maps)
-    /// carry the first frame's EXIF / ICC profile / XMP. Returns the file bytes.
-    pub fn encode(&self, kind: &str, format: &str, quality: u8, metadata: bool) -> Result<js_sys::Uint8Array, JsValue> {
+    /// carry the first frame's EXIF / ICC profile / XMP; with `crop` every
+    /// image is cut to the area all frames cover (`finish`'s crop). Returns the file bytes.
+    pub fn encode(&self, kind: &str, format: &str, quality: u8, metadata: bool, crop: bool) -> Result<js_sys::Uint8Array, JsValue> {
         use image::ImageEncoder;
         let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no result"))?;
-        let (w, h) = (run.w as u32, run.h as u32);
+        let area = if crop { run.crop } else { None };
+        // the `r` window of a `ch`-channel interleaved plane `run.w` wide
+        let cut = |v: &[u16], ch: usize, r: &Rect| -> Vec<u16> {
+            let mut out = Vec::with_capacity(r.w * r.h * ch);
+            for y in r.y..r.y + r.h {
+                out.extend_from_slice(&v[(y * run.w + r.x) * ch..(y * run.w + r.x + r.w) * ch]);
+            }
+            out
+        };
+        let (w, h) = area.map_or((run.w as u32, run.h as u32), |r| (r.w as u32, r.h as u32));
         let err = |e: image::ImageError| JsValue::from_str(&format!("encode: {e}"));
         let mut out = Vec::new();
-        let (pixels8, pixels16, color): (Vec<u8>, Option<&[u16]>, image::ExtendedColorType) = match kind {
+        let (pixels8, pixels16, color): (Vec<u8>, Option<std::borrow::Cow<'_, [u16]>>, image::ExtendedColorType) = match kind {
             "fused" | "dmap" => {
                 let v = if kind == "dmap" { run.dmap_rgb16.as_ref() } else { run.fused_rgb16.as_ref() }
                     .ok_or_else(|| JsValue::from_str(if kind == "dmap" { "no depth-map rendering" } else { "not finished" }))?;
+                let v: std::borrow::Cow<'_, [u16]> = match &area { Some(r) => std::borrow::Cow::Owned(cut(v, 3, r)), None => std::borrow::Cow::Borrowed(v) };
                 if format == "png" && run.bits == 16 {
                     (Vec::new(), Some(v), image::ExtendedColorType::Rgb16)
                 } else {
@@ -865,6 +887,7 @@ impl Engine {
             "winner" => {
                 let (d, dw, dh) = run.winner_small.as_ref().ok_or_else(|| JsValue::from_str("not finished"))?;
                 let full = upsample_index(d, *dw, *dh, run.w, run.h, run.depth_level);
+                let full = match &area { Some(r) => lapstack_core::pyramid::crop_plane(&full, run.w, r), None => full };
                 let (lo, hi) = full.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
                 let range = (hi - lo).max(1e-6);
                 (full.iter().map(|&v| ((v - lo) / range * 255.0 + 0.5) as u8).collect(), None, image::ExtendedColorType::L8)
@@ -879,6 +902,7 @@ impl Engine {
                         std::borrow::Cow::Owned(upsample_index(d, *dw, *dh, run.w, run.h, run.depth_level).iter().map(|&v| (v * k + 0.5) as u16).collect())
                     }
                 };
+                let full: std::borrow::Cow<'_, [u16]> = match &area { Some(r) => std::borrow::Cow::Owned(cut(&full, 1, r)), None => full };
                 if kind == "depth16" {
                     let bytes: Vec<u8> = full.iter().flat_map(|v| v.to_be_bytes()).collect();
                     let enc = image::codecs::png::PngEncoder::new(&mut out);
@@ -899,7 +923,7 @@ impl Engine {
             _ => {
                 let enc = image::codecs::png::PngEncoder::new(&mut out);
                 match pixels16 {
-                    Some(v) => enc.write_image(bytemuck::cast_slice(v), w, h, color).map_err(err)?,
+                    Some(v) => enc.write_image(bytemuck::cast_slice(&v), w, h, color).map_err(err)?,
                     None => enc.write_image(&pixels8, w, h, color).map_err(err)?,
                 }
             }
@@ -912,7 +936,7 @@ impl Engine {
 
     /// Kept for the test page: PNG at the input bit depth.
     pub fn encode_png(&self, kind: &str) -> Result<js_sys::Uint8Array, JsValue> {
-        self.encode(kind, "png", 90, false)
+        self.encode(kind, "png", 90, false, false)
     }
 
     /// Full-resolution depth map (u16, 65535 = last frame); for tests.
@@ -1030,6 +1054,7 @@ impl Engine {
             redo: Vec::new(),
             undo_bytes: 0,
             meta: Default::default(),
+            crop: None,
         })
     }
 }

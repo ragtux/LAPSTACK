@@ -82,7 +82,13 @@ Nelder-Mead search, chained sequentially to frame 0. `--align-coarsen N`
 stops N levels short of full resolution (the transform is resolution
 independent, so this is a large speed-up at sub-pixel accuracy);
 `--no-shift/--no-scale/--no-rotation` restrict the model; `--save-aligned DIR`
-writes the registered frames.
+writes the registered frames. Where a warped frame does not reach, the warp
+repeats its edge, so the output (image, depth and confidence maps) is
+**cropped to the largest rectangle every frame covers** with real pixels
+(`align::common_area`: each frame's sound area is a convex quad, cut per pixel
+row into an interval, intersected over frames, and the best rectangle over
+consecutive rows is taken; the warp's 2 px interpolation support is kept
+out); `--no-crop` keeps the full frame.
 
 `--save-depth` writes the depth map produced by the depth-from-focus pass
 below (`--depth winner` instead reports the raw winning frame index read
@@ -237,7 +243,11 @@ scaled) or a 16-bit PNG with a fixed scale (65535 = last frame, the same
 encoding as the CLI's `--depth-raw`); the winner map. The stacked images
 carry the **first frame's EXIF, ICC profile and XMP** like the CLI's output
 (the run reads them from the first frame's bytes; the card's *Metadata*
-section says what was found and has the switch). Animations, as GIF:
+section says what was found and has the switch). Every file, animations
+included, is **cropped to the area all aligned frames cover** like the CLI's
+output (the run reports the window; the card's *Crop* section shows its size
+and has the switch, and the viewer shows the window as the bright part of
+the image while it is on). Animations, as GIF:
 **Focus depth** in Turbo with the slice sweeping through the frames, the
 **In focus** sweep, and the aligned **Source** frames under their peaking
 band, each frame rendered like the viewer shows it (the Source and In focus

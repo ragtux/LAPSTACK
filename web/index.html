@@ -198,6 +198,10 @@
       <label id="sv-qrow" hidden>quality <span class="val" id="sv-qval">92</span></label>
       <input type="range" id="sv-quality" min="50" max="100" value="92" hidden>
       <div class="dim small">Depth and winner maps are always PNG; animations are GIF.</div>
+      <div class="section">Crop</div>
+      <label class="check"><input type="checkbox" id="sv-crop" checked> <span>crop to the area every aligned frame covers</span></label>
+      <div class="dim small" id="sv-crop-info">—</div>
+      <div class="dim small">Where a shifted, scaled or rotated frame did not reach, the aligner filled its border by repeating the edge; the stacked images, maps and animations are cut to the window with real pixels from every frame. The viewer shows it as the bright window. Off, the files keep the full frame.</div>
       <div class="section">Metadata</div>
       <label class="check"><input type="checkbox" id="sv-meta" checked> <span>copy the first frame's EXIF, ICC profile and XMP into the stacked images</span></label>
       <div class="dim small" id="sv-meta-info">—</div>

@@ -57,7 +57,7 @@ impl CancelToken {
 #[derive(Debug)]
 pub struct Cancelled;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Sim {
     pub xoff: f64, // fraction of width
     pub yoff: f64, // fraction of height
@@ -86,6 +86,90 @@ impl Sim {
         let ty = cy + self.yoff * h as f64 - (d * cx + e * cy);
         [[a, b, tx], [d, e, ty]]
     }
+}
+
+/// An axis-aligned pixel rectangle: `x, y` its top-left corner, `w, h` its size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rect {
+    pub x: usize,
+    pub y: usize,
+    pub w: usize,
+    pub h: usize,
+}
+
+impl Rect {
+    pub fn full(w: usize, h: usize) -> Rect {
+        Rect { x: 0, y: 0, w, h }
+    }
+    pub fn is_full(&self, w: usize, h: usize) -> bool {
+        self.x == 0 && self.y == 0 && self.w == w && self.h == h
+    }
+    pub fn area(&self) -> usize {
+        self.w * self.h
+    }
+}
+
+/// Interpolation support of the warp: a destination pixel is only sound when
+/// its source point lies this far inside the frame (Spline4x4 reads two
+/// samples each way; outside, the warp repeats the edge).
+const WARP_MARGIN: f64 = 2.0;
+
+/// The largest axis-aligned rectangle every aligned frame covers with real
+/// pixels: the area to crop the result to, so no smeared border of any warped
+/// frame is left in it. For each frame, a destination pixel is covered when its
+/// source point (the frame's inverse transform of it) lies `WARP_MARGIN` inside
+/// the source; that is a convex quadrilateral, and its cut with a pixel row is
+/// one interval, so each row's common interval is an intersection over frames
+/// and the best rectangle is the largest one spanning consecutive rows. Frames
+/// at the identity are sampled straight and cover everything. Rows are pixel
+/// centres, rectangles pixel-aligned; the full frame comes back when nothing
+/// is cut. The whole frame when the frames leave no common area.
+pub fn common_area(sims: &[Sim], w: usize, h: usize) -> Rect {
+    let full = Rect::full(w, h);
+    if w == 0 || h == 0 {
+        return full;
+    }
+    let invs: Vec<[[f64; 3]; 2]> = sims.iter().filter(|s| **s != Sim::id()).map(|s| affine_inv(s.matrix(w, h))).collect();
+    if invs.is_empty() {
+        return full;
+    }
+    let (m, xmax, ymax) = (WARP_MARGIN, (w - 1) as f64 - WARP_MARGIN, (h - 1) as f64 - WARP_MARGIN);
+    // per row, the x-interval [lo, hi] (inclusive pixel columns) covered by every frame
+    let mut rows: Vec<(i64, i64)> = Vec::with_capacity(h);
+    for y in 0..h {
+        let (mut lo, mut hi) = (0f64, (w - 1) as f64);
+        for inv in &invs {
+            // source x and y are affine in the column: s = a·x + k
+            for (a, k, smin, smax) in [(inv[0][0], inv[0][1] * y as f64 + inv[0][2], m, xmax), (inv[1][0], inv[1][1] * y as f64 + inv[1][2], m, ymax)] {
+                if a.abs() < 1e-12 {
+                    if k < smin || k > smax { lo = 1.0; hi = 0.0; }
+                } else {
+                    let (x1, x2) = ((smin - k) / a, (smax - k) / a);
+                    lo = lo.max(x1.min(x2));
+                    hi = hi.min(x1.max(x2));
+                }
+            }
+        }
+        rows.push(if lo <= hi { (lo.ceil() as i64, hi.floor() as i64) } else { (1, 0) });
+    }
+    // the largest rectangle over consecutive rows: for each top row, extend downwards
+    // while narrowing to the rows' common interval
+    let mut best = Rect { x: 0, y: 0, w: 0, h: 0 };
+    for y0 in 0..h {
+        let (mut lo, mut hi) = rows[y0];
+        for y1 in y0..h {
+            lo = lo.max(rows[y1].0);
+            hi = hi.min(rows[y1].1);
+            if lo > hi {
+                break;
+            }
+            let (rw, rh) = ((hi - lo + 1) as usize, y1 - y0 + 1);
+            if rw * rh > best.area() {
+                best = Rect { x: lo as usize, y: y0, w: rw, h: rh };
+            }
+        }
+    }
+    if best.area() == 0 { full } else { best }
 }
 
 pub fn affine_inv(m: [[f64; 3]; 2]) -> [[f64; 3]; 2] {
@@ -453,4 +537,55 @@ pub fn report(sim: &Sim, w: usize, h: usize) -> String {
         sim.scale,
         sim.rot.to_degrees()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn common_area_identity_is_full() {
+        assert_eq!(common_area(&[Sim::id(), Sim::id()], 640, 480), Rect::full(640, 480));
+        assert_eq!(common_area(&[], 640, 480), Rect::full(640, 480));
+    }
+
+    #[test]
+    fn common_area_shift() {
+        // frame 1 lands 10 px to the right: its left 10 columns are smeared edge, and
+        // the warp's 2 px support trims the other sides
+        let (w, h) = (640, 480);
+        let s = Sim { xoff: 10.0 / w as f64, yoff: 0.0, scale: 1.0, rot: 0.0 };
+        let r = common_area(&[Sim::id(), s], w, h);
+        assert_eq!(r, Rect { x: 12, y: 2, w: w - 12, h: h - 4 });
+    }
+
+    #[test]
+    fn common_area_rotation_is_inside_every_frame() {
+        let (w, h) = (640, 480);
+        let sims = [Sim::id(), Sim { xoff: -0.01, yoff: 0.02, scale: 1.03, rot: 0.02 }, Sim { xoff: 0.005, yoff: -0.01, scale: 0.98, rot: -0.015 }];
+        let r = common_area(&sims, w, h);
+        assert!(r.w > w / 2 && r.h > h / 2 && !r.is_full(w, h), "{r:?}");
+        // every corner pixel of the rectangle maps inside every frame's sound area
+        for s in &sims[1..] {
+            let inv = affine_inv(s.matrix(w, h));
+            for (x, y) in [(r.x, r.y), (r.x + r.w - 1, r.y), (r.x, r.y + r.h - 1), (r.x + r.w - 1, r.y + r.h - 1)] {
+                let sx = inv[0][0] * x as f64 + inv[0][1] * y as f64 + inv[0][2];
+                let sy = inv[1][0] * x as f64 + inv[1][1] * y as f64 + inv[1][2];
+                assert!(sx >= WARP_MARGIN && sx <= (w - 1) as f64 - WARP_MARGIN && sy >= WARP_MARGIN && sy <= (h - 1) as f64 - WARP_MARGIN, "({x},{y}) -> ({sx:.1},{sy:.1})");
+            }
+        }
+        // and it is maximal: one more row or column on any side breaks that for some frame
+        let sound = |x: usize, y: usize| sims[1..].iter().all(|s| {
+            let inv = affine_inv(s.matrix(w, h));
+            let sx = inv[0][0] * x as f64 + inv[0][1] * y as f64 + inv[0][2];
+            let sy = inv[1][0] * x as f64 + inv[1][1] * y as f64 + inv[1][2];
+            sx >= WARP_MARGIN && sx <= (w - 1) as f64 - WARP_MARGIN && sy >= WARP_MARGIN && sy <= (h - 1) as f64 - WARP_MARGIN
+        });
+        let row_ok = |y: usize| (r.x..r.x + r.w).all(|x| sound(x, y));
+        let col_ok = |x: usize| (r.y..r.y + r.h).all(|y| sound(x, y));
+        assert!(r.y == 0 || !row_ok(r.y - 1));
+        assert!(r.y + r.h == h || !row_ok(r.y + r.h));
+        assert!(r.x == 0 || !col_ok(r.x - 1));
+        assert!(r.x + r.w == w || !col_ok(r.x + r.w));
+    }
 }

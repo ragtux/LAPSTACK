@@ -8,9 +8,9 @@
 
 use crate::depth::{self, DepthParams};
 use crate::fuse::{FuseParams, Fuser};
-use crate::align::{self, AlignParams, CancelToken, Sim};
+use crate::align::{self, AlignParams, CancelToken, Sim, Rect, common_area};
 use crate::io::{self, Depth};
-use crate::pyramid::Img3;
+use crate::pyramid::{crop_plane, Img3};
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -28,6 +28,9 @@ pub struct Params {
     /// Depth-from-focus pass after fusion (`depth.rs`); `None` = report the
     /// pyramid winner map of `fuse.depth_level` instead (no extra pass).
     pub depth: Option<DepthParams>,
+    /// Crop the result (image, depth, confidence) to the area every aligned
+    /// frame covers with real pixels (`align::common_area`).
+    pub crop: bool,
 }
 
 impl Default for Params {
@@ -38,6 +41,7 @@ impl Default for Params {
             save_aligned: None,
             gpu: false,
             depth: Some(DepthParams::default()),
+            crop: true,
         }
     }
 }
@@ -108,6 +112,9 @@ pub struct Output {
     pub bit_depth: Depth,
     pub align: Vec<Sim>,
     pub levels: usize,
+    /// The window of the full frame the outputs were cropped to (`Params::crop`),
+    /// `None` when nothing was cut.
+    pub crop: Option<Rect>,
 }
 
 /// Decoder threads kept in flight ahead of the fuser (each holds one decoded
@@ -313,7 +320,15 @@ pub fn run(inputs: &[String], params: &Params, log: &mut dyn FnMut(String)) -> R
             }
             let mut src: &[Img3] = &aligned;
             let (image, depth, conf, levels) = fuse_and_depth(&mut src, params, log)?;
-            Ok(Output { image, depth, conf, bit_depth, align: sims, levels })
+            // the borders some frames only reach with smeared edge pixels go
+            let area = common_area(&sims, w, h);
+            let (image, depth, conf, crop) = if params.crop && !area.is_full(w, h) {
+                log(format!("cropped to the area every frame covers: {}x{} at ({}, {})", area.w, area.h, area.x, area.y));
+                (image.crop(&area), crop_plane(&depth, w, &area), conf.map(|c| crop_plane(&c, w, &area)), Some(area))
+            } else {
+                (image, depth, conf, None)
+            };
+            Ok(Output { image, depth, conf, bit_depth, align: sims, levels, crop })
         }
         _ => {
             let mut src = LazyFrames::open(inputs.clone())?;
@@ -326,7 +341,7 @@ pub fn run(inputs: &[String], params: &Params, log: &mut dyn FnMut(String)) -> R
             for n in &src.notes {
                 log(format!("note: {n}"));
             }
-            Ok(Output { image, depth, conf, bit_depth, align: vec![Sim::id(); inputs.len()], levels })
+            Ok(Output { image, depth, conf, bit_depth, align: vec![Sim::id(); inputs.len()], levels, crop: None })
         }
     }
 }
