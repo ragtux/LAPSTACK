@@ -17,7 +17,7 @@ stacking on the Laplacian pyramid, written from two papers kept in `docs/`:
 ## Layout
 
 ```
-crates/lapstack-core   library: pyramid, fusion, depth from focus, aligner, stereo views, 3D model, I/O, CUDA path
+crates/lapstack-core   library: pyramid, fusion, depth from focus, aligner, stereo views, 3D model, batch splitting, I/O, CUDA path
 crates/lapstack-cli    `lapstack` command-line tool
 crates/lapstack-web    wasm32 + WebGPU engine for the browser app
 web/                   the browser app (static files) and its headless test
@@ -99,6 +99,32 @@ repeats its edge, so the output (image, depth and confidence maps) is
 row into an interval, intersected over frames, and the best rectangle over
 consecutive rows is taken; the warp's 2 px interpolation support is kept
 out); `--no-crop` keeps the full frame.
+
+**Batch runs and stack splitting** (`batch.rs`; `--split RULE`, `--dry-run`):
+a directory among the inputs stands for the image files in it (PNG, JPEG,
+TIFF, in natural order, `f2` before `f10`), and `--split` cuts the frame list
+into stacks that are then run one after the other with the same settings —
+Zerene's batch and Helicon's split: `count:N` makes a stack of every N frames,
+`gap:SECONDS` starts a new one wherever the capture time jumps by more than
+that (a rail shoots every second or two and a pause between subjects is tens
+of seconds; the time is EXIF DateTimeOriginal with its sub-seconds, else
+DateTimeDigitized, DateTime, or the XMP packet's CreateDate — raw converters
+write TIFFs with XMP and no EXIF — and a frame with none takes its file's
+modification time and says so), `dir` makes one stack per folder, so
+`--split dir shoot/*/` stacks a folder of folders. With more than one stack
+the output paths (`-o`, `--slab-dir`, `--save-aligned`, `--depth-raw`) are
+templates: `{n}` is the stack's number, `{first}` its first frame's stem,
+`{dir}` its folder's name, and a path with no field gets `_NN` before its
+extension (`-o out.tif` writes `out_01.tif`, `out_02.tif`, …); the folder a
+template names is created. Every other output (depth, slabs, stereo, rocking,
+model) follows the stem as always. Stacks run in turn, so memory stays that
+of one stack; a stack that fails (frames of two sizes, say) is reported and
+the batch goes on, with a summary and exit status 1 at the end. `--dry-run`
+prints the stacks — frames, output names, and for `gap` the capture times and
+the pause before each — and stops: worth a look before hours of stacking,
+and the way to see whether the split is what you meant. Reading the times
+costs little: only the head of each file is read, or, for a TIFF whose IFD
+follows the pixels, a window around that IFD (100 frames of 274 MB in 0.2 s).
 
 **Brightness** (`brightness.rs`): flash recycling, mains-powered lights and
 a shutter that is not quite repeatable make frames differ in exposure by a

@@ -18,10 +18,12 @@
 //! `depth` the depth-from-focus pass (ring difference filter, guided-filter
 //! aggregation, sub-frame peaks, edge-aware WLS), `align` the 4-DOF similarity
 //! registration, `io` bit-depth-preserving TIFF/PNG/JPEG I/O, `view` synthetic
-//! stereo, `mesh` the textured 3D model, and `stack::run` the decode → align →
-//! fuse → depth pipeline.
+//! stereo, `mesh` the textured 3D model, `stack::run` the decode → align →
+//! fuse → depth pipeline, and `batch` the rules that cut a list of frames into
+//! stacks for a batch of runs.
 
 pub mod align;
+pub mod batch;
 pub mod brightness;
 pub mod depth;
 pub mod fuse;
@@ -35,6 +37,7 @@ pub mod stack;
 pub mod view;
 
 pub use align::{AlignParams, CancelToken, Cancelled, Sim};
+pub use batch::{Split, Stack};
 pub use depth::{DepthMap, DepthParams, FocusMeasure, Upsample};
 pub use fuse::{FuseParams, Fuser, TopRule};
 pub use io::Depth;

@@ -90,6 +90,44 @@ pub fn load_meta(path: &str) -> Result<Meta, String> {
     Ok(meta::extract(&bytes))
 }
 
+/// The capture time of a frame (`Meta::capture_time`), reading as little of the
+/// file as will do. The first 4 MB hold the EXIF of a JPEG, a PNG and a TIFF
+/// whose IFD leads; a TIFF whose IFD was written after the pixels (a 270 MB
+/// file with its IFD in the last 40 KB is the usual raw export) is read in a
+/// window around that IFD, into a buffer sparse everywhere else so the
+/// structure's absolute offsets hold. Only when both yield nothing is the whole
+/// file read (a PNG with its chunks after the image data).
+pub fn load_capture_time(path: &str) -> Result<Option<f64>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const HEAD: u64 = 4 << 20;
+    const WINDOW: u64 = 4 << 20;
+    let err = |e: std::io::Error| format!("cannot read {path}: {e}");
+    let mut f = std::fs::File::open(path).map_err(err)?;
+    let len = f.metadata().map_err(err)?.len();
+    let mut head = Vec::with_capacity(len.min(HEAD) as usize);
+    (&mut f).take(HEAD).read_to_end(&mut head).map_err(err)?;
+    if let Some(t) = meta::extract(&head).capture_time() {
+        return Ok(Some(t));
+    }
+    if len <= HEAD {
+        return Ok(None);
+    }
+    if let Some(off) = meta::tiff_ifd0_offset(&head).map(u64::from).filter(|&o| o >= HEAD && o < len) {
+        let (lo, hi) = (off.saturating_sub(WINDOW / 2), (off + WINDOW / 2).min(len));
+        let mut sparse = vec![0u8; hi as usize];   // zeroed pages are not committed until written
+        sparse[..head.len()].copy_from_slice(&head);
+        f.seek(SeekFrom::Start(lo)).map_err(err)?;
+        f.read_exact(&mut sparse[lo as usize..hi as usize]).map_err(err)?;
+        if let Some(t) = meta::extract(&sparse).capture_time() {
+            return Ok(Some(t));
+        }
+    }
+    let mut whole = head;
+    f.seek(SeekFrom::Start(HEAD)).map_err(err)?;
+    f.read_to_end(&mut whole).map_err(err)?;
+    Ok(meta::extract(&whole).capture_time())
+}
+
 /// Write an `Img3` at the requested depth, downgrading to 8-bit if the output
 /// format cannot store 16-bit samples. `meta` is carried into the file: PNG
 /// and JPEG through `meta::embed`, TIFF through lapstack's own writer.

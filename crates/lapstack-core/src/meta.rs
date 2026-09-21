@@ -47,6 +47,97 @@ impl Meta {
         }
         if parts.is_empty() { "none".into() } else { parts.join(", ") }
     }
+    /// When the frame was taken: seconds since 1970 by the camera's clock, no
+    /// time zone applied (every frame of a shoot comes off the same clock, and
+    /// only differences between frames are used). EXIF DateTimeOriginal with
+    /// its SubSecTimeOriginal, else DateTimeDigitized, else IFD0's DateTime;
+    /// without EXIF, the XMP packet's CreateDate or DateTimeOriginal (raw
+    /// converters write TIFFs with XMP and no EXIF at all).
+    pub fn capture_time(&self) -> Option<f64> {
+        if let Some(t) = self.exif.as_deref().and_then(exif_time) {
+            return Some(t);
+        }
+        self.xmp.as_deref().and_then(xmp_time)
+    }
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m as i64 + 9) % 12) + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// `YYYY:MM:DD HH:MM:SS` (EXIF) or `YYYY-MM-DDTHH:MM:SS[.fff]` (XMP), the rest
+/// of the string ignored; `sub` an EXIF SubSecTime string ("123" = .123 s).
+fn parse_datetime(s: &str, sub: Option<&str>) -> Option<f64> {
+    let b = s.as_bytes();
+    if b.len() < 19 {
+        return None;
+    }
+    let num = |lo: usize, hi: usize| -> Option<i64> {
+        let t = std::str::from_utf8(&b[lo..hi]).ok()?;
+        if !t.bytes().all(|c| c.is_ascii_digit()) { return None; }
+        t.parse().ok()
+    };
+    let (y, mo, d, h, mi, sec) = (num(0, 4)?, num(5, 7)?, num(8, 10)?, num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+        return None;   // a camera without a date writes zeros
+    }
+    let mut t = (days_from_civil(y, mo as u32, d as u32) * 86400 + h * 3600 + mi * 60 + sec) as f64;
+    let frac = |digits: &str| -> f64 {
+        let digits: String = digits.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() { 0.0 } else { digits.parse::<f64>().unwrap_or(0.0) / 10f64.powi(digits.len() as i32) }
+    };
+    if b.get(19) == Some(&b'.') {
+        t += frac(&s[20..]);
+    } else if let Some(sub) = sub {
+        t += frac(sub.trim());
+    }
+    Some(t)
+}
+
+/// The capture time out of a TIFF structure (see `Meta::capture_time`).
+fn exif_time(tiff: &[u8]) -> Option<f64> {
+    let t = Tiff::new(tiff)?;
+    let (ifd0, _) = t.read_ifd(t.u32(4)? as usize)?;
+    let ascii = |entries: &[Entry], tag: u16| -> Option<String> {
+        let e = entries.iter().find(|e| e.tag == tag && e.typ == 2)?;
+        Some(String::from_utf8_lossy(&e.data).trim_end_matches('\0').trim().to_string())
+    };
+    let exif = ifd0.iter().find(|e| e.tag == 34665 && matches!(e.typ, 4 | 13))
+        .and_then(|e| t.val32(&e.data, 0))
+        .and_then(|off| t.read_ifd(off as usize))
+        .map(|(entries, _)| entries)
+        .unwrap_or_default();
+    for (tag, sub) in [(36867, 37521), (36868, 37522)] {
+        if let Some(s) = ascii(&exif, tag) {
+            if let Some(v) = parse_datetime(&s, ascii(&exif, sub).as_deref()) {
+                return Some(v);
+            }
+        }
+    }
+    parse_datetime(&ascii(&ifd0, 306)?, ascii(&exif, 37520).as_deref())
+}
+
+/// The capture time out of an XMP packet: the first of CreateDate,
+/// DateTimeOriginal, DateTimeDigitized that parses, as an attribute
+/// (`xmp:CreateDate="2026-09-11T17:24:25"`) or an element.
+fn xmp_time(xmp: &[u8]) -> Option<f64> {
+    let text = String::from_utf8_lossy(xmp);
+    for key in ["CreateDate", "DateTimeOriginal", "DateTimeDigitized"] {
+        for (pos, _) in text.match_indices(key) {
+            let rest = &text[pos + key.len()..];
+            let rest = rest.trim_start_matches(|c: char| c == '=' || c == '"' || c == '\'' || c == '>' || c.is_whitespace());
+            if let Some(v) = parse_datetime(rest, None) {
+                return Some(v);
+            }
+        }
+    }
+    None
 }
 
 fn human(n: usize) -> String {
@@ -431,6 +522,11 @@ fn serialise(node: Node, le: bool) -> Vec<u8> {
     w.out
 }
 
+/// Where a TIFF file's first IFD lies, when `b` starts like one.
+pub fn tiff_ifd0_offset(b: &[u8]) -> Option<u32> {
+    Tiff::new(b)?.u32(4)
+}
+
 /// A fresh, standalone EXIF structure from a TIFF structure (a TIFF file, a JPEG
 /// APP1 payload, a PNG eXIf chunk), in the source's byte order.
 pub fn rebuild(tiff: &[u8]) -> Option<Vec<u8>> {
@@ -787,6 +883,25 @@ mod tests {
         assert!(ex.iter().all(|e| e.tag != 37500), "MakerNote dropped");
         let et = ex.iter().find(|e| e.tag == 33434).unwrap();
         assert_eq!((t.val32(&et.data, 0).unwrap(), t.val32(&et.data, 4).unwrap()), (1, 250));
+    }
+
+    #[test]
+    fn capture_time_from_exif_and_xmp() {
+        let expect = (days_from_civil(2026, 9, 11) * 86400 + 17 * 3600 + 24 * 60 + 25) as f64;
+        for le in [true, false] {
+            let m = Meta { exif: rebuild(&sample_exif(le)), ..Default::default() };
+            assert_eq!(m.capture_time(), Some(expect));
+        }
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(2000, 3, 1), 11017);
+        assert_eq!(parse_datetime("2026:09:11 17:24:25", Some("250")), Some(expect + 0.25));
+        assert_eq!(parse_datetime("2026-09-11T17:24:25.5+02:00", None), Some(expect + 0.5));
+        assert_eq!(parse_datetime("0000:00:00 00:00:00", None), None);
+        let xmp = Meta { xmp: Some(b"<x:xmpmeta><rdf:Description xmp:CreateDate=\"2026-09-11T17:24:25\" exif:DateTimeOriginal=\"2020-01-01T00:00:00\"/></x:xmpmeta>".to_vec()), ..Default::default() };
+        assert_eq!(xmp.capture_time(), Some(expect));
+        let xmp = Meta { xmp: Some(b"<exif:DateTimeOriginal>2026-09-11T17:24:25</exif:DateTimeOriginal>".to_vec()), ..Default::default() };
+        assert_eq!(xmp.capture_time(), Some(expect));
+        assert_eq!(Meta::default().capture_time(), None);
     }
 
     #[test]

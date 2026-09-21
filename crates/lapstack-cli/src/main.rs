@@ -3,7 +3,8 @@
 
 //! lapstack — Laplacian-pyramid focus stacking CLI.
 
-use lapstack_core::{DepthParams, FocusMeasure, Layout, MeshParams, Params, TexFormat, TopRule, Upsample, View, run_with};
+use lapstack_core::{DepthParams, FocusMeasure, Layout, MeshParams, Params, Split, Stack, TexFormat, TopRule, Upsample, View, run_with};
+use lapstack_core::batch::{self, Names};
 use lapstack_core::mesh;
 use lapstack_core::io;
 use lapstack_core::pyramid::Img3;
@@ -35,6 +36,8 @@ fn main() {
     let mut mesh_formats: Vec<String> = Vec::new();
     let mut mp = MeshParams::default();
     let mut mesh_tex = (8192usize, TexFormat::Jpeg(92));
+    let mut split: Option<Split> = None;
+    let mut dry_run = false;
 
     let mut i = 0;
     let next = |i: &mut usize| -> String {
@@ -77,6 +80,11 @@ fn main() {
                 p.slabs = Some((size, overlap));
             }
             "--slab-dir" => slab_dir = Some(next(&mut i)),
+            "--split" => {
+                let s = next(&mut i);
+                split = Some(Split::parse(&s).unwrap_or_else(|| fail(&format!("--split: count:N | gap:SECONDS | dir, not '{s}'"))));
+            }
+            "--dry-run" => dry_run = true,
             "--stereo" => {
                 let s = next(&mut i);
                 let mut it = s.split(':');
@@ -161,48 +169,144 @@ fn main() {
     if inputs.is_empty() {
         fail("no input images; use --help");
     }
+    let cfg = Cfg { output, save_depth, save_conf, metadata, depth_raw, p, slab_dir, stereo, rocking, near_first, mesh_formats, mp, mesh_tex };
 
+    // a directory among the inputs stands for the image files in it
+    let inputs = batch::expand_dirs(&inputs).unwrap_or_else(|e| fail(&e));
     let t0 = Instant::now();
-    let mut log = |s: String| eprintln!("[lapstack] {s}");
+    let stacks: Vec<Stack> = match split {
+        None => vec![Stack { inputs, times: None }],
+        Some(Split::Count(n)) => batch::split_count(&inputs, n),
+        Some(Split::Dir) => batch::split_dir(&inputs),
+        Some(Split::Gap(gap)) => {
+            eprintln!("[lapstack] reading the capture times of {} frames ...", inputs.len());
+            let times = batch::capture_times(&inputs, &mut |s| eprintln!("[lapstack] {s}")).unwrap_or_else(|e| fail(&e));
+            batch::split_gap(&inputs, &times, gap)
+        }
+    };
+    let count = stacks.len();
+    if let Some(rule) = split {
+        eprintln!("[lapstack] {count} stack{} from {} frames ({}):", if count == 1 { "" } else { "s" }, stacks.iter().map(|s| s.inputs.len()).sum::<usize>(), describe_split(rule));
+        let mut prev_end: Option<f64> = None;
+        for (k, s) in stacks.iter().enumerate() {
+            let names = Names { n: k + 1, count, first: s.first(), dir: &s.dir() };
+            let (a, b) = (s.inputs[0].as_str(), s.inputs[s.inputs.len() - 1].as_str());
+            let when = match s.times {
+                Some((t0, t1)) => format!("  {} .. {}{}", batch::clock(t0), batch::clock(t1), match prev_end { Some(p) => format!(", {:+.0} s after the last", t0 - p), None => String::new() }),
+                None => String::new(),
+            };
+            prev_end = s.times.map(|t| t.1);
+            eprintln!("  {:>3}: {:>4} frames  {} .. {}  -> {}{when}", k + 1, s.inputs.len(), base(a), base(b), batch::expand(&cfg.output, &names));
+        }
+    }
+    if dry_run {
+        return;
+    }
+
+    let mut failed: Vec<(usize, String)> = Vec::new();
+    for (k, s) in stacks.iter().enumerate() {
+        let names = Names { n: k + 1, count, first: s.first(), dir: &s.dir() };
+        let tag = if count > 1 { format!(" {}/{count}", k + 1) } else { String::new() };
+        if count > 1 {
+            eprintln!("[lapstack{tag}] {} frames, {} .. {}", s.inputs.len(), s.inputs[0], s.inputs[s.inputs.len() - 1]);
+        }
+        match run_stack(&s.inputs, &cfg, &names, &tag) {
+            Ok(()) => {}
+            Err(e) if count > 1 => {
+                eprintln!("[lapstack{tag}] failed: {e}");
+                failed.push((k + 1, e));
+            }
+            Err(e) => fail(&e),
+        }
+    }
+    if count > 1 {
+        let done = count - failed.len();
+        eprintln!("[lapstack] batch: {count} stacks, {done} done, {} failed, total {:.1}s", failed.len(), t0.elapsed().as_secs_f64());
+        for (n, e) in &failed {
+            eprintln!("[lapstack]   stack {n}: {e}");
+        }
+        if !failed.is_empty() {
+            std::process::exit(1);
+        }
+    }
+}
+
+fn describe_split(rule: Split) -> String {
+    match rule {
+        Split::Count(n) => format!("every {n} frames"),
+        Split::Gap(g) => format!("a new stack at every pause over {g} s"),
+        Split::Dir => "one per folder".into(),
+    }
+}
+
+fn base(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// Everything the command line said, apart from the frames: applied to every stack of a batch.
+struct Cfg {
+    /// Output paths are templates when there is more than one stack (`batch::expand`).
+    output: String,
+    save_depth: bool,
+    save_conf: bool,
+    metadata: bool,
+    depth_raw: Option<String>,
+    p: Params,
+    slab_dir: Option<String>,
+    stereo: Option<(f32, Layout)>,
+    rocking: Option<(f32, usize)>,
+    near_first: bool,
+    mesh_formats: Vec<String>,
+    mp: MeshParams,
+    mesh_tex: (usize, TexFormat),
+}
+
+/// Stack one set of frames and write everything asked for. `tag` goes into the
+/// log prefix (` 3/7` in a batch).
+fn run_stack(inputs: &[String], cfg: &Cfg, names: &Names<'_>, tag: &str) -> Result<(), String> {
+    let t0 = Instant::now();
+    let output = batch::expand(&cfg.output, names);
+    let mut p = cfg.p.clone();
+    p.save_aligned = cfg.p.save_aligned.as_deref().map(|d| batch::expand(d, names));
+    let depth_raw = cfg.depth_raw.as_deref().map(|d| batch::expand(d, names));
+    let mut log = |s: String| eprintln!("[lapstack{tag}] {s}");
     // the first frame's EXIF, ICC profile and XMP go into the fused image (and the slabs)
-    let meta = if metadata { Some(io::load_meta(&inputs[0]).unwrap_or_else(|e| fail(&e))) } else { None };
+    let meta = if cfg.metadata { Some(io::load_meta(&inputs[0])?) } else { None };
     // slabs: written as they are fused, in the output's format, to --slab-dir [<output stem>_slabs]
     let stem = match output.rfind('.') { Some(k) => &output[..k], None => &output[..] };
     let ext = match output.rfind('.') { Some(k) => &output[k..], None => ".png" };
-    let slab_dir = slab_dir.unwrap_or_else(|| format!("{stem}_slabs"));
+    let slab_dir = match &cfg.slab_dir { Some(d) => batch::expand(d, names), None => format!("{stem}_slabs") };
     let mut on_slab = |s: lapstack_core::Slab<'_>| -> Result<(), String> {
         if s.index == 0 {
             std::fs::create_dir_all(&slab_dir).map_err(|e| format!("cannot create {slab_dir}: {e}"))?;
         }
         let path = format!("{slab_dir}/slab_{:02}_{:03}-{:03}{ext}", s.index + 1, s.lo, s.hi);
         io::save_rgb(s.image, &path, s.bit_depth, meta.as_ref())?;
-        eprintln!("[lapstack] slab {}/{} (frames {}..{}) -> {path}", s.index + 1, s.count, s.lo, s.hi);
+        eprintln!("[lapstack{tag}] slab {}/{} (frames {}..{}) -> {path}", s.index + 1, s.count, s.lo, s.hi);
         Ok(())
     };
-    let out = run_with(&inputs, &p, &mut log, &mut on_slab).unwrap_or_else(|e| fail(&e));
+    let out = run_with(inputs, &p, &mut log, &mut on_slab)?;
     if let Some(m) = &meta {
-        eprintln!("[lapstack] metadata from {}: {}", inputs[0], m.describe());
+        eprintln!("[lapstack{tag}] metadata from {}: {}", inputs[0], m.describe());
     }
-    if let Err(e) = io::save_rgb(&out.image, &output, out.bit_depth, meta.as_ref()) {
-        fail(&e);
+    // a template names a folder that may not exist yet
+    if let Some(dir) = std::path::Path::new(&output).parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
-    eprintln!("[lapstack] fused -> {output}");
-    if save_depth {
-        let dp = match output.rfind('.') {
-            Some(k) => format!("{}_depth.png", &output[..k]),
-            None => format!("{output}_depth.png"),
-        };
-        if let Err(e) = io::save_gray(&out.depth, out.image.w, out.image.h, &dp) {
-            fail(&e);
-        }
+    io::save_rgb(&out.image, &output, out.bit_depth, meta.as_ref())?;
+    eprintln!("[lapstack{tag}] fused -> {output}");
+    if cfg.save_depth {
+        let dp = format!("{stem}_depth.png");
+        io::save_gray(&out.depth, out.image.w, out.image.h, &dp)?;
         match &p.depth {
-            Some(_) => eprintln!("[lapstack] depth map (depth from focus) -> {dp}"),
-            None => eprintln!("[lapstack] depth map (level-{} winners) -> {dp}", p.fuse.depth_level.min(out.levels - 1)),
+            Some(_) => eprintln!("[lapstack{tag}] depth map (depth from focus) -> {dp}"),
+            None => eprintln!("[lapstack{tag}] depth map (level-{} winners) -> {dp}", p.fuse.depth_level.min(out.levels - 1)),
         }
     }
     let n_last = (inputs.len().max(2) - 1) as f32;
     // synthetic stereo and rocking (view.rs): the result sheared by its depth map, plane by plane
     let (iw, ih) = (out.image.w, out.image.h);
+    let near_first = cfg.near_first;
     let sheared = |v: &View| -> Img3 {
         let mut img = Img3::zeros(iw, ih);
         for c in 0..3 {
@@ -210,7 +314,7 @@ fn main() {
         }
         img
     };
-    if let Some((shift, layout)) = stereo {
+    if let Some((shift, layout)) = cfg.stereo {
         let (l, r) = (sheared(&View::new(-shift, near_first)), sheared(&View::new(shift, near_first)));
         let pair = match layout {
             Layout::Anaglyph => Img3 { w: iw, h: ih, p: [l.p[0].clone(), r.p[1].clone(), r.p[2].clone()] },
@@ -227,81 +331,73 @@ fn main() {
             }
         };
         let path = format!("{stem}_stereo{ext}");
-        if let Err(e) = io::save_rgb(&pair, &path, out.bit_depth, meta.as_ref()) {
-            fail(&e);
-        }
-        eprintln!("[lapstack] stereo pair (±{:.1} %, {}) -> {path}", shift * 100.0, match layout { Layout::SideBySide => "left | right", Layout::CrossEyed => "right | left", Layout::Anaglyph => "red-cyan anaglyph" });
+        io::save_rgb(&pair, &path, out.bit_depth, meta.as_ref())?;
+        eprintln!("[lapstack{tag}] stereo pair (±{:.1} %, {}) -> {path}", shift * 100.0, match layout { Layout::SideBySide => "left | right", Layout::CrossEyed => "right | left", Layout::Anaglyph => "red-cyan anaglyph" });
     }
-    if let Some((amp, n)) = rocking {
+    if let Some((amp, n)) = cfg.rocking {
         let dir = format!("{stem}_rocking");
-        std::fs::create_dir_all(&dir).unwrap_or_else(|e| fail(&format!("cannot create {dir}: {e}")));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
         for (i, s) in view::rocking_shifts(amp, n).into_iter().enumerate() {
             let path = format!("{dir}/view_{i:02}{ext}");
-            if let Err(e) = io::save_rgb(&sheared(&View::new(s, near_first)), &path, out.bit_depth, meta.as_ref()) {
-                fail(&e);
-            }
+            io::save_rgb(&sheared(&View::new(s, near_first)), &path, out.bit_depth, meta.as_ref())?;
         }
-        eprintln!("[lapstack] rocking: {n} views of ±{:.1} % -> {dir}/view_NN{ext}", amp * 100.0);
+        eprintln!("[lapstack{tag}] rocking: {n} views of ±{:.1} % -> {dir}/view_NN{ext}", amp * 100.0);
     }
-    if !mesh_formats.is_empty() {
+    if !cfg.mesh_formats.is_empty() {
         // the 3D model (mesh.rs): the depth map as a relief textured with the result
+        let mut mp = cfg.mp;
         mp.near_first = near_first;
+        let (tex_edge, tex_fmt) = cfg.mesh_tex;
         let m = mesh::heightfield(&out.depth, iw, &lapstack_core::align::Rect::full(iw, ih), 1.0 / n_last, &mp);
-        let (tex, tw, th) = mesh::texture_planes([&out.image.p[0], &out.image.p[1], &out.image.p[2]], iw, ih, mesh_tex.0);
-        let write = |path: &str, bytes: &[u8]| std::fs::write(path, bytes).unwrap_or_else(|e| fail(&format!("cannot write {path}: {e}")));
-        eprintln!("[lapstack] 3D model: {}x{} vertices, {} triangles, relief {:.0} % of the width, texture {tw}x{th}", m.nx, m.ny, m.triangles(), mp.relief * 100.0);
-        let image = if mesh_formats.iter().any(|f| f != "stl") { mesh::encode_texture(&tex, tw, th, mesh_tex.1).unwrap_or_else(|e| fail(&e)) } else { Vec::new() };
-        for f in &mesh_formats {
+        let (tex, tw, th) = mesh::texture_planes([&out.image.p[0], &out.image.p[1], &out.image.p[2]], iw, ih, tex_edge);
+        let write = |path: &str, bytes: &[u8]| std::fs::write(path, bytes).map_err(|e| format!("cannot write {path}: {e}"));
+        eprintln!("[lapstack{tag}] 3D model: {}x{} vertices, {} triangles, relief {:.0} % of the width, texture {tw}x{th}", m.nx, m.ny, m.triangles(), mp.relief * 100.0);
+        let image = if cfg.mesh_formats.iter().any(|f| f != "stl") { mesh::encode_texture(&tex, tw, th, tex_fmt)? } else { Vec::new() };
+        for f in &cfg.mesh_formats {
             match f.as_str() {
                 "glb" => {
                     let path = format!("{stem}.glb");
-                    write(&path, &mesh::glb(&m, &image, mesh_tex.1.mime()));
-                    eprintln!("[lapstack] glTF binary -> {path}");
+                    write(&path, &mesh::glb(&m, &image, tex_fmt.mime()))?;
+                    eprintln!("[lapstack{tag}] glTF binary -> {path}");
                 }
                 "obj" => {
                     let base = stem.rsplit('/').next().unwrap_or(stem);
-                    let (mtl_name, tex_name) = (format!("{base}.mtl"), format!("{base}_texture.{}", mesh_tex.1.ext()));
-                    write(&format!("{stem}.obj"), &mesh::obj(&m, &mtl_name));
-                    write(&format!("{stem}.mtl"), &mesh::mtl(&tex_name));
-                    write(&format!("{stem}_texture.{}", mesh_tex.1.ext()), &image);
-                    eprintln!("[lapstack] Wavefront OBJ -> {stem}.obj + {mtl_name} + {tex_name}");
+                    let (mtl_name, tex_name) = (format!("{base}.mtl"), format!("{base}_texture.{}", tex_fmt.ext()));
+                    write(&format!("{stem}.obj"), &mesh::obj(&m, &mtl_name))?;
+                    write(&format!("{stem}.mtl"), &mesh::mtl(&tex_name))?;
+                    write(&format!("{stem}_texture.{}", tex_fmt.ext()), &image)?;
+                    eprintln!("[lapstack{tag}] Wavefront OBJ -> {stem}.obj + {mtl_name} + {tex_name}");
                 }
                 _ => {
                     let path = format!("{stem}.stl");
-                    write(&path, &mesh::stl(&m));
-                    eprintln!("[lapstack] binary STL -> {path}");
+                    write(&path, &mesh::stl(&m))?;
+                    eprintln!("[lapstack{tag}] binary STL -> {path}");
                 }
             }
         }
     }
     if let Some(path) = &depth_raw {
-        if let Err(e) = io::save_gray16(&out.depth, out.image.w, out.image.h, n_last, path) {
-            fail(&e);
-        }
-        eprintln!("[lapstack] depth (16-bit, 65535 = frame {}) -> {path}", inputs.len() - 1);
+        io::save_gray16(&out.depth, out.image.w, out.image.h, n_last, path)?;
+        eprintln!("[lapstack{tag}] depth (16-bit, 65535 = frame {}) -> {path}", inputs.len() - 1);
     }
-    if save_conf {
+    if cfg.save_conf {
         match &out.conf {
             Some(c) => {
-                let cp = match output.rfind('.') {
-                    Some(k) => format!("{}_conf.png", &output[..k]),
-                    None => format!("{output}_conf.png"),
-                };
-                if let Err(e) = io::save_gray16(c, out.image.w, out.image.h, 1.0, &cp) {
-                    fail(&e);
-                }
-                eprintln!("[lapstack] confidence -> {cp}");
+                let cp = format!("{stem}_conf.png");
+                io::save_gray16(c, out.image.w, out.image.h, 1.0, &cp)?;
+                eprintln!("[lapstack{tag}] confidence -> {cp}");
             }
-            None => eprintln!("[lapstack] --save-conf: no confidence map with --depth winner"),
+            None => eprintln!("[lapstack{tag}] --save-conf: no confidence map with --depth winner"),
         }
     }
-    eprintln!("[lapstack] total {:.1}s", t0.elapsed().as_secs_f64());
+    eprintln!("[lapstack{tag}] total {:.1}s", t0.elapsed().as_secs_f64());
+    Ok(())
 }
 
 fn help() {
     eprintln!(
         "lapstack — Laplacian-pyramid focus stacking (Burt & Adelson; Wang & Chang 2011)\n\
-         Usage: lapstack [options] frame1 frame2 ...\n\
+         Usage: lapstack [options] frame1 frame2 ...   (a directory stands for the image files in it)\n\
          Output keeps the input bit depth (16-bit needs PNG/TIFF).\n\
            -o, --output PATH      fused image [stacked.png]\n\
            --levels N             band-pass levels [auto: residual short side >= 32 px]\n\
@@ -324,6 +420,12 @@ fn help() {
            --slabs SIZE[:OVERLAP] also fuse slabs of SIZE consecutive frames, overlapping by OVERLAP [2],\n\
                                   each on its own (Zerene's slabbing): thick planes of focus to retouch from\n\
            --slab-dir DIR         where the slabs go, in the output's format [<output stem>_slabs]\n\
+           --split RULE           batch: cut the frames into stacks and run each — count:N (every N frames),\n\
+                                  gap:SECONDS (a new stack at every pause in the capture times longer than\n\
+                                  that), dir (one stack per folder); then -o, --slab-dir, --save-aligned and\n\
+                                  --depth-raw are templates: {{n}} the stack's number, {{first}} its first frame's\n\
+                                  stem, {{dir}} its folder; a path with no field gets _NN before its extension\n\
+           --dry-run              list the stacks and their output names, then stop\n\
            --stereo PCT[:LAYOUT]  synthetic stereo pair -> <stem>_stereo.<ext>: the result sheared by its depth map,\n\
                                   the far end of the stack moved -PCT / +PCT % of the width (left / right view);\n\
                                   LAYOUT sbs (left | right, default) | cross (right | left) | anaglyph (red-cyan)\n\
