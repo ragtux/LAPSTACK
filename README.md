@@ -17,7 +17,7 @@ stacking on the Laplacian pyramid, written from two papers kept in `docs/`:
 ## Layout
 
 ```
-crates/lapstack-core   library: pyramid, fusion, depth from focus, aligner, stereo views, 3D model, batch splitting, I/O, CUDA path
+crates/lapstack-core   library: pyramid, fusion, depth from focus, aligner, dust map, stereo views, 3D model, batch splitting, I/O, CUDA path
 crates/lapstack-cli    `lapstack` command-line tool
 crates/lapstack-web    wasm32 + WebGPU engine for the browser app
 web/                   the browser app (static files) and its headless test
@@ -195,6 +195,44 @@ clamped to [1/4, 4] and logged; `--no-brightness` turns it off. The browser
 app does the same on the GPU (block means of frame 0 kept, one small readback
 per frame), *equalise brightness* in the parameter panel, and each filmstrip
 entry shows its gain.
+
+**Dust map** (`dust.rs`; `--dust-map FILE`, `--dust-threshold PCT`,
+`--dust-margin PX`, `--dust-mode fill|flat`, `--save-dust-map PATH`): Helicon
+Focus's dust map. Sensor dust shows in every frame at the same place as a
+soft dark spot, and the stack keeps it — worse, the region-energy rule takes
+the spot's edge for detail and picks it, so the spot comes out sharper than
+in any frame. A frame of an evenly lit, featureless surface shot out of
+focus (a white wall, the sky, a sheet of paper) at the stack's aperture
+shows nothing but the dust, and that frame is the dust map: its luma at
+half resolution (one REDUCE, which also tames the noise) is divided by its
+own large-scale background — a plane fitted under each cell four pyramid
+levels up (a first-order normalised convolution: the illumination's falloff
+is followed out to the frame's edges, a spot is not; estimated twice, the
+second time with the first pass's spots weighted out) — and a pixel darker
+than that by more than the threshold (default 3 %) is dust. The connected
+components, grown by the margin (default 3 px: the soft edge of the shadow,
+and the little a spot moves between apertures), are the spots; a component
+under 16 px is noise, and a blob wider than a quarter of the frame is not
+dust and is reported. The spots are then taken out of every frame **as
+decoded, before alignment** — the dust is fixed on the sensor, and a fixed
+pattern in every frame is exactly what pulls a registration towards zero
+shift. `fill` (the default, Helicon's way) interpolates each spot from its
+surroundings by pull-push (Gortler et al. 1996: the window's pyramid is
+built with the dust weighted out, and on the way down every hole takes the
+coarser level's value), a smooth patch that meets its edges; `flat` divides
+the spot by the attenuation the map measured, a flat-field correction that
+keeps whatever detail lies under the spot — right when the map was shot at
+the stack's aperture and lighting, a ring when it was not. The run logs the
+spots found (count, size, share of the frame); `--save-dust-map` writes the
+mask (white = dust) to check the map before a long batch; a map of another
+size than the frames stops the run. The browser app has the same under
+*Dust map* in the parameter panel: load the frame, the spots are found in
+the worker and outlined on a preview (click it for a larger view in a new tab), the
+threshold, margin and mode take effect at once, and the map applies to
+every frame the engine decodes — the run, the DFR and WAV renders, the
+slabs, the Source view and the retouch brush (the filmstrip's thumbnails
+are of the frames as shot). A project file records the map's name, and the
+file is taken from the ones added when the project is opened again.
 
 **Synthetic stereo and rocking** (`view.rs`; `--stereo PCT[:LAYOUT]`,
 `--rocking PCT[:N]`, `--far-first`): the depth map makes the result a relief,

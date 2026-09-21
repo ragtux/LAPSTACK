@@ -20,6 +20,7 @@ use depth::DepthGpu;
 use lapstack_core::depth::{DepthParams, FocusMeasure, Upsample};
 use lapstack_core::fuse::{FuseParams, TopRule, binomial, fuse_residuals, upsample_index};
 use lapstack_core::align::{Rect, common_area};
+use lapstack_core::dust::{self, DustMap, DustMode, DustParams};
 use lapstack_core::pyramid::{Img3, auto_levels, half};
 use lapstack_core::view::{self, Layout, View};
 use lapstack_core::mesh::{self, MeshParams, TexFormat};
@@ -335,11 +336,28 @@ struct Kept {
     meta: lapstack_core::meta::Meta,
 }
 
+/// The dust map (`lapstack_core::dust`) in force: its spots are taken out of
+/// every frame as it is decoded (`Engine::decode`), for the run, the renders,
+/// the slabs, the source view and the refold alike — a frame decoded here is
+/// never seen with its dust. The map frame's half-resolution luma stays, so
+/// the spots can be found again with other settings without the file.
+struct Dust {
+    map: DustMap,
+    name: String,
+    ys: Vec<f32>,
+    hw: usize,
+    hh: usize,
+    proxy: Vec<u8>,
+    pw: usize,
+    ph: usize,
+}
+
 #[wasm_bindgen]
 pub struct Engine {
     gpu: Gpu,
     run: Option<Run>,
     kept: Vec<Kept>,
+    dust: Option<Dust>,
 }
 
 /// Decode a frame on the CPU and area-average it to `edge` px on the long side:
@@ -353,6 +371,20 @@ pub fn thumbnail(bytes: &[u8], edge: usize, raw: bool) -> Result<JsValue, JsValu
         Some(img) => decode::frame_of(img),
         None => decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?,
     };
+    let (w, h) = (f.w, f.h);
+    let (out, pw, ph) = proxy_of(&f, edge);
+    let o = js_sys::Object::new();
+    set(&o, "w", w as u32);
+    set(&o, "h", h as u32);
+    set(&o, "bits", f.bits);
+    set(&o, "proxy_w", pw as u32);
+    set(&o, "proxy_h", ph as u32);
+    set(&o, "proxy", js_sys::Uint8Array::from(&out[..]));
+    Ok(o.into())
+}
+
+/// A frame area-averaged to `edge` px on the long side, as RGBA8: (pixels, w, h).
+fn proxy_of(f: &decode::Frame, edge: usize) -> (Vec<u8>, usize, usize) {
     let (w, h) = (f.w, f.h);
     let pf = (w.max(h)).div_ceil(edge.max(64)).max(1);
     let (pw, ph) = (w.div_ceil(pf), h.div_ceil(pf));
@@ -378,21 +410,14 @@ pub fn thumbnail(bytes: &[u8], edge: usize, raw: bool) -> Result<JsValue, JsValu
             out[o + 3] = 255;
         }
     }
-    let o = js_sys::Object::new();
-    set(&o, "w", w as u32);
-    set(&o, "h", h as u32);
-    set(&o, "bits", f.bits);
-    set(&o, "proxy_w", pw as u32);
-    set(&o, "proxy_h", ph as u32);
-    set(&o, "proxy", js_sys::Uint8Array::from(&out[..]));
-    Ok(o.into())
+    (out, pw, ph)
 }
 
 #[wasm_bindgen]
 pub async fn create_engine() -> Result<Engine, JsValue> {
     console_error_panic_hook::set_once();
     let gpu = Gpu::new().await.map_err(|e| JsValue::from_str(&e))?;
-    Ok(Engine { gpu, run: None, kept: Vec::new() })
+    Ok(Engine { gpu, run: None, kept: Vec::new(), dust: None })
 }
 
 /// The full-resolution depth map (u16, 65535 = last frame): the DFF map, or
@@ -415,6 +440,12 @@ fn conf_full_u16(run: &Run) -> Result<Vec<u16>, JsValue> {
     let dff = run.dff.as_ref().ok_or_else(|| JsValue::from_str("not finished"))?;
     let full = if dff.k == 1 { std::borrow::Cow::Borrowed(&c[..]) } else { std::borrow::Cow::Owned(lapstack_core::depth::upsample_bilinear(c, dff.dw, dff.dh, run.w, run.h, dff.k)) };
     Ok(full.iter().map(|&v| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16).collect())
+}
+
+/// `DustParams` from the page's settings.
+fn dust_params(threshold: f32, margin: usize, mode: &str) -> Result<DustParams, JsValue> {
+    let mode = DustMode::parse(mode).ok_or_else(|| JsValue::from_str(&format!("dust mode must be fill | flat, not '{mode}'")))?;
+    Ok(DustParams { threshold: threshold.clamp(0.001, 0.9), margin: margin.min(64), mode, ..DustParams::default() })
 }
 
 fn set(obj: &js_sys::Object, k: &str, v: impl Into<JsValue>) {
@@ -696,6 +727,77 @@ impl Engine {
         )
     }
 
+    /// A frame decoded (or developed) with the dust map's spots taken out, when
+    /// there is one of its size.
+    fn decode(&self, bytes: &[u8], raw: bool) -> Result<decode::Frame, String> {
+        let mut frame = decode::decode_any(bytes, raw)?;
+        if let Some(d) = &self.dust {
+            if d.map.w == frame.w && d.map.h == frame.h {
+                d.map.apply_rgb16(&mut frame.rgb);
+            }
+        }
+        Ok(frame)
+    }
+
+    /// Set the dust map (`lapstack_core::dust`) from a frame of an evenly lit
+    /// blank surface: its spots are found with `threshold` (a fraction),
+    /// `margin` (px) and `mode` ("fill" | "flat"), and taken out of every
+    /// frame decoded from now on. Returns `dust_info` — with a proxy of the
+    /// frame `edge` px on the long side, and the spots' windows, to show.
+    pub fn dust_set(&mut self, name: &str, bytes: &[u8], raw: bool, edge: usize, threshold: f32, margin: usize, mode: &str) -> Result<JsValue, JsValue> {
+        let t0 = now();
+        let frame = decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
+        let (w, h) = (frame.w, frame.h);
+        let y: Vec<f32> = (0..w * h).map(|i| (0.299 * frame.rgb[3 * i] as f32 + 0.587 * frame.rgb[3 * i + 1] as f32 + 0.114 * frame.rgb[3 * i + 2] as f32) / 65535.0).collect();
+        let (ys, hw, hh) = dust::half_luma(&y, w, h);
+        drop(y);
+        let (proxy, pw, ph) = proxy_of(&frame, edge);
+        drop(frame);
+        let params = dust_params(threshold, margin, mode)?;
+        let map = dust::detect_half(&ys, hw, hh, w, h, &params);
+        log(&format!("[lapstack] dust map {name} ({w}x{h}): {}  ({:.0} ms)", map.describe(), now() - t0));
+        self.dust = Some(Dust { map, name: name.to_string(), ys, hw, hh, proxy, pw, ph });
+        Ok(self.dust_info(true))
+    }
+
+    /// Find the dust map's spots again with other settings (no file needed).
+    pub fn dust_update(&mut self, threshold: f32, margin: usize, mode: &str) -> Result<JsValue, JsValue> {
+        let params = dust_params(threshold, margin, mode)?;
+        let d = self.dust.as_mut().ok_or_else(|| JsValue::from_str("no dust map"))?;
+        d.map = dust::detect_half(&d.ys, d.hw, d.hh, d.map.w, d.map.h, &params);
+        Ok(self.dust_info(false))
+    }
+
+    pub fn dust_clear(&mut self) {
+        self.dust = None;
+    }
+
+    /// {name, w, h, spots, size_min, size_max, covered_pct, rejected, text, rects:
+    /// Int32Array [x, y, w, h, …] (the spots' windows), and with `proxy`:
+    /// proxy_w, proxy_h, proxy: Uint8Array (RGBA8)}; null without a dust map.
+    fn dust_info(&self, proxy: bool) -> JsValue {
+        let Some(d) = &self.dust else { return JsValue::NULL };
+        let m = d.map.params.margin;
+        let o = js_sys::Object::new();
+        set(&o, "name", d.name.as_str());
+        set(&o, "w", d.map.w as u32);
+        set(&o, "h", d.map.h as u32);
+        set(&o, "spots", d.map.spots.len() as u32);
+        set(&o, "size_min", d.map.spots.iter().map(|s| s.size(m)).min().unwrap_or(0) as u32);
+        set(&o, "size_max", d.map.spots.iter().map(|s| s.size(m)).max().unwrap_or(0) as u32);
+        set(&o, "covered_pct", 100.0 * d.map.covered() as f64 / (d.map.w * d.map.h).max(1) as f64);
+        set(&o, "rejected", d.map.rejected as u32);
+        set(&o, "text", d.map.describe().as_str());
+        let rects: Vec<i32> = d.map.spots.iter().flat_map(|s| [s.x as i32, s.y as i32, s.w as i32, s.h as i32]).collect();
+        set(&o, "rects", js_sys::Int32Array::from(&rects[..]));
+        if proxy {
+            set(&o, "proxy_w", d.pw as u32);
+            set(&o, "proxy_h", d.ph as u32);
+            set(&o, "proxy", js_sys::Uint8Array::from(&d.proxy[..]));
+        }
+        o.into()
+    }
+
     pub fn reset(&mut self) {
         self.run = None;
     }
@@ -751,7 +853,14 @@ impl Engine {
     /// `raw`: the bytes are a camera raw's, developed rather than decoded (so everywhere below).
     pub async fn push(&mut self, bytes: &[u8], params_json: &str, given: &[f64], raw: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
-        let frame = decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
+        // the dust map must be of the frames' size: another size is a mistake (another camera, a crop)
+        if let Some(d) = &self.dust {
+            let (w, h) = decode::dims(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
+            if d.map.w != w || d.map.h != h {
+                return Err(JsValue::from_str(&format!("the dust map {} is {}x{} but the frames are {w}x{h}; it must be shot with the same camera at the same size", d.name, d.map.w, d.map.h)));
+            }
+        }
+        let frame = self.decode(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let t_dec = now();
         if self.run.is_none() {
             let params: Params = serde_json::from_str(params_json).map_err(|e| JsValue::from_str(&format!("params: {e}")))?;
@@ -969,7 +1078,7 @@ impl Engine {
     /// same accumulator; `render_finish(true)` normalises it into `wav_rgb16`.
     pub async fn render_push(&mut self, index: usize, bytes: &[u8], raw: bool, wav: bool, power: f32, smooth: u32) -> Result<JsValue, JsValue> {
         let t0 = now();
-        let frame = decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
+        let frame = self.decode(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         if run.fused_rgb16.is_none() {
@@ -1144,7 +1253,7 @@ impl Engine {
     /// {index, w, h} and the two full-frame readbacks are skipped.
     pub async fn load_source(&mut self, index: usize, bytes: &[u8], readback: bool, raw: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
-        let frame = decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
+        let frame = self.decode(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         if run.fused_rgb16.is_none() {
@@ -1240,7 +1349,7 @@ impl Engine {
     /// Fold frame `index` (decoded again from `bytes`) into the slab. Returns {index, ms}.
     pub async fn slab_push(&mut self, index: usize, bytes: &[u8], raw: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
-        let frame = decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
+        let frame = self.decode(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         let (lo, hi) = run.slab.as_ref().map(|s| (s.lo, s.hi)).ok_or_else(|| JsValue::from_str("no slab begun"))?;
@@ -1807,7 +1916,7 @@ impl Engine {
     /// pass, shifted by its index. Returns {index, ms}.
     pub async fn refold_push(&mut self, index: usize, bytes: &[u8], raw: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
-        let frame = decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
+        let frame = self.decode(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         if frame.w != run.w || frame.h != run.h {

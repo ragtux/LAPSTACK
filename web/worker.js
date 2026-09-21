@@ -180,6 +180,17 @@ async function handleCall(m) {
   } else if (m.type === 'refold_end') {
     engine.refold_end();
     post({ type: 'refold', rid: m.rid });
+  } else if (m.type === 'dust_set' || m.type === 'dust_update' || m.type === 'dust_clear') {
+    // the dust map (lapstack-core's dust.rs): a frame of an evenly lit blank surface, whose spots
+    // the engine takes out of every frame it decodes from now on; 'dust_update' finds the spots
+    // again with other settings, 'dust_clear' lets it go. The reply is the engine's dust_info.
+    if (running) throw new Error('a run is in progress');
+    let r = null;
+    if (m.type === 'dust_set') r = engine.dust_set(m.file.name, new Uint8Array(await m.file.arrayBuffer()), isRaw(m.file.name), m.edge || 1400, m.threshold, m.margin, m.mode);
+    else if (m.type === 'dust_update') r = engine.dust_update(m.threshold, m.margin, m.mode);
+    else engine.dust_clear();
+    const proxy = r && r.proxy ? r.proxy.buffer : null;
+    post({ type: 'dust', rid: m.rid, info: r ? { ...r, rects: r.rects, proxy } : null }, proxy ? [proxy, r.rects.buffer] : []);
   } else if (m.type === 'keep_file') {
     // an image file kept as a result (see 'keep' below): decoded here, its RGBA8 back for the page's copy
     const r = engine.keep_file(m.id, new Uint8Array(await m.file.arrayBuffer()), isRaw(m.file.name));

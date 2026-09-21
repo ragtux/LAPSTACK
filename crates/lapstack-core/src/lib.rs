@@ -17,7 +17,7 @@
 //! `pyramid` is the transform, `fuse` the rules and the N-frame accumulator,
 //! `depth` the depth-from-focus pass (ring difference filter, guided-filter
 //! aggregation, sub-frame peaks, edge-aware WLS), `align` the 4-DOF similarity
-//! registration, `io` bit-depth-preserving TIFF/PNG/JPEG I/O, `view` synthetic
+//! registration, `dust` the dust map, `io` bit-depth-preserving TIFF/PNG/JPEG I/O, `view` synthetic
 //! stereo, `mesh` the textured 3D model, `stack::run` the decode → align →
 //! fuse → depth pipeline, and `batch` the rules that cut a list of frames into
 //! stacks for a batch of runs.
@@ -26,6 +26,7 @@ pub mod align;
 pub mod batch;
 pub mod brightness;
 pub mod depth;
+pub mod dust;
 pub mod fuse;
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -41,6 +42,7 @@ pub mod wav;
 pub use align::{AlignParams, CancelToken, Cancelled, Sim};
 pub use batch::{Split, Stack};
 pub use depth::{DepthMap, DepthParams, FocusMeasure, Upsample};
+pub use dust::{DustMap, DustMode, DustParams};
 pub use fuse::{FuseParams, Fuser, TopRule};
 pub use io::Depth;
 pub use mesh::{Mesh, MeshParams, TexFormat};

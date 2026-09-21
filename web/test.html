@@ -137,8 +137,45 @@ try {
   log(`slabbed DFR: one slab vs LAP maxdiff ${slabbed.one_slab_vs_lap.maxdiff}; slabs of 3 vs LAP ${(100 * slabbed.slabs3_vs_lap.ndiff_frac).toFixed(1)} % of pixels differ (${msA.toFixed(0)} / ${msB.toFixed(0)} ms)`);
   if (slabbed.one_slab_vs_lap.maxdiff !== 0) throw new Error(`a slabbed DFR of one slab differs from the LAP result (maxdiff ${slabbed.one_slab_vs_lap.maxdiff})`);
   if (res.frames > 3 && slabbed.slabs3_vs_lap.ndiff_frac === 0) throw new Error('a slabbed DFR of 3-frame slabs equals the LAP result');
+  // the dust map (dust.rs): a synthetic one — a softly lit gray frame with soft dark spots, drawn
+  // on a canvas — is set in the engine, and a run with it differs from the plain run inside the
+  // spots' windows (each filled from its surroundings) and hardly anywhere else
+  let rid = 0;
+  const rpc = (msg) => new Promise((res, rej) => { const id = ++rid; const h = (ev) => { const m = ev.data; if (m.rid !== id) return; worker.removeEventListener('message', h); if (m.type === 'rpc-error') rej(new Error(m.text)); else res(m); }; worker.addEventListener('message', h); worker.postMessage({ ...msg, rid: id }); });
+  const [fw, fh] = [frames[0].w, frames[0].h];
+  const SPOTS = [[fw * 0.2, fh * 0.3, 10], [fw * 0.7, fh * 0.6, 14], [fw * 0.5, fh * 0.85, 7]];
+  const dustFile = await (async () => {
+    const c = new OffscreenCanvas(fw, fh), g = c.getContext('2d');
+    const grad = g.createRadialGradient(fw / 2, fh / 2, 0, fw / 2, fh / 2, Math.max(fw, fh) / 1.4); grad.addColorStop(0, '#e6e6e6'); grad.addColorStop(1, '#bcbcbc');
+    g.fillStyle = grad; g.fillRect(0, 0, fw, fh);
+    g.filter = 'blur(3px)'; g.fillStyle = 'rgba(0,0,0,0.45)';
+    for (const [x, y, r] of SPOTS) { g.beginPath(); g.arc(x, y, r, 0, 2 * Math.PI); g.fill(); }
+    return new File([await c.convertToBlob({ type: 'image/png' })], 'dust.png');
+  })();
+  const dinfo = (await rpc({ type: 'dust_set', file: dustFile, edge: 400, threshold: 0.03, margin: 3, mode: 'fill' })).info;
+  log(`dust map: ${dinfo.text}`);
+  if (dinfo.spots !== SPOTS.length) throw new Error(`dust map: ${dinfo.spots} spots found, ${SPOTS.length} drawn`);
+  const rects = Array.from(dinfo.rects);
+  for (const [x, y] of SPOTS) { let hit = false; for (let i = 0; i < rects.length; i += 4) if (x >= rects[i] && x < rects[i] + rects[i + 2] && y >= rects[i + 1] && y < rects[i + 1] + rects[i + 3]) hit = true; if (!hit) throw new Error(`dust map: no spot window covers the spot drawn at ${x.toFixed(0)},${y.toFixed(0)}`); }
+  // with the first run's registration given, so the warps are the same and only the spots differ
+  // (the search itself lands a little elsewhere once the spots are filled, and every pixel moves)
+  const dustDone = wait('done');
+  worker.postMessage({ type: 'run', files, params: { align, coarsen, brightness: false, proxy_edge: 400, depth: depthMode, depth_scale: depthScale }, sims: frames.slice(0, res.frames).map((f) => f.sim) });
+  const dres = await dustDone;
+  const dgot = new Uint8Array(dres.rgba);
+  if (dres.w !== res.w || dres.h !== res.h) throw new Error(`the run with the dust map is ${dres.w}x${dres.h}, the plain one ${res.w}x${res.h}`);
+  // the spots' windows in the (possibly cropped) result, grown by 8 px; outside them the two runs should agree
+  const [cx, cy] = res.crop ? [res.crop[0], res.crop[1]] : [0, 0];
+  const inWin = (x, y) => { x += cx; y += cy; for (let i = 0; i < rects.length; i += 4) if (x >= rects[i] - 8 && x < rects[i] + rects[i + 2] + 8 && y >= rects[i + 1] - 8 && y < rects[i + 1] + rects[i + 3] + 8) return true; return false; };
+  let sIn = 0, nIn = 0, sOut = 0, nOut = 0;
+  for (let y = 0; y < res.h; y++) for (let x = 0; x < res.w; x++) { const i = 4 * (y * res.w + x); const d = Math.abs(got[i] - dgot[i]) + Math.abs(got[i + 1] - dgot[i + 1]) + Math.abs(got[i + 2] - dgot[i + 2]); if (inWin(x, y)) { sIn += d; nIn++; } else { sOut += d; nOut++; } }
+  const dust = { spots: dinfo.spots, text: dinfo.text, mean_abs_in_spots: sIn / (3 * nIn), mean_abs_outside: sOut / (3 * nOut), ms: dres.ms };
+  log(`dust map run: mean |diff| vs plain run ${dust.mean_abs_in_spots.toFixed(2)} inside the spots, ${dust.mean_abs_outside.toFixed(3)} outside (${dres.ms.toFixed(0)} ms)`);
+  if (dust.mean_abs_in_spots < 1) throw new Error(`the dust map changed nothing inside its spots (mean |diff| ${dust.mean_abs_in_spots})`);
+  if (dust.mean_abs_outside > 0.5) throw new Error(`the dust map changed the result outside its spots (mean |diff| ${dust.mean_abs_outside})`);
+  await rpc({ type: 'dust_clear' });
   const result = { ok: true, align, frames: res.frames, w: res.w, h: res.h, maxdiff: maxd, ndiff, ndiff_frac: ndiff / (res.w * res.h),
-    mean_abs: sum / (3 * res.w * res.h), depth_range: [dmin, dmax], depth_dims: [res.depth_w, res.depth_h], dff, dmap, slab, slabbed, png_bytes: png.bytes.byteLength, ms: res.ms,
+    mean_abs: sum / (3 * res.w * res.h), depth_range: [dmin, dmax], depth_dims: [res.depth_w, res.depth_h], dff, dmap, slab, slabbed, dust, png_bytes: png.bytes.byteLength, ms: res.ms,
     sims: frames.map(f => f.sim), info };
   log('RESULT ' + JSON.stringify(result));
   window.__result = JSON.stringify(result);

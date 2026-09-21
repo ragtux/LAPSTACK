@@ -99,7 +99,7 @@ const st = {
 // The project open (see the project files section): its run to make again ({params, frames: names, sims, …},
 // runFrames: those names for the replay), its strokes to paint again, how many frames are still to add,
 // and its folders ({id, name, handle, state}).
-const PJ = { name: null, run: null, runFrames: null, strokes: [], missing: 0, dirs: [] };
+const PJ = { name: null, run: null, runFrames: null, strokes: [], missing: 0, dirs: [], dust: null };   // dust: the project's dust map {name, size, modified} until its file is added
 window.__st = st; window.__draw = () => draw();
 // more hooks for the headless harness (web/test/headless.mjs)
 window.__addFiles = (l) => addFiles(l); window.__projectData = () => projectData().data; window.__openProject = (f) => openProject(f); window.__PJ = PJ; window.__R = st.retouch;
@@ -113,7 +113,7 @@ const dpr = () => window.devicePixelRatio || 1;
 
 // ---------- settings (persisted) ----------
 const PK = 'lapstack.settings';
-const stepDefaults = { 'p-kept': 1536, 'p-wav-pow': 2, 'p-wav-smooth': 1, 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5, 'p-dslab-size': 10, 'p-dslab-ov': 2, 'p-split-n': 30, 'p-split-gap': 10 };
+const stepDefaults = { 'p-dust-thr': 3, 'p-dust-margin': 3, 'p-kept': 1536, 'p-wav-pow': 2, 'p-wav-smooth': 1, 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5, 'p-dslab-size': 10, 'p-dslab-ov': 2, 'p-split-n': 30, 'p-split-gap': 10 };
 function readParams() {
   const n = (id) => Number($(id).textContent === 'auto' ? 0 : $(id).textContent);
   return {
@@ -126,6 +126,7 @@ function readParams() {
     turbo: st.turbo, slice: st.slice, peak_on: st.peak.on, peak_strip: st.peak.strip, peak_thr: st.peak.thr, cmp_mode: st.retouch.on && st.retouch.prev ? st.retouch.prev.cmpMode : st.cmpMode,
     brush_size: st.retouch.size, brush_hard: st.retouch.hard, brush_from: st.retouch.from, brush_slab: n('p-slab'),
     split: $('p-split').value, split_n: n('p-split-n'), split_gap: n('p-split-gap'), kept_mb: n('p-kept'),
+    dust_thr: n('p-dust-thr'), dust_margin: n('p-dust-margin'), dust_mode: $('p-dust-mode').value,
   };
 }
 function setStep(id, v) {
@@ -147,6 +148,7 @@ function applyParams(p) {
   setStep('p-slab', p.brush_slab ?? 5);
   $('p-split').value = ['count', 'gap', 'dir'].includes(p.split) ? p.split : 'none'; setStep('p-split-n', p.split_n ?? 30); setStep('p-split-gap', p.split_gap ?? 10);
   setStep('p-kept', p.kept_mb ?? 1536);
+  setStep('p-dust-thr', p.dust_thr ?? 3); setStep('p-dust-margin', p.dust_margin ?? 3); $('p-dust-mode').value = p.dust_mode === 'flat' ? 'flat' : 'fill';
 }
 function saveParams() { try { localStorage.setItem(PK, JSON.stringify(readParams())); } catch {} }
 try { applyParams(JSON.parse(localStorage.getItem(PK))); } catch {}
@@ -270,6 +272,7 @@ function addFiles(list) {
   if (!files.length) return;
   if (st.running || SV.exporting) { toast('Frames can be added once the run or save in progress is done.'); return; }
   if (PJ.missing) return fillProject(files);   // a project is open: the files stand in for its frames
+  if (PJ.dust) { const rest = files.filter((f) => !takeProjectDust(f)); if (rest.length !== files.length) return rest.length ? addFiles(rest) : undefined; }
   for (const f of files) f.uid = ++fileUid;
   if (B.all && !st.running) showAll();   // a batch's stack is on screen: the new frames join the whole list
   B.stacks = [];
@@ -463,7 +466,7 @@ $('dir').addEventListener('change', (e) => { addFiles(e.target.files); e.target.
 function clearAll() {
   if (st.running || SV.exporting) return false;
   setPick(false); worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.off = []; st.result = null; dropAllKept(); st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); B.all = null; B.frames = null; B.stacks = []; B.done = false;
-  PJ.name = null; PJ.run = null; PJ.strokes = []; PJ.missing = 0; PJ.dirs = []; $('pj-reuse-row').hidden = true; $('pj-save').disabled = true;
+  PJ.name = null; PJ.run = null; PJ.strokes = []; PJ.missing = 0; PJ.dirs = []; PJ.dust = null; $('pj-reuse-row').hidden = true; $('pj-save').disabled = true;
   st.step = 'stack'; gotoStep('stack'); renderFilmstrip(); runLabel(); updateTabs(); setView('source');
   return true;
 }
@@ -528,7 +531,7 @@ function keptTip(k) {
   const p = k.params || {};
   const fus = `levels ${p.levels || 'auto'}, energy radius ${p.energy_radius}, top ${p.top} r${p.top_radius}${p.use_chroma ? ', chroma' : ''}`;
   const al = p.align ? `aligned (coarsen ${p.coarsen}${!p.shift ? ', no shift' : ''}${!p.scale ? ', no scale' : ''}${!p.rotation ? ', no rotation' : ''})` : 'not aligned';
-  return `run ${k.run}: ${k.frames} frames, ${k.first} .. ${k.last}\n${al}${p.brightness ? ', brightness equalised' : ''}\n${fus}\ndepth scale ${p.depth_scale}${p.render_dmap ? `, DFR${p.render_slabs ? ` from slabs of ${p.slab_size} (overlap ${p.slab_overlap})` : ''}` : ''}${p.render_wav ? `, WAV (power ${p.wav_power}, smoothing ${p.wav_smooth})` : ''}\n${k.w}×${k.h}, ${k.bits}-bit, ${k.secs} s, ${k.when.toLocaleTimeString()}`;
+  return `run ${k.run}: ${k.frames} frames, ${k.first} .. ${k.last}\n${al}${p.brightness ? ', brightness equalised' : ''}${k.dust ? `, dust map ${k.dust}` : ''}\n${fus}\ndepth scale ${p.depth_scale}${p.render_dmap ? `, DFR${p.render_slabs ? ` from slabs of ${p.slab_size} (overlap ${p.slab_overlap})` : ''}` : ''}${p.render_wav ? `, WAV (power ${p.wav_power}, smoothing ${p.wav_smooth})` : ''}\n${k.w}×${k.h}, ${k.bits}-bit, ${k.secs} s, ${k.when.toLocaleTimeString()}`;
 }
 function keepResult(why) {
   const r = st.result; if (!r || inBatch()) return [];
@@ -536,7 +539,7 @@ function keepResult(why) {
   for (const kind of ['fused', 'dmap', 'wav']) {
     if (!r[kind]) continue;
     const id = ++keptSeq;
-    const k = { id, kind, run: r.run, label: `run ${r.run} · ${KIND_NAME[kind]}`, w: r.w, h: r.h, bits: r.bits, canvas: r[kind], crop: r.crop, meta: r.meta, params: r.params, frames: r.frames, first: r.first, last: r.last, secs: r.secs, when: r.when, strokes: R.undo };
+    const k = { id, kind, run: r.run, label: `run ${r.run} · ${KIND_NAME[kind]}`, w: r.w, h: r.h, bits: r.bits, canvas: r[kind], crop: r.crop, meta: r.meta, params: r.params, dust: r.dust, frames: r.frames, first: r.first, last: r.last, secs: r.secs, when: r.when, strokes: R.undo };
     worker.postMessage({ type: 'keep', id, kind });
     st.kept.push(k); out.push(k);
     r[kind] = null;   // the canvas belongs to the kept result now
@@ -577,6 +580,77 @@ async function loadKeptFile(f) {
 $('kept-add').addEventListener('click', () => $('kept-file').click());
 $('kept-file').addEventListener('change', (e) => { for (const f of [...e.target.files]) loadKeptFile(f); e.target.value = ''; });
 document.querySelectorAll('[data-step="p-kept"]').forEach((b) => b.addEventListener('click', () => { trimKept(); renderKept(); }));
+// ---------- dust map ----------
+// The dust map (lapstack-core's dust.rs, Helicon's dust map): a frame of an evenly lit blank
+// surface, whose spots the engine takes out of every frame it decodes — the run, the renders,
+// the slabs, the source view. The engine keeps what it needs to find the spots again when the
+// settings change (no file needed); the page keeps the file for the project, and shows the map
+// with the spots outlined. The filmstrip's thumbnails are of the frames as shot.
+const DUST = { file: null, info: null, proxy: null };   // info: the engine's dust_info; proxy: ImageBitmap of the map frame
+window.__DUST = DUST; window.__loadDustMap = (f) => loadDustMap(f);
+const dustSettings = () => ({ threshold: Number($('p-dust-thr').textContent) / 100, margin: Number($('p-dust-margin').textContent), mode: $('p-dust-mode').value });
+async function loadDustMap(f) {
+  if (st.running || SV.exporting) { toast('A dust map can be loaded once the run or save in progress is done.'); return; }
+  log(`[lapstack] dust map ${f.name}: finding the spots …`);
+  try {
+    const r = await call({ type: 'dust_set', file: f, edge: 1400, ...dustSettings() });
+    DUST.file = f; DUST.info = r.info; DUST.proxy = await createImageBitmap(new ImageData(new Uint8ClampedArray(r.info.proxy), r.info.proxy_w, r.info.proxy_h));
+    const fr = st.frames.find((x) => x && x.w);
+    log(`[lapstack] dust map ${f.name} (${r.info.w}×${r.info.h}): ${r.info.text}${fr && (fr.w !== r.info.w || fr.h !== r.info.h) ? ` — but the frames are ${fr.w}×${fr.h}: the map must be shot with the same camera at the same size, or the run stops` : ''}`);
+    if (fr && (fr.w !== r.info.w || fr.h !== r.info.h)) toast(`The dust map is ${r.info.w}×${r.info.h} but the frames are ${fr.w}×${fr.h}: it must be shot with the same camera at the same size.`, 0);
+    else if (!r.info.spots) toast('No dust spots found in the map: a lower threshold finds fainter spots.');
+    renderDust(); saveParams();
+  } catch (e) { log(`[lapstack] dust map ${f.name}: ${e.message}`); toast(`${f.name}: ${e.message}`, 0); }
+}
+async function updateDustMap() {   // the settings changed: the spots found again
+  if (!DUST.file || st.running || SV.exporting) return;
+  try { const r = await call({ type: 'dust_update', ...dustSettings() }); DUST.info = r.info; log(`[lapstack] dust map ${DUST.file.name}: ${r.info.text}`); renderDust(); }
+  catch (e) { log(`[lapstack] dust map: ${e.message}`); }
+}
+// a file added that is the open project's dust map (by name and size) becomes it, not a frame
+function takeProjectDust(f) {
+  if (!PJ.dust || f.name !== PJ.dust.name || (PJ.dust.size && f.size !== PJ.dust.size)) return false;
+  PJ.dust = null; loadDustMap(f); return true;
+}
+function clearDustMap() {
+  if (!DUST.file || st.running || SV.exporting) return;
+  worker.postMessage({ type: 'dust_clear' });
+  log(`[lapstack] dust map ${DUST.file.name} let go: the frames are stacked as they are`);
+  DUST.file = null; DUST.info = null; if (DUST.proxy) DUST.proxy.close(); DUST.proxy = null; renderDust();
+}
+// the map frame with the spots outlined, at `edge` px on the long side
+function dustCanvas(edge) {
+  const p = DUST.proxy, k = Math.min(1, edge / Math.max(p.width, p.height));
+  const c = new OffscreenCanvas(Math.max(1, Math.round(p.width * k)), Math.max(1, Math.round(p.height * k))), g = c.getContext('2d');
+  g.drawImage(p, 0, 0, c.width, c.height);
+  const s = c.width / DUST.info.w, r = DUST.info.rects;
+  g.strokeStyle = '#ff3b30'; g.lineWidth = Math.max(1, c.width / 400);
+  for (let i = 0; i < r.length; i += 4) { const pad = 2 / s; g.strokeRect((r[i] - pad) * s, (r[i + 1] - pad) * s, (r[i + 2] + 2 * pad) * s, (r[i + 3] + 2 * pad) * s); }
+  return c;
+}
+function renderDust() {
+  const has = !!DUST.file, i = DUST.info, cv = $('dust-preview');
+  $('dust-x').hidden = !has; cv.hidden = !has;
+  $('dust-info').textContent = has ? `${DUST.file.name} · ${i.w}×${i.h} · ${i.text}` : 'none';
+  $('dust-add').textContent = has ? 'Load another…' : 'Load dust map…';
+  if (!has) return;
+  const w = Math.max(100, $('params').clientWidth - 24), d = dpr();
+  const src = dustCanvas(Math.round(w * d));
+  cv.width = src.width; cv.height = src.height; cv.style.width = `${w}px`; cv.style.height = `${Math.round(w * src.height / src.width)}px`;
+  cv.getContext('2d').drawImage(src, 0, 0);
+}
+$('dust-add').addEventListener('click', () => $('dust-file').click());
+$('dust-file').addEventListener('change', (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) loadDustMap(f); });
+$('dust-x').addEventListener('click', clearDustMap);
+$('dust-preview').addEventListener('click', async () => {   // the map at proxy size, with its outlines, in a new tab
+  if (!DUST.proxy) return;
+  const blob = await dustCanvas(1e9).convertToBlob({ type: 'image/png' });
+  const url = URL.createObjectURL(blob); window.open(url, '_blank'); setTimeout(() => URL.revokeObjectURL(url), 60000);
+});
+document.querySelectorAll('[data-step="p-dust-thr"], [data-step="p-dust-margin"]').forEach((b) => b.addEventListener('click', updateDustMap));
+$('p-dust-mode').addEventListener('change', updateDustMap);
+new ResizeObserver(() => { if (DUST.file) renderDust(); }).observe($('params'));
+
 // the Results section's list: a row per kept result, newest first
 function renderKept() {
   const list = $('kept-list'); list.innerHTML = '';
@@ -711,7 +785,8 @@ function projectData() {
   const frames = frameList().map((e) => ({ name: e.f.name, path: e.f.relPath || e.f.webkitRelativePath || e.f.name, size: e.f.size, modified: e.f.lastModified, dir: dirIx(e.f), ...(e.on ? {} : { off: true }) }));
   const r = st.result;
   const run = r ? { params: r.params, frames: st.files.map((f) => f.name), w: r.w, h: r.h, bits: r.bits, sims: st.frames.map((f) => (f && f.sim) || null), gains: st.frames.map((f) => (f && f.gain) || null), dmap: !!r.dmap, secs: r.secs, when: r.when } : PJ.run;   // no result of this session: the project's own run stays, with its strokes
-  const data = { lapstack_project: 1, saved: new Date().toISOString(), name: PJ.name, frames, dirs: dirs.map((d) => ({ id: d.id, name: d.name })), params: readParams(), save: saveSettingsData(), run, strokes: r ? R.strokes : PJ.strokes };
+  const dust = DUST.file ? { name: DUST.file.name, size: DUST.file.size, modified: DUST.file.lastModified } : PJ.dust;   // a map still to find keeps its place
+  const data = { lapstack_project: 1, saved: new Date().toISOString(), name: PJ.name, frames, dirs: dirs.map((d) => ({ id: d.id, name: d.name })), params: readParams(), save: saveSettingsData(), run, strokes: r ? R.strokes : PJ.strokes, dust };
   return { data, dirs };
 }
 async function saveProject() {
@@ -741,6 +816,11 @@ async function openProject(file) {
   PJ.name = p.name || stemOf(file.name).replace(/\.lapstack$/i, ''); PJ.run = p.run && Array.isArray(p.run.frames) ? p.run : null; PJ.strokes = Array.isArray(p.strokes) ? p.strokes : [];
   PJ.dirs = (p.dirs || []).map((d) => ({ id: d.id, name: d.name, handle: null, state: 'none' }));
   applyParams({ ...readParams(), ...(p.params || {}) }); saveParams(); applySaveSettings(p.save); saveSaveSettings();
+  // the project's dust map: the one loaded stays if it is that file, else it is looked for among the files added
+  PJ.dust = p.dust && p.dust.name ? { name: String(p.dust.name), size: p.dust.size, modified: p.dust.modified } : null;
+  if (PJ.dust && DUST.file && DUST.file.name === PJ.dust.name && (!PJ.dust.size || DUST.file.size === PJ.dust.size)) { PJ.dust = null; updateDustMap(); }
+  else if (PJ.dust) log(`[lapstack] project ${PJ.name}: its dust map ${PJ.dust.name} is taken from the files added, or load it in the Dust map section`);
+  else if (DUST.file) log(`[lapstack] project ${PJ.name}: no dust map in it; ${DUST.file.name} stays loaded (× in the Dust map section lets it go)`);
   // placeholders for the frames, in their order, until the files are found
   setFrameList(p.frames.map((fr) => ({ f: { name: String(fr.name), relPath: fr.path || fr.name, size: fr.size, lastModified: fr.modified, dirIx: fr.dir, missing: true, uid: ++fileUid }, fr: undefined, on: !fr.off })));
   PJ.missing = p.frames.length;
@@ -767,6 +847,7 @@ async function openDir(d) {   // a remembered folder's frames, for the project's
 // deciding between twins — and the rest are left out
 function fillProject(files) {
   const list = frameList(), taken = new Set(); let found = 0, extra = 0;
+  files = files.filter((f) => !takeProjectDust(f));
   for (const f of files) {
     const cands = list.filter((e) => e.f.missing && !taken.has(e) && e.f.name === f.name && (!e.f.size || e.f.size === f.size));
     const e = cands.find((e) => e.f.relPath === (f.relPath || f.webkitRelativePath || f.name)) || cands[0];
@@ -846,10 +927,10 @@ function startRun() {
   runLabel(); $('runwrap').hidden = true; $('runmenu').hidden = true; $('cancel').hidden = false; $('clear').disabled = true;
   setProgress('starting', 0, st.files.length);
   const params = readParams(); delete params.turbo;
-  log(`[lapstack] run: ${st.files.length} frames, ${JSON.stringify(params)}`);
+  log(`[lapstack] run: ${st.files.length} frames, ${JSON.stringify(params)}${DUST.file ? `, dust map ${DUST.file.name} (${DUST.info.spots} spots, ${params.dust_mode})` : ''}`);
   st.pending = [params.render_dmap && 'dmap', params.render_wav && 'wav'].filter(Boolean); st.rendering = st.pending.length > 0;   // the images still to come after the pyramid's
   st.t0 = performance.now(); window.__app_done = null;
-  st.runNo = ++st.runs; st.runParams = params; st.runFirst = st.files[0] ? st.files[0].name : ''; st.runLast = st.files.length ? st.files[st.files.length - 1].name : '';
+  st.runNo = ++st.runs; st.runParams = params; st.runDust = DUST.file ? DUST.file.name : null; st.runFirst = st.files[0] ? st.files[0].name : ''; st.runLast = st.files.length ? st.files[st.files.length - 1].name : '';
   const sims = projectSims();   // a project's registration for these very frames, else the search
   PJ.runFrames = PJ.run ? PJ.run.frames : null; $('pj-reuse-row').hidden = true;
   if (sims) log(`[lapstack] registration from project ${PJ.name}: no alignment search`);
@@ -948,7 +1029,7 @@ async function onDone(m) {
                 crop: m.crop ? { x: m.crop[0], y: m.crop[1], w: m.crop[2], h: m.crop[3] } : null };            // crop: the window every aligned frame covers, null = all of it
   resetRetouch();
   const secs = ((performance.now() - st.t0) / 1000).toFixed(1);
-  Object.assign(st.result, { run: st.runNo, params: st.runParams, frames: m.frames, first: st.runFirst, last: st.runLast, secs: Number(secs), when: new Date() });   // what a kept result is labelled with
+  Object.assign(st.result, { run: st.runNo, params: st.runParams, dust: st.runDust, frames: m.frames, first: st.runFirst, last: st.runLast, secs: Number(secs), when: new Date() });   // what a kept result is labelled with
   log(`[lapstack] fused ${m.frames} frames -> ${m.w}x${m.h} ${m.bits}-bit  (${secs}s)`);
   st.frameCount = m.frames;
   if (st.pending.length) { setProgress(RENDER_STAGE[st.pending[0]], 0, st.files.length); setView('fused'); return; }

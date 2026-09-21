@@ -3,7 +3,7 @@
 
 //! lapstack — Laplacian-pyramid focus stacking CLI.
 
-use lapstack_core::{DepthParams, FocusMeasure, Layout, MeshParams, Params, Split, Stack, TexFormat, TopRule, Upsample, View, run_with};
+use lapstack_core::{DepthParams, DustMode, DustParams, FocusMeasure, Layout, MeshParams, Params, Split, Stack, TexFormat, TopRule, Upsample, View, run_with};
 use lapstack_core::batch::{self, Names};
 use lapstack_core::mesh;
 use lapstack_core::io;
@@ -41,6 +41,9 @@ fn main() {
     let mut dry_run = false;
     let mut skip: Option<String> = None;
     let mut reverse = false;
+    let mut dust_map: Option<String> = None;
+    let mut dust = DustParams::default();
+    let mut save_dust: Option<String> = None;
 
     let mut i = 0;
     let next = |i: &mut usize| -> String {
@@ -93,6 +96,11 @@ fn main() {
             "--dry-run" => dry_run = true,
             "--skip" => skip = Some(next(&mut i)),
             "--reverse" => reverse = true,
+            "--dust-map" => dust_map = Some(next(&mut i)),
+            "--dust-threshold" => dust.threshold = next(&mut i).parse::<f32>().ok().filter(|v| *v > 0.0 && *v < 90.0).unwrap_or_else(|| fail("--dust-threshold: percent, 0 < PCT < 90")) / 100.0,
+            "--dust-margin" => dust.margin = next(&mut i).parse().unwrap_or_else(|_| fail("--dust-margin: integer")),
+            "--dust-mode" => { let s = next(&mut i); dust.mode = DustMode::parse(&s).unwrap_or_else(|| fail("--dust-mode: fill | flat")); }
+            "--save-dust-map" => save_dust = Some(next(&mut i)),
             "--stereo" => {
                 let s = next(&mut i);
                 let mut it = s.split(':');
@@ -180,6 +188,24 @@ fn main() {
     }
     if video.is_some() && rocking.is_none() {
         fail("--video joins the rocking views: it needs --rocking");
+    }
+    // the dust map: detected once, applied to every frame of every stack
+    if let Some(path) = &dust_map {
+        let t = Instant::now();
+        let (img, _) = io::load_rgb(path).unwrap_or_else(|e| fail(&format!("--dust-map: {e}")));
+        let map = lapstack_core::dust::detect(&lapstack_core::dust::luma(&img), img.w, img.h, &dust);
+        eprintln!("[lapstack] dust map {path} ({}x{}, threshold {:.1} %, margin {} px, {}): {}  ({:.1}s)", img.w, img.h, 100.0 * dust.threshold, dust.margin, dust.mode.name(), map.describe(), t.elapsed().as_secs_f64());
+        if let Some(out) = &save_dust {
+            io::save_gray(&map.plane(), map.w, map.h, out).unwrap_or_else(|e| fail(&e));
+            eprintln!("[lapstack] wrote the dust mask to {out} (white = dust)");
+        }
+        if map.is_empty() {
+            eprintln!("[lapstack] no dust spots found: the frames are stacked as they are (a lower --dust-threshold finds fainter spots)");
+        } else {
+            p.dust = Some(map);
+        }
+    } else if save_dust.is_some() {
+        fail("--save-dust-map writes the spots found in the dust map: it needs --dust-map");
     }
     let cfg = Cfg { output, save_depth, save_conf, metadata, depth_raw, p, slab_dir, stereo, rocking, video, near_first, mesh_formats, mp, mesh_tex };
 
@@ -490,6 +516,14 @@ fn help() {
                                   directories are expanded and before any split (3,7-9,12)\n\
            --reverse              reverse the frame order (a stack shot back to front); each stack of a\n\
                                   batch on its own, so frame 0 is the near end again for --stereo / --mesh\n\
+           --dust-map FILE        dust map (Helicon's): a frame of an evenly lit blank surface shot out of focus\n\
+                                  at the stack's aperture; the dust spots found in it are taken out of every\n\
+                                  frame before alignment (each interpolated from its surroundings)\n\
+           --dust-threshold PCT   a pixel darker than its background by more than this is dust [3]\n\
+           --dust-margin PX       pixels the spots are grown by [3]\n\
+           --dust-mode MODE       fill = interpolate each spot (default) | flat = divide it by the map's attenuation\n\
+                                  (keeps the detail under the spot; needs the map shot at the stack's aperture)\n\
+           --save-dust-map PATH   write the spots found as an image (white = dust), to check the map\n\
            --stereo PCT[:LAYOUT]  synthetic stereo pair -> <stem>_stereo.<ext>: the result sheared by its depth map,\n\
                                   the far end of the stack moved -PCT / +PCT % of the width (left / right view);\n\
                                   LAYOUT sbs (left | right, default) | cross (right | left) | anaglyph (red-cyan)\n\

@@ -10,6 +10,7 @@ use crate::depth::{self, DepthParams};
 use crate::fuse::{FuseParams, Fuser};
 use crate::align::{self, AlignParams, CancelToken, Rect, Sim, common_area};
 use crate::brightness;
+use crate::dust::DustMap;
 use crate::io::{self, Depth};
 use crate::pyramid::{crop_plane, Img3};
 use rayon::prelude::*;
@@ -43,6 +44,9 @@ pub struct Params {
     /// The weighted average (`wav.rs`, Helicon's method A) as a second image,
     /// from the depth pass's focus measure: needs `depth`.
     pub wav: Option<crate::wav::WavParams>,
+    /// Dust map (`dust.rs`): the spots taken out of every frame as decoded,
+    /// before alignment. Must be of the frames' size.
+    pub dust: Option<DustMap>,
 }
 
 /// The slab ranges of a `count`-frame stack: `size` frames each, consecutive
@@ -86,7 +90,7 @@ impl Default for Params {
             depth: Some(DepthParams::default()),
             crop: true,
             brightness: true,
-            slabs: None, wav: None,
+            slabs: None, wav: None, dust: None,
         }
     }
 }
@@ -183,14 +187,20 @@ struct LazyFrames {
     /// gains once found (the depth pass decodes the frames a second time).
     ref_means: Option<[f64; 3]>,
     gains: Vec<Option<[f32; 3]>>,
+    /// The dust map, applied to every frame as it is decoded.
+    dust: Option<DustMap>,
 }
 
 impl LazyFrames {
-    fn open(paths: Vec<String>, brightness: bool) -> Result<LazyFrames, String> {
-        let (f0, depth) = io::load_rgb(&paths[0])?;
+    fn open(paths: Vec<String>, brightness: bool, dust: Option<&DustMap>) -> Result<LazyFrames, String> {
+        let (mut f0, depth) = io::load_rgb(&paths[0])?;
+        if let Some(d) = dust {
+            check_dust(d, f0.w, f0.h)?;
+            d.apply(&mut f0);
+        }
         let ref_means = brightness.then(|| brightness::means(&f0));
         let n = paths.len();
-        let mut lf = LazyFrames { w: f0.w, h: f0.h, depth, paths, cur: Some((0, f0)), pending: VecDeque::new(), notes: Vec::new(), ref_means, gains: vec![None; n] };
+        let mut lf = LazyFrames { w: f0.w, h: f0.h, depth, paths, cur: Some((0, f0)), pending: VecDeque::new(), notes: Vec::new(), ref_means, gains: vec![None; n], dust: dust.cloned() };
         lf.gains[0] = Some([1.0; 3]);
         lf.prefetch(1);
         Ok(lf)
@@ -237,6 +247,9 @@ impl LazyFrames {
             ));
         }
         let mut img = img;
+        if let Some(d) = &self.dust {
+            d.apply(&mut img);
+        }
         if let Some(r) = self.ref_means {
             let g = *self.gains[i].get_or_insert_with(|| brightness::gains_to(r, &img));
             brightness::apply(&mut img, g);
@@ -379,6 +392,15 @@ fn fuse_slabs(
     Ok(())
 }
 
+/// A dust map of another size than the frames is a mistake (another camera, a
+/// crop): the run stops rather than leave the dust in.
+fn check_dust(d: &DustMap, w: usize, h: usize) -> Result<(), String> {
+    if d.w != w || d.h != h {
+        return Err(format!("the dust map is {}x{} but the frames are {w}x{h}; it must be shot with the same camera at the same size", d.w, d.h));
+    }
+    Ok(())
+}
+
 /// Run the whole pipeline. `log` receives human-readable progress lines.
 pub fn run(inputs: &[String], params: &Params, log: &mut dyn FnMut(String)) -> Result<Output, String> {
     run_with(inputs, params, log, &mut |_| Ok(()))
@@ -411,10 +433,16 @@ pub fn run_with(
                     ));
                 }
             }
-            let frames: Vec<Img3> = loaded.into_iter().map(|(f, _)| f).collect();
+            let mut frames: Vec<Img3> = loaded.into_iter().map(|(f, _)| f).collect();
             let (w, h) = (frames[0].w, frames[0].h);
             if frames.iter().any(|f| f.w != w || f.h != h) {
                 return Err("frames differ in size; pre-size them to a common resolution".into());
+            }
+            if let Some(d) = &params.dust {
+                // the dust is fixed on the sensor: out before the frames are warped
+                check_dust(d, w, h)?;
+                frames.par_iter_mut().for_each(|f| d.apply(f));
+                log(format!("dust map applied ({}): {}", d.params.mode.name(), d.describe()));
             }
             log(format!(
                 "{} frames @ {w}x{h}, {}-bit ({} threads)  ({:.1}s)",
@@ -467,7 +495,10 @@ pub fn run_with(
             Ok(Output { image, depth, conf, bit_depth, align: sims, levels, crop, wav })
         }
         _ => {
-            let mut src = LazyFrames::open(inputs.clone(), params.brightness)?;
+            let mut src = LazyFrames::open(inputs.clone(), params.brightness, params.dust.as_ref())?;
+            if let Some(d) = &params.dust {
+                log(format!("dust map applied to each frame as decoded ({}): {}", d.params.mode.name(), d.describe()));
+            }
             log(format!(
                 "{} frames @ {}x{}, {}-bit ({} threads); alignment skipped, streaming from disk",
                 src.len(), src.w, src.h, src.depth.bits(), rayon::current_num_threads()

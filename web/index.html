@@ -181,6 +181,16 @@
         <div class="dim small">Left pane: the stacked image (LAP or DFR, whichever is selected) · right pane: the brush source — a source frame, a slab of frames around it, or the other stacked image. The brush previews itself in the left pane: what is inside the circle is what a click would paint there. Drag on either pane to paint the source into the stacked image; shift+drag pans; the wheel picks the source frame and ctrl+wheel zooms; double-click fits / 100 %. Esc or the Retouch button leaves.</div>
       </div>
     </div>
+    <button class="section" type="button" data-sec="dust">Dust map</button>
+    <div class="sec-body">
+      <div class="dim small">Sensor dust sits in every frame at the same place, and the stack keeps it. A frame of an evenly lit blank surface, shot out of focus at the stack's aperture, shows nothing but the dust: load it here and the spots found in it are taken out of every frame before alignment.</div>
+      <div class="row"><button id="dust-add" title="a photo of a white wall, the sky, a sheet of paper — out of focus, at the aperture the stack was shot at, with the same camera">Load dust map…</button><input type="file" id="dust-file" accept=".png,.jpg,.jpeg,.tif,.tiff,.ari,.arw,.cr2,.cr3,.crm,.crw,.dcr,.dcs,.dng,.erf,.iiq,.kdc,.mef,.mos,.mrw,.nef,.nrw,.orf,.ori,.pef,.raf,.raw,.rw2,.rwl,.srw,.3fr,.fff,.x3f,.qtk,image/png,image/jpeg,image/tiff" hidden><button id="dust-x" title="no dust map: the frames are stacked as they are" hidden>×</button></div>
+      <div id="dust-info" class="dim small">none</div>
+      <canvas id="dust-preview" title="the dust map with the spots found outlined; click to open it larger in a new tab" hidden></canvas>
+      <label class="stepper" title="a pixel darker than its surroundings by more than this is dust; lower finds fainter spots, and noise">threshold % <span><button data-step="p-dust-thr" data-d="-1">−</button><span id="p-dust-thr" data-min="1" data-max="50">3</span><button data-step="p-dust-thr" data-d="1">+</button></span></label>
+      <label class="stepper" title="pixels each spot is grown by: the soft edge of the shadow, and the little a spot moves between apertures">margin px <span><button data-step="p-dust-margin" data-d="-1">−</button><span id="p-dust-margin" data-min="0" data-max="20">3</span><button data-step="p-dust-margin" data-d="1">+</button></span></label>
+      <label class="sel" title="fill: each spot is interpolated from its surroundings (Helicon's way) — flat: each spot is divided by the map's own attenuation, which keeps the detail under it but needs the map shot at the stack's aperture and lighting">remove by <select id="p-dust-mode"><option value="fill">fill (interpolate)</option><option value="flat">flat-field (divide)</option></select></label>
+    </div>
     <button class="section" type="button" data-sec="alignment">Alignment</button>
     <div class="sec-body">
       <label title="one gain per channel brings each frame's mean to frame 0's, over the area the frame covers: exposure and colour flicker between frames"><input type="checkbox" id="p-bright" checked> equalise brightness</label>

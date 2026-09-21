@@ -22,6 +22,18 @@ pub fn decode_any(bytes: &[u8], raw: bool) -> Result<Frame, String> {
     decode(bytes)
 }
 
+/// The pixel size of a frame without decoding it (a raw is developed for it:
+/// its size is only sure once turned by its orientation).
+pub fn dims(bytes: &[u8], raw: bool) -> Result<(usize, usize), String> {
+    if raw {
+        let f = decode_any(bytes, true)?;
+        return Ok((f.w, f.h));
+    }
+    let reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(|e| format!("unrecognised image: {e}"))?;
+    let (w, h) = reader.into_dimensions().map_err(|e| format!("decode: {e}"))?;
+    Ok((w as usize, h as usize))
+}
+
 pub fn decode(bytes: &[u8]) -> Result<Frame, String> {
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
