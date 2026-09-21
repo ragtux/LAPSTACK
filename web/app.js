@@ -1,3 +1,4 @@
+import { muxMp4, muxWebm } from './mux.js';
 // lapstack browser UI. A focus-stacking workbench: filmstrip, parameter
 // panel, run/cancel with progress + log, viewer layers (Source / Stack / Depth),
 // tiled-free zoom/pan on a canvas, A/B compare with a draggable divider and
@@ -1001,10 +1002,10 @@ const OUTPUTS = [
   { id: 'depth', token: 'depth', kind: 'depth', name: 'Depth map', desc: '8-bit gray PNG, min–max scaled', ext: 'png', avail: () => !!st.result },
   { id: 'depth16', token: 'depth16', kind: 'depth16', name: 'Depth map, 16-bit', desc: '16-bit gray PNG, 65535 = last frame', ext: 'png', avail: () => !!st.result },
   { id: 'winner', token: 'winner', kind: 'winner', name: 'Winner map', desc: '8-bit gray PNG, LAP winner index', ext: 'png', avail: () => !!st.result },
-  { id: 'anim-depth', token: 'depth-slice', anim: true, name: 'Focus depth, Turbo, slice sweeping', desc: 'animated GIF: the depth map with the magenta slice moving through the frames', ext: 'gif', avail: () => !!st.result && st.files.length > 1 },
-  { id: 'anim-focus', token: 'infocus', anim: true, name: 'In focus sweep', desc: 'animated GIF: each frame\'s in-focus plane lit, the rest dimmed to outlines', ext: 'gif', avail: () => !!st.result && st.files.length > 1 },
-  { id: 'anim-peak', token: 'peaking', anim: true, name: 'Source with focus peaking', desc: 'animated GIF: the aligned frames under their magenta peaking band', ext: 'gif', avail: () => !!st.result && st.files.length > 1 && st.frames.some((f) => f && f.peak) },
-  { id: 'anim-rock', token: 'rocking', anim: true, rock: true, name: 'Rocking', desc: () => `animated GIF: the stacked image rocking from side to side, ${refolding() ? 'each view folded from the shifted frames' : 'sheared by its depth map'}`, ext: 'gif', avail: () => !!st.result },
+  { id: 'anim-depth', token: 'depth-slice', anim: true, name: 'Focus depth, Turbo, slice sweeping', desc: 'animated GIF: the depth map with the magenta slice moving through the frames', ext: () => animExt(), avail: () => !!st.result && st.files.length > 1 },
+  { id: 'anim-focus', token: 'infocus', anim: true, name: 'In focus sweep', desc: 'animated GIF: each frame\'s in-focus plane lit, the rest dimmed to outlines', ext: () => animExt(), avail: () => !!st.result && st.files.length > 1 },
+  { id: 'anim-peak', token: 'peaking', anim: true, name: 'Source with focus peaking', desc: 'animated GIF: the aligned frames under their magenta peaking band', ext: () => animExt(), avail: () => !!st.result && st.files.length > 1 && st.frames.some((f) => f && f.peak) },
+  { id: 'anim-rock', token: 'rocking', anim: true, rock: true, name: 'Rocking', desc: () => `animated GIF: the stacked image rocking from side to side, ${refolding() ? 'each view folded from the shifted frames' : 'sheared by its depth map'}`, ext: () => animExt(), avail: () => !!st.result },
 ];
 // the kept results as rows of the Save step, after the run's own outputs
 const keptOutput = (k) => ({ id: keptId(k), token: k.kind === 'file' ? k.label : `run${k.run}-${k.kind === 'dmap' ? 'dfr' : 'lap'}`, kind: keptId(k), name: k.label, desc: `kept result: ${keptSummary(k)}`, avail: () => true, kept: k });
@@ -1013,7 +1014,8 @@ const MESH_DESC = { glb: 'glTF binary: the stacked image as a textured relief of
 const MESH_MIME = { glb: 'model/gltf-binary', obj: 'model/obj', mtl: 'model/mtl', stl: 'model/stl', jpg: 'image/jpeg', png: 'image/png' };
 const SV = { sel: new Set(['lap']), exif: null, exifFor: null, exporting: false, cancel: false, dir: null, lastSaved: [] };   // dir: the folder saved files go to (File System Access), null = downloads
 const SK = 'lapstack.save';
-const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-first', 'fn-stack', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'sv-meta', 'sv-crop', 'an-edge', 'an-fps', 'an-loop', 'v3-method', 'v3-src', 'v3-shift', 'v3-layout', 'v3-rock', 'v3-near', 'm3-format', 'm3-relief', 'm3-grid', 'm3-tex', 'cc-on', 'cc-name'];
+window.__SV = SV; window.__updateSaveButtons = () => updateSaveButtons();   // harness hooks
+const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-first', 'fn-stack', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'sv-meta', 'sv-crop', 'an-edge', 'an-fps', 'an-loop', 'an-format', 'an-vq', 'v3-method', 'v3-src', 'v3-shift', 'v3-layout', 'v3-rock', 'v3-near', 'm3-format', 'm3-relief', 'm3-grid', 'm3-tex', 'cc-on', 'cc-name'];
 const svSteps = ['an-step', 'v3-views'];   // the card's steppers (a number in a span between − and +)
 const svLive = ['sv-quality', 'sv-name', 'cc-name', 'v3-shift', 'v3-rock', 'm3-relief'];   // re-render on every input, not on change
 // The crop: the run reports the window every aligned frame covers with real pixels
@@ -1232,7 +1234,7 @@ async function renderSave() {
     const nm = document.createElement('div'); nm.className = 'fname'; nm.textContent = ok ? svName(o) : `${o.name.toLowerCase()} — not available`; nm.title = nm.textContent;
     const ds = document.createElement('div'); ds.className = 'desc'; ds.textContent = `${o.name} · ${typeof o.desc === 'function' ? o.desc() : o.desc}`;
     meta.append(nm, ds);
-    const state = document.createElement('span'); state.className = 'state'; state.textContent = ok ? (o.anim ? 'GIF' : svExt(o).toUpperCase()) : '';
+    const state = document.createElement('span'); state.className = 'state'; state.textContent = ok ? svExt(o).toUpperCase() : '';
     row.append(cb, th, meta, state);
     if (ok) row.addEventListener('click', (e) => { if (e.target !== cb) cb.checked = !cb.checked; if (cb.checked) SV.sel.add(o.id); else SV.sel.delete(o.id); row.classList.toggle('on', cb.checked); saveSaveSettings(); updateAnimInfo(); updateSaveButtons(); });
     list.appendChild(row);
@@ -1246,12 +1248,76 @@ async function renderSave() {
 }
 // the animations' frame count, size and a rough GIF size for the selected ones
 function updateAnimInfo() {
-  const plan = animPlan();
+  const plan = animPlan(), fmt = animFormat(), fps = Number($('an-fps').value), bpp = Number($('an-vq').value);
+  $('an-format').disabled = !window.VideoEncoder; $('an-vinfo').hidden = !!window.VideoEncoder; $('an-vq-row').hidden = fmt === 'gif';
   const anims = OUTPUTS.filter((o) => o.anim && o.avail() && SV.sel.has(o.id));
-  const est = anims.reduce((b, o) => { const p = animPlan(o); return b + p.seq.length * p.ow * p.oh * (o.id === 'anim-depth' ? 0.15 : 0.7); }, 0);
+  // a GIF's size from its pixels (the depth map's flat colours pack tighter); a video's from its bit rate
+  const est = anims.reduce((b, o) => { const p = animPlan(o); return b + (fmt === 'gif' ? p.seq.length * p.ow * p.oh * (o.id === 'anim-depth' ? 0.15 : 0.7) : (p.ow * p.oh * fps * bpp * p.seq.length) / fps / 8); }, 0);
   $('an-info').textContent = `${plan.seq.length} frames of ${plan.ow}×${plan.oh} (rocking: ${v3().views})` + (anims.length ? ` · roughly ${fmtMB(est)} for the ${anims.length} selected animation${anims.length > 1 ? 's' : ''}` : '') +
-    (est > 1e9 ? ' — a GIF that large may exhaust the browser: use a smaller long edge or a larger frame step.' : '');
-  $('an-info').classList.toggle('warn', est > 1e9);
+    (fmt === 'gif' && est > 1e9 ? ' — a GIF that large may exhaust the browser: use a smaller long edge or a larger frame step.' : '');
+  $('an-info').classList.toggle('warn', fmt === 'gif' && est > 1e9);
+}
+// ---------- video export (WebCodecs + mux.js) ----------
+const animFormat = () => (window.VideoEncoder ? $('an-format').value : 'gif');   // gif | mp4 | webm
+const animExt = () => animFormat();
+// the first codec configuration the browser can encode, from the best down: H.264 High, Main,
+// Constrained Baseline at the level the frame size needs (Annex A: 4.0 to 1080p, 5.1 to 4K,
+// 6.2 beyond); VP9 profile 0, else VP8
+async function videoConfig(fmt, w, h, fps, bitrate) {
+  const px = w * h, level = px <= 1920 * 1088 ? '28' : px <= 4096 * 2304 ? '33' : '3E';
+  const codecs = fmt === 'mp4' ? [`avc1.6400${level}`, `avc1.4D40${level}`, `avc1.42E0${level}`] : ['vp09.00.10.08', 'vp8'];
+  for (const codec of codecs) {
+    const cfg = { codec, width: w, height: h, bitrate, framerate: fps, latencyMode: 'quality', ...(fmt === 'mp4' ? { avc: { format: 'avc' } } : {}) };
+    try { if ((await VideoEncoder.isConfigSupported(cfg)).supported) return cfg; } catch {}
+  }
+  throw new Error(`this browser cannot encode ${fmt === 'mp4' ? 'H.264' : 'VP9 or VP8'} at ${w}×${h}: try a smaller long edge${fmt === 'mp4' ? ', or WebM' : ''}`);
+}
+// The animation as a video: its frames drawn as for the GIF, encoded by the browser's
+// VideoEncoder — H.264 for MP4 (AVCC samples, the avcC record from the first output), VP9 for
+// WebM — and muxed by mux.js. The size is made even (H.264's chroma is 2×2), a keyframe goes
+// in every two seconds, and the encoder's queue is kept short so the frames are drawn as it
+// takes them.
+async function renderVideo(o, progress) {
+  const fmt = animFormat(), plan = animPlan(o), fps = Number($('an-fps').value), seq = plan.seq;
+  const ow = Math.max(2, plan.ow & ~1), oh = Math.max(2, plan.oh & ~1);
+  const cfg = await videoConfig(fmt, ow, oh, fps, Math.round(ow * oh * fps * Number($('an-vq').value)));
+  const oc = new OffscreenCanvas(ow, oh), c = oc.getContext('2d', { willReadFrequently: true });
+  let refolded = false;
+  if (o.rock && refolding()) { const v = v3(); await refold(seq.map((i) => rockShift(v.rock, i, v.views)), ow, oh); refolded = true; }
+  const samples = []; let description = null, failure = null;
+  const enc = new VideoEncoder({
+    output: (chunk, meta) => {
+      const d = meta && meta.decoderConfig && meta.decoderConfig.description;
+      if (d) description = d instanceof ArrayBuffer ? new Uint8Array(d) : new Uint8Array(d.buffer, d.byteOffset, d.byteLength);
+      const data = new Uint8Array(chunk.byteLength); chunk.copyTo(data);
+      samples.push({ data, key: chunk.type === 'key', cts: chunk.timestamp });
+    },
+    error: (e) => { failure = e; },
+  });
+  enc.configure(cfg);
+  const kf = Math.max(1, Math.round(fps * 2)), dur = Math.round(1e6 / fps);
+  try {
+    for (let k = 0; k < seq.length; k++) {
+      if (SV.cancel) throw new Error('cancelled');
+      if (failure) throw failure;
+      progress(k, seq.length);
+      await drawAnimFrame(o, seq[k], c, ow, oh);
+      const vf = new VideoFrame(oc, { timestamp: k * dur, duration: dur });
+      enc.encode(vf, { keyFrame: k % kf === 0 }); vf.close();
+      if (enc.encodeQueueSize > 4) await new Promise((r) => enc.addEventListener('dequeue', r, { once: true }));
+    }
+    await enc.flush();
+    if (failure) throw failure;
+  } catch (e) { try { enc.close(); } catch {} throw e; }
+  finally {
+    if (refolded) await call({ type: 'refold_end' }).catch(() => {});
+    if (o.id !== 'anim-depth' && !o.rock) { R.gpuIndex = -1; R.wasmIndex = -1; }   // the worker's source frame is whatever we exported last
+    else if (refolded) R.gpuIndex = -1;
+  }
+  enc.close();
+  log(`[lapstack] ${o.name}: ${samples.length} frames of ${ow}×${oh} at ${fps} fps as ${cfg.codec}`);
+  if (fmt === 'mp4') { if (!description) throw new Error('the H.264 encoder gave no decoder configuration (avcC)'); return muxMp4({ w: ow, h: oh, fps, samples, description }); }
+  return muxWebm({ w: ow, h: oh, fps, samples, codec: cfg.codec.startsWith('vp09') ? 'V_VP9' : 'V_VP8' });
 }
 function updateSaveButtons() {
   const n = saveRows().filter((o) => o.avail() && SV.sel.has(o.id)).length;
@@ -1465,9 +1531,10 @@ async function saveSelected() {
         continue;
       }
       if (o.anim) {
-        setState(o, 'rendering…');
-        blob = await renderAnim(o, (k, n) => { prog(`${o.name}: frame ${k + 1}/${n}`, k, n); setState(o, `${k + 1}/${n}`); });
-        mime = 'image/gif';
+        const video = animFormat() !== 'gif';
+        setState(o, video ? 'encoding…' : 'rendering…');
+        blob = await (video ? renderVideo : renderAnim)(o, (k, n) => { prog(`${o.name}: frame ${k + 1}/${n}`, k, n); setState(o, `${k + 1}/${n}`); });
+        mime = !video ? 'image/gif' : animFormat() === 'mp4' ? 'video/mp4' : 'video/webm';
       } else {
         prog(`encoding ${name}`, 0, 0); setState(o, 'encoding…');
         const f = o.ext ? 'png' : fmt, meta = $('sv-meta').checked && !$('sv-meta').disabled;
@@ -1483,7 +1550,7 @@ async function saveSelected() {
         else r = await call({ type: 'save', kind: o.kind, format: f, quality: q, meta, crop: !!cropArea() });
         mime = f === 'jpeg' ? 'image/jpeg' : 'image/png'; blob = new Blob([r.bytes], { type: mime });
       }
-      if (sign) { prog(`signing ${name}`, 0, 0); setState(o, 'signing…'); blob = await signBlob(blob, o, name, mime); }
+      if (sign && !mime.startsWith('video/')) { prog(`signing ${name}`, 0, 0); setState(o, 'signing…'); blob = await signBlob(blob, o, name, mime); }
       await downloadBlob(blob, name); saved.push(name); setState(o, `saved · ${fmtMB(blob.size)}`);
     }
   } catch (e) {

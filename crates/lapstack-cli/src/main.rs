@@ -32,6 +32,7 @@ fn main() {
     let mut slab_dir: Option<String> = None;
     let mut stereo: Option<(f32, Layout)> = None;
     let mut rocking: Option<(f32, usize)> = None;
+    let mut video: Option<f32> = None;
     let mut near_first = true;
     let mut mesh_formats: Vec<String> = Vec::new();
     let mut mp = MeshParams::default();
@@ -103,6 +104,7 @@ fn main() {
                 let n = match it.next() { Some(n) => n.parse().ok().filter(|&n| n >= 2).unwrap_or_else(|| fail("--rocking: PCT[:N], N >= 2")), None => 24 };
                 rocking = Some((pct / 100.0, n));
             }
+            "--video" => video = Some(next(&mut i).parse().ok().filter(|v: &f32| *v > 0.0).unwrap_or_else(|| fail("--video: FPS > 0"))),
             "--far-first" => near_first = false,
             "--mesh" => {
                 for f in next(&mut i).split(',') {
@@ -173,7 +175,10 @@ fn main() {
     if inputs.is_empty() {
         fail("no input images; use --help");
     }
-    let cfg = Cfg { output, save_depth, save_conf, metadata, depth_raw, p, slab_dir, stereo, rocking, near_first, mesh_formats, mp, mesh_tex };
+    if video.is_some() && rocking.is_none() {
+        fail("--video joins the rocking views: it needs --rocking");
+    }
+    let cfg = Cfg { output, save_depth, save_conf, metadata, depth_raw, p, slab_dir, stereo, rocking, video, near_first, mesh_formats, mp, mesh_tex };
 
     // a directory among the inputs stands for the image files in it; --skip counts positions in that list
     let inputs = batch::expand_dirs(&inputs).unwrap_or_else(|e| fail(&e));
@@ -281,6 +286,8 @@ struct Cfg {
     slab_dir: Option<String>,
     stereo: Option<(f32, Layout)>,
     rocking: Option<(f32, usize)>,
+    /// `--video FPS`: the rocking views joined into an MP4 by ffmpeg.
+    video: Option<f32>,
     near_first: bool,
     mesh_formats: Vec<String>,
     mp: MeshParams,
@@ -368,6 +375,19 @@ fn run_stack(inputs: &[String], cfg: &Cfg, names: &Names<'_>, tag: &str) -> Resu
             io::save_rgb(&sheared(&View::new(s, near_first)), &path, out.bit_depth, meta.as_ref())?;
         }
         eprintln!("[lapstack{tag}] rocking: {n} views of ±{:.1} % -> {dir}/view_NN{ext}", amp * 100.0);
+        // the views as one MP4, H.264 at crf 18, by ffmpeg when it is on the path (the size made
+        // even for its 4:2:0 chroma); one sine cycle, so a player's loop is seamless
+        if let Some(fps) = cfg.video {
+            let out = format!("{stem}_rocking.mp4");
+            let fps_s = format!("{fps}");
+            let pattern = format!("{dir}/view_%02d{ext}");
+            let args = ["-y", "-loglevel", "error", "-framerate", &fps_s, "-i", &pattern, "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-movflags", "+faststart", &out];
+            match std::process::Command::new("ffmpeg").args(args).status() {
+                Ok(s) if s.success() => eprintln!("[lapstack{tag}] rocking video: {n} views at {fps} fps, H.264 -> {out}"),
+                Ok(s) => eprintln!("[lapstack{tag}] ffmpeg failed ({s}); the views are in {dir}"),
+                Err(e) => eprintln!("[lapstack{tag}] ffmpeg not run ({e}); the views are in {dir} — join them with: ffmpeg {}", args.join(" ")),
+            }
+        }
     }
     if !cfg.mesh_formats.is_empty() {
         // the 3D model (mesh.rs): the depth map as a relief textured with the result
@@ -462,6 +482,8 @@ fn help() {
                                   LAYOUT sbs (left | right, default) | cross (right | left) | anaglyph (red-cyan)\n\
            --rocking PCT[:N]      rocking animation: N [24] views, the shift sweeping +-PCT % in one sine cycle,\n\
                                   -> <stem>_rocking/view_NN.<ext> (join them with ffmpeg / ImageMagick)\n\
+           --video FPS            with --rocking: the views joined into <stem>_rocking.mp4 (H.264, crf 18) at FPS,\n\
+                                  by ffmpeg if it is on the path\n\
            --far-first            frame 0 is the far end of the stack (the focus went back to front) [near]\n\
            --mesh FORMATS         3D model (Helicon's): the depth map as a relief textured with the result, as\n\
                                   glb (glTF binary, one file) | obj (+ .mtl + texture file) | stl (geometry only),\n\

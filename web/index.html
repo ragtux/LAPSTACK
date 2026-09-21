@@ -254,6 +254,9 @@
       <label class="stepper">every Nth frame <span><button data-step="an-step" data-d="-1">−</button><span id="an-step" data-min="1" data-max="50">1</span><button data-step="an-step" data-d="1">+</button></span></label>
       <label>speed <select id="an-fps"><option value="5">5 fps</option><option value="10" selected>10 fps</option><option value="15">15 fps</option><option value="25">25 fps</option></select></label>
       <label>loop <select id="an-loop"><option value="pingpong">back and forth</option><option value="forward">forward</option></select></label>
+      <label>format <select id="an-format" title="GIF: 256 colours, loops by itself, every browser; MP4 (H.264) plays everywhere; WebM (VP9) is smaller at the same quality — the videos are encoded by the browser (WebCodecs) and written by the page"><option value="gif">GIF</option><option value="mp4">MP4 (H.264)</option><option value="webm">WebM (VP9)</option></select></label>
+      <label id="an-vq-row" hidden>video quality <select id="an-vq" title="the bit rate, as bits per pixel per second: high 0.2, medium 0.1, low 0.05"><option value="0.2">high</option><option value="0.1" selected>medium</option><option value="0.05">low</option></select></label>
+      <div class="dim small" id="an-vinfo" hidden>This browser has no WebCodecs video encoder: the animations are GIFs.</div>
       <div class="dim small" id="an-info">—</div>
       <!-- synthetic stereo and rocking: the stacked image sheared by its depth map (view.rs) -->
       <div class="section">Stereo and rocking</div>

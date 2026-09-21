@@ -195,7 +195,10 @@ through, the foreground is not stretched); pixels are sampled linearly.
 `<stem>_stereo.<ext>` — side by side for parallel viewing (`sbs`),
 cross-eyed (`cross`) or as a red–cyan anaglyph; `--rocking` writes N views
 (default 24) whose shift sweeps ±PCT in one sine cycle to
-`<stem>_rocking/view_NN.<ext>` (join them with ffmpeg or ImageMagick). Which
+`<stem>_rocking/view_NN.<ext>` (join them with ffmpeg or ImageMagick), and
+`--video FPS` joins them itself into `<stem>_rocking.mp4` (H.264, crf 18,
+the size made even) when ffmpeg is on the path — the command to run by hand
+is printed when it is not. Which
 end is near decides who wins where surfaces overlap: frame 0 is taken as the
 near end (the focus went front to back); `--far-first` says otherwise — the
 symptom of the wrong choice is a relief that looks inside out.
@@ -391,6 +394,20 @@ a full-resolution GIF of a long 45 MP stack runs to gigabytes, so pick a
 long edge or a frame step for those. Frames are quantised (median cut,
 Floyd–Steinberg) and LZW-encoded in the worker (`crates/lapstack-web/src/gif.rs`),
 the bytes streaming back so the file never sits in wasm memory whole.
+The section's *format* makes the same animations **videos** instead —
+**MP4 (H.264)** or **WebM (VP9)**, Helicon's animation export: each frame is
+drawn as for the GIF, encoded by the browser's own encoder (WebCodecs
+`VideoEncoder`: H.264 High, Main or Constrained Baseline at the level the
+size needs, or VP9 profile 0, VP8 failing that — whichever the browser
+supports at that size, so a 4K rocking that no encoder takes asks for a
+smaller long edge) and written into the container by the page
+(`web/mux.js`, a plain MP4 with its sample table and a WebM of
+SimpleBlocks, both from scratch). *Video quality* sets the bit rate in
+bits per pixel per second (0.2 / 0.1 / 0.05); the size is made even for the
+4:2:0 chroma; a keyframe goes in every two seconds; and the rocking is one
+sine cycle, so a player's loop is seamless. Videos carry no content
+credentials. A browser without WebCodecs (Firefox before 130, older Safari)
+gets the GIF alone.
 **Stereo and rocking** are the CLI's synthetic stereo (above) in the
 browser: the card's section has the stereo shift, the pair's layout
 (parallel, cross-eyed, anaglyph), the rocking shift and frames per cycle,
