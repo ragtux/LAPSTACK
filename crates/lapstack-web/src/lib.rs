@@ -718,15 +718,30 @@ impl Engine {
     }
 
     /// Retouch: apply a stroke of soft dabs `[x, y, radius, hardness, ...]`
-    /// (image px) copying the loaded source into the fused image (16-bit).
+    /// (image px) copying `from` into the `target` image (16-bit). `target` is
+    /// "fused" (the pyramid result) or "dmap" (the depth-map rendering); `from`
+    /// is "source" (the loaded aligned frame) or the other result — the
+    /// pyramid image can be painted into the depth-map rendering and back.
     /// Returns the updated bbox as {x, y, w, h, rgba}.
-    pub fn stroke(&mut self, dabs: &[f32], target: &str) -> Result<JsValue, JsValue> {
+    pub fn stroke(&mut self, dabs: &[f32], target: &str, from: &str) -> Result<JsValue, JsValue> {
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         let (w, h) = (run.w, run.h);
-        let (_, src) = run.src_rgb16.as_ref().ok_or_else(|| JsValue::from_str("no source loaded"))?;
         let dmap = target == "dmap";
-        let fused = if dmap { run.dmap_rgb16.as_mut() } else { run.fused_rgb16.as_mut() }
-            .ok_or_else(|| JsValue::from_str(if dmap { "no depth-map rendering" } else { "not finished" }))?;
+        if from == target {
+            return Err(JsValue::from_str("the brush source is the paint target"));
+        }
+        // target and source as one pair per case: they are different fields of the run,
+        // which the borrow checker only sees when both are named in the same expression
+        const NO_FUSED: &str = "not finished";
+        const NO_DMAP: &str = "no depth-map rendering";
+        const NO_SRC: &str = "no source loaded";
+        let err = |m: &str| JsValue::from_str(m);
+        let (fused, src): (&mut Vec<u16>, &[u16]) = match (dmap, from) {
+            (false, "dmap") => (run.fused_rgb16.as_mut().ok_or_else(|| err(NO_FUSED))?, run.dmap_rgb16.as_deref().ok_or_else(|| err(NO_DMAP))?),
+            (true, "fused") => (run.dmap_rgb16.as_mut().ok_or_else(|| err(NO_DMAP))?, run.fused_rgb16.as_deref().ok_or_else(|| err(NO_FUSED))?),
+            (false, _) => (run.fused_rgb16.as_mut().ok_or_else(|| err(NO_FUSED))?, &run.src_rgb16.as_ref().ok_or_else(|| err(NO_SRC))?.1),
+            (true, _) => (run.dmap_rgb16.as_mut().ok_or_else(|| err(NO_DMAP))?, &run.src_rgb16.as_ref().ok_or_else(|| err(NO_SRC))?.1),
+        };
         // bbox of the stroke
         let (mut x0, mut y0, mut x1, mut y1) = (w as f32, h as f32, 0f32, 0f32);
         for d in dabs.chunks_exact(4) {

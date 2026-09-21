@@ -227,7 +227,7 @@ async function handle(m) {
       const rgba = r.rgba;
       post({ type: 'source', index: r.index, w: r.w, h: r.h, rgba: rgba.buffer, gen: m.gen, focus: !!m.focus, prefetch: !!m.prefetch }, [rgba.buffer]);
     } else if (m.type === 'stroke' || m.type === 'undo' || m.type === 'redo') {
-      const r = m.type === 'stroke' ? engine.stroke(m.dabs, m.target || 'fused') : m.type === 'undo' ? engine.undo() : engine.redo();
+      const r = m.type === 'stroke' ? engine.stroke(m.dabs, m.target || 'fused', m.from || 'source') : m.type === 'undo' ? engine.undo() : engine.redo();
       const hist = engine.history();
       if (r) { const rgba = r.rgba; post({ type: 'patch', target: r.target, x: r.x, y: r.y, w: r.w, h: r.h, rgba: rgba.buffer, undo: hist[0], redo: hist[1] }, [rgba.buffer]); }
       else post({ type: 'patch', x: 0, y: 0, w: 0, h: 0, rgba: null, undo: hist[0], redo: hist[1] });

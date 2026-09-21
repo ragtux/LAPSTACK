@@ -86,7 +86,7 @@ const st = {
   zoom: 1, ox: 0, oy: 0, fitted: true,
   pick: false,          // ctrl+G: the next canvas click jumps to the frame that won that pixel
   running: false,
-  retouch: { on: false, prev: null, size: 100, hard: 0.5, painting: false, dabs: [], last: null, cursor: null, hold: false,   // on: retouch mode (a compare split, stack layer | Source); prev: the compare state to restore on exit; hold: the hover preview waits for the next pointer move (see onPatch)
+  retouch: { on: false, prev: null, size: 100, hard: 0.5, from: 'source', painting: false, dabs: [], last: null, cursor: null, hold: false,   // on: retouch mode (a compare split, stack layer | brush source); from: 'source' = the scrubbed frame, 'stack' = the other stacked result (see brushFrom); prev: the compare state to restore on exit; hold: the hover preview waits for the next pointer move (see onPatch)
              wasmIndex: -1, loading: -1, gen: 0, genMin: 0, undo: 0, redo: 0,
              gpuIndex: -1, prefetch: -1, ahead: null, dir: 1, lastSel: -1 },   // see ensureSource(): the frame the worker holds on the GPU, the one being prefetched, the read-ahead slot, the scrub direction
 };
@@ -104,7 +104,7 @@ function readParams() {
     top_radius: n('p-topr'), use_chroma: $('p-chroma').checked, proxy_edge: n('p-proxy'),
     depth_scale: n('p-depthscale'), depth_level: n('p-depthlevel'), render_dmap: $('p-dmap').checked,
     turbo: st.turbo, slice: st.slice, peak_on: st.peak.on, peak_strip: st.peak.strip, peak_thr: st.peak.thr, cmp_mode: st.retouch.on && st.retouch.prev ? st.retouch.prev.cmpMode : st.cmpMode,
-    brush_size: st.retouch.size, brush_hard: st.retouch.hard,
+    brush_size: st.retouch.size, brush_hard: st.retouch.hard, brush_from: st.retouch.from,
   };
 }
 function setStep(id, v) {
@@ -120,7 +120,7 @@ function applyParams(p) {
   setStep('p-proxy', p.proxy_edge ?? 1400); st.turbo = p.turbo ?? false;
   setStep('p-depthscale', p.depth_scale ?? 2); setStep('p-depthlevel', p.depth_level ?? 2); $('p-dmap').checked = p.render_dmap ?? false; st.cmpMode = p.cmp_mode ?? 'swipe';
   st.peak.on = p.peak_on ?? false; st.peak.strip = p.peak_strip ?? false; st.peak.thr = p.peak_thr ?? 0.5; st.slice = p.slice ?? true;
-  st.retouch.size = p.brush_size ?? 100; st.retouch.hard = p.brush_hard ?? 0.5;
+  st.retouch.size = p.brush_size ?? 100; st.retouch.hard = p.brush_hard ?? 0.5; st.retouch.from = p.brush_from === 'stack' ? 'stack' : 'source';
 }
 function saveParams() { try { localStorage.setItem(PK, JSON.stringify(readParams())); } catch {} }
 try { applyParams(JSON.parse(localStorage.getItem(PK))); } catch {}
@@ -867,7 +867,7 @@ function requestSource(index, focus, prefetch) {
 function ensureSource() {
   if (!st.result || !st.files[st.selected]) return;
   if (st.selected !== R.lastSel) { R.dir = st.selected < R.lastSel ? -1 : 1; R.lastSel = st.selected; }
-  const forPaint = R.on;                                       // strokes copy from the worker's own 16-bit copy
+  const forPaint = R.on && brushFrom() === 'source';           // strokes copy from the worker's own 16-bit copy
   // the plain frame first (Source, retouch), then the In focus rendering; one request at a time
   const needPlain = () => (forPaint && R.wasmIndex !== st.selected) || (shown('source') && !srcCache.has(st.selected));
   const needFocus = () => shown('focus') && !srcCache.has(`focus:${st.selected}`);
@@ -909,6 +909,20 @@ function onSourceSkipped(m) { if (R.loading === m.index) R.loading = -1; if (R.p
 // the paint target is the stacked image on screen: DFR when it is the view, else LAP
 const target = () => (st.view === 'dmap' && haveDmap()) ? 'dmap' : 'fused';
 const targetCanvas = () => st.result && st.result[target()];
+// The brush source: the scrubbed frame ('source'), or the other stacked result — DFR
+// while LAP is painted, LAP while DFR is — the way Zerene brushes PMax detail into a
+// DMap. It needs both results, so without a depth-map rendering the choice falls back
+// to the frame. The source is what the right pane shows (updateTabs pins st.cmp to it).
+const otherResult = () => (target() === 'dmap' ? 'fused' : 'dmap');
+const brushFrom = () => (R.from === 'stack' && haveDmap() ? otherResult() : 'source');
+const brushCanvas = () => (brushFrom() === 'source' ? srcGet(st.selected) : st.result && st.result[brushFrom()]);
+const brushReady = () => (brushFrom() === 'source' ? R.wasmIndex === st.selected && !!srcGet(st.selected) : !!brushCanvas());
+function setBrushFrom(from) {
+  R.from = from === 'stack' ? 'stack' : 'source';
+  saveParams(); updateTabs(); renderFilmstrip(); draw();
+}
+$('bs-frame').addEventListener('click', () => setBrushFrom('source'));
+$('bs-stack').addEventListener('click', () => setBrushFrom('stack'));
 function onPatch(m) {
   R.undo = m.undo; R.redo = m.redo; updateTabs();
   if (!m.rgba || !st.result) return;
@@ -918,7 +932,8 @@ function onPatch(m) {
   draw();
 }
 const dabCv = new OffscreenCanvas(16, 16);
-// One dab, built into dabCv: the aligned source frame under the brush, masked by the
+// One dab, built into dabCv: the brush source (the aligned frame, or the other stacked
+// result) under the brush, masked by the
 // brush falloff — the engine's smoothstep from hardness*r to r, so what a preview shows
 // and what the worker later paints have the same edge. Two knobs keep a preview's cost
 // off the brush's size: `scale` is dab canvas px per image px (1 for the dabs of a
@@ -927,7 +942,7 @@ const dabCv = new OffscreenCanvas(16, 16);
 // cut to (the visible part of the pane). Returns the dab's box in image px, or null when
 // the source frame is not on hand or nothing of the dab is left.
 function makeDab(x, y, scale = 1, clip = null) {
-  const src = srcGet(st.selected); if (!src || !st.result) return null;
+  const src = brushCanvas(); if (!src || !st.result) return null;
   const r = R.size;
   let bx = x - r - 1, by = y - r - 1, bw = 2 * r + 2, bh = 2 * r + 2;
   if (clip) {
@@ -978,7 +993,7 @@ function addDab(x, y) {
 function endStroke() {
   if (!R.painting) return;
   R.painting = false;
-  if (R.dabs.length) worker.postMessage({ type: 'stroke', dabs: new Float32Array(R.dabs), target: target() });
+  if (R.dabs.length) worker.postMessage({ type: 'stroke', dabs: new Float32Array(R.dabs), target: target(), from: brushFrom() });
   R.dabs = []; R.last = null;
 }
 window.__retouchStroke = (pts) => { R.painting = true; R.dabs = []; R.last = null; for (const [x, y] of pts) addDab(x, y); endStroke(); };
@@ -1001,7 +1016,7 @@ function enterRetouch() {
   if (R.on || !st.result || st.step !== 'stack') return;
   if (groupOf(st.view) !== 'stack') { setView(st.compare && groupOf(st.cmp) === 'stack' ? st.cmp : lastIn.stack); }
   R.prev = { compare: st.compare, cmpMode: st.cmpMode, cmp: st.cmp };
-  R.on = true; st.compare = true; st.cmpMode = 'split'; st.cmp = 'source'; st.flipped = false;
+  R.on = true; st.compare = true; st.cmpMode = 'split'; st.cmp = brushFrom(); st.flipped = false;
   setBrush(R.size, R.hard);
   updateTabs(); renderFilmstrip(); draw();
 }
@@ -1184,7 +1199,7 @@ function draw() {
     const A = layerFor(st.view), B = layerFor(st.cmp);
     const [L, Rt] = st.flipped ? [B, A] : [A, B];
     const labels = st.flipped ? [layerLabel(st.cmp), layerLabel(st.view)] : [layerLabel(st.view), layerLabel(st.cmp)];
-    if (retouch) labels[0] += ' — drag to paint, shift+drag pans';
+    if (retouch) { labels[0] += ' — drag to paint, shift+drag pans'; if (!labels[1].includes(' — ')) labels[1] += brushFrom() === 'source' ? ' — brush source, wheel scrubs' : ' — brush source'; }   // a loading hint keeps its line
     drawLayer(L); if (retouch) paintMarks(ctx, d, true);   // the paint pane: the hover preview lands here
     ctx2.setTransform(1, 0, 0, 1, 0, 0); ctx2.fillStyle = '#141416'; ctx2.fillRect(0, 0, canvas2.width, canvas2.height);
     ctx2.setTransform(st.zoom * d, 0, 0, st.zoom * d, st.ox * d, st.oy * d);
@@ -1243,7 +1258,8 @@ function onWheel(cv, e) {
   }
   // retouch is no exception — the Source pane is scrubbable, so the wheel picks the
   // frame to paint from — except mid-stroke, where changing the source under the brush
-  // would be nobody's intent: there the wheel keeps zooming.
+  // would be nobody's intent: there the wheel keeps zooming. With the other result as
+  // the brush source nothing on screen scrubs, and the wheel zooms.
   if (scrubbable() && !R.painting && !(e.ctrlKey || e.metaKey) && st.files.length > 1) { scrub((e.deltaY > 0 ? 1 : -1) * (e.shiftKey ? 10 : 1)); return; }
   const f = Math.pow(1.0015, -e.deltaY); const r = cv.getBoundingClientRect();
   const mx = e.clientX - r.left, my = e.clientY - r.top;
@@ -1322,7 +1338,7 @@ for (const cv of [canvas, canvas2]) {
     const paint = R.on && st.result && e.button === 0 && !e.shiftKey && !(e.buttons & 4);
     try { cv.setPointerCapture(e.pointerId); } catch {}
     if (paint) {
-      if (R.wasmIndex !== st.selected || !srcGet(st.selected)) { toast('Source frame still loading — wait for "loaded" before painting.', 3000); return; }
+      if (!brushReady()) { toast('Source frame still loading — wait for "loaded" before painting.', 3000); return; }
       R.painting = true; R.dabs = []; R.last = null; const [x, y] = imgXY(cv, e); addDab(x, y); draw(); return;
     }
     drag = { x: e.clientX, y: e.clientY, ox: st.ox, oy: st.oy }; cv.classList.add('drag');
@@ -1368,12 +1384,17 @@ function updateTabs() {
   $('cm-swipe').classList.toggle('on', st.cmpMode !== 'split'); $('cm-split').classList.toggle('on', st.cmpMode === 'split');
   document.querySelectorAll('#steps button').forEach((b) => { if (b.dataset.step !== 'stack') b.disabled = !have; });
   const group = groupOf(st.view);
-  // retouch mode ends when its target leaves the screen; while it is on, the split is pinned to target | Source
+  // retouch mode ends when its target leaves the screen; while it is on, the split is pinned to target | brush source
   if (R.on && (!have || st.step !== 'stack' || group !== 'stack')) leaveRetouch();
   const retouch = R.on;
-  if (retouch) { st.compare = true; st.cmpMode = 'split'; st.cmp = 'source'; st.flipped = false; }
+  if (retouch) { st.compare = true; st.cmpMode = 'split'; st.cmp = brushFrom(); st.flipped = false; }
   $('viewseg').hidden = st.step !== 'stack';
   $('brush').hidden = !retouch;
+  // the brush source picker: the frame, or the other result (only once there are two)
+  $('bs-stack').hidden = !haveDmap(); $('bs-stack').textContent = layerName(otherResult());
+  $('bs-stack').title = `paint the ${layerName(otherResult())} image into ${layerName(target())} (S)`;
+  $('bs-frame').classList.toggle('on', brushFrom() === 'source'); $('bs-stack').classList.toggle('on', brushFrom() !== 'source');
+  $('bs-frame-hint').hidden = brushFrom() !== 'source'; $('bs-stack-hint').hidden = brushFrom() === 'source';
   $('undo').disabled = !R.undo; $('redo').disabled = !R.redo; $('hist').textContent = R.undo || R.redo ? `${R.undo} undo · ${R.redo} redo` : '';
   $('ab').parentElement.hidden = st.step !== 'stack';
   // the Retouch button: whenever a stacked image is on screen (as the view or the compare partner)
@@ -1476,6 +1497,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === '[' && R.on) setBrush(R.size / 1.25, R.hard); else if (e.key === ']' && R.on) setBrush(R.size * 1.25, R.hard);
+  else if (e.key === 's' && R.on && !e.ctrlKey && !e.metaKey) { if (haveDmap()) setBrushFrom(R.from === 'stack' ? 'source' : 'stack'); else toast('Run LAP + DFR to paint from the other result.', 3000); }
   else if (e.key === '1') gotoStep('stack'); else if (e.key === '2') gotoStep('save');
   else if (e.key === 'r' && !e.ctrlKey && !e.metaKey) toggleRetouch();
   else if (e.key === 'ArrowLeft') scrub(e.shiftKey ? -10 : -1); else if (e.key === 'ArrowRight') scrub(e.shiftKey ? 10 : 1);
