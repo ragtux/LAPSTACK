@@ -125,6 +125,37 @@ pub fn expand_dirs(inputs: &[String]) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// The frames a `--skip` list leaves out of a list of `n`: 1-based positions
+/// and ranges, comma-separated (`3,7-9,12`), returned as sorted 0-based
+/// indices. A position past the end or a backwards range is an error: a typo
+/// should not stack the wrong frames.
+pub fn skip_list(spec: &str, n: usize) -> Result<Vec<usize>, String> {
+    let mut out = Vec::new();
+    for part in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (a, b) = match part.split_once('-') {
+            Some((a, b)) => (a.trim(), b.trim()),
+            None => (part, part),
+        };
+        let pos = |s: &str| s.parse::<usize>().ok().filter(|&v| v >= 1).ok_or_else(|| format!("--skip: '{part}' is not a frame position (1-based) or range a-b"));
+        let (a, b) = (pos(a)?, pos(b)?);
+        if b < a {
+            return Err(format!("--skip: '{part}' runs backwards"));
+        }
+        if b > n {
+            return Err(format!("--skip: '{part}' is past the end ({n} frames)"));
+        }
+        out.extend(a - 1..b);
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// The list without the frames at `skip` (sorted 0-based indices).
+pub fn without(inputs: &[String], skip: &[usize]) -> Vec<String> {
+    inputs.iter().enumerate().filter(|(i, _)| skip.binary_search(i).is_err()).map(|(_, p)| p.clone()).collect()
+}
+
 /// Every `n` frames (the last stack may be shorter).
 pub fn split_count(inputs: &[String], n: usize) -> Vec<Stack> {
     inputs.chunks(n.max(1)).map(|c| Stack { inputs: c.to_vec(), times: None }).collect()
@@ -230,6 +261,17 @@ mod tests {
 
     fn v(s: &[&str]) -> Vec<String> {
         s.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn skip_lists() {
+        assert_eq!(skip_list("3,7-9,12", 12), Ok(vec![2, 6, 7, 8, 11]));
+        assert_eq!(skip_list("9-7, 1", 12).is_err(), true);
+        assert_eq!(skip_list("13", 12).is_err(), true);
+        assert_eq!(skip_list("0", 12).is_err(), true);
+        assert_eq!(skip_list("a", 12).is_err(), true);
+        assert_eq!(skip_list("2,2-3", 3), Ok(vec![1, 2]));
+        assert_eq!(without(&v(&["a", "b", "c", "d"]), &[0, 2]), v(&["b", "d"]));
     }
 
     #[test]

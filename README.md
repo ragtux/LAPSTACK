@@ -126,6 +126,18 @@ and the way to see whether the split is what you meant. Reading the times
 costs little: only the head of each file is read, or, for a TIFF whose IFD
 follows the pixels, a window around that IFD (100 frames of 274 MB in 0.2 s).
 
+**Frame list** (`--skip LIST`, `--reverse`): `--skip` leaves frames out of the
+list — 1-based positions and ranges, comma-separated (`--skip 3,7-9,12`),
+counted after directories are expanded and before any split, each skipped
+frame reported; a position past the end or a backwards range is an error,
+since a typo should not stack the wrong frames. `--reverse` turns the order
+round for a stack shot back to front, so frame 0 is the near end again for
+`--stereo` and `--mesh` (the alternative is `--far-first`, which leaves the
+fusion alone and tells only those two); with `--split` each stack is reversed
+on its own, which is what a rail run backwards means for every stack of the
+batch. Reordering beyond that is the shell's: the frames are stacked in the
+order they are given.
+
 **Brightness** (`brightness.rs`): flash recycling, mains-powered lights and
 a shutter that is not quite repeatable make frames differ in exposure by a
 percent or two, and the region-energy rule sees it (energy grows with the
@@ -472,6 +484,23 @@ near its depth. Frames in the overlaps are decoded once per slab, and the
 blend keeps its own accumulator on the GPU (4 floats per pixel, freed
 afterwards) while the run's fuses the slabs. A single slab of the whole
 stack reproduces the LAP result exactly, which the test page checks.
+
+**Frame list**: the filmstrip is editable. Its head counts the frames in the
+run and the excluded ones, with *reverse* (the stack was shot back to front)
+and, once any frame is excluded, *include all*. Hovering a thumb shows its
+tools — exclude ⊘ / include ↩, move ▲ ▼, remove ✕ — and a thumb can be
+dragged to a new place; `X` excludes the selected frame, `Delete` removes
+it, alt+↑/↓ moves it, and shift on a thumb's exclude or remove takes every
+frame from the last one marked through that one. An excluded frame stays in
+the list at its place, dashed and dimmed, and is left out of the run, the
+split into stacks, the name tokens and the save; internally it leaves
+`st.files` (which the run, the split and everything after the run index) for
+a side list anchored to its position (`st.off`), and the filmstrip merges the
+two back in order (`frameList` / `setFrameList` in `app.js`, every edit going
+through `editFrames`). An edit after a run drops the result — the result's
+frame indices are the list's — and the status bar and log say so; the
+aligned proxies stay as the thumbs. A batch's stack in hand cannot be edited
+(*all frames* first), nor can the list while a run or save is going.
 
 **Batch** (the same ▾ menu, *split into stacks*): the CLI's `--split` for
 the browser. *Add folder…* takes a whole folder (its subfolders too; a

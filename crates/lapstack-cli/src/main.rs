@@ -38,6 +38,8 @@ fn main() {
     let mut mesh_tex = (8192usize, TexFormat::Jpeg(92));
     let mut split: Option<Split> = None;
     let mut dry_run = false;
+    let mut skip: Option<String> = None;
+    let mut reverse = false;
 
     let mut i = 0;
     let next = |i: &mut usize| -> String {
@@ -85,6 +87,8 @@ fn main() {
                 split = Some(Split::parse(&s).unwrap_or_else(|| fail(&format!("--split: count:N | gap:SECONDS | dir, not '{s}'"))));
             }
             "--dry-run" => dry_run = true,
+            "--skip" => skip = Some(next(&mut i)),
+            "--reverse" => reverse = true,
             "--stereo" => {
                 let s = next(&mut i);
                 let mut it = s.split(':');
@@ -171,10 +175,24 @@ fn main() {
     }
     let cfg = Cfg { output, save_depth, save_conf, metadata, depth_raw, p, slab_dir, stereo, rocking, near_first, mesh_formats, mp, mesh_tex };
 
-    // a directory among the inputs stands for the image files in it
+    // a directory among the inputs stands for the image files in it; --skip counts positions in that list
     let inputs = batch::expand_dirs(&inputs).unwrap_or_else(|e| fail(&e));
+    let inputs = match &skip {
+        Some(spec) => {
+            let out = batch::skip_list(spec, inputs.len()).unwrap_or_else(|e| fail(&e));
+            for &k in &out {
+                eprintln!("[lapstack] skipping frame {}: {}", k + 1, inputs[k]);
+            }
+            let kept = batch::without(&inputs, &out);
+            if kept.is_empty() {
+                fail("--skip leaves no frames");
+            }
+            kept
+        }
+        None => inputs,
+    };
     let t0 = Instant::now();
-    let stacks: Vec<Stack> = match split {
+    let mut stacks: Vec<Stack> = match split {
         None => vec![Stack { inputs, times: None }],
         Some(Split::Count(n)) => batch::split_count(&inputs, n),
         Some(Split::Dir) => batch::split_dir(&inputs),
@@ -184,6 +202,14 @@ fn main() {
             batch::split_gap(&inputs, &times, gap)
         }
     };
+    // each stack is reversed on its own: a rail run back to front is so in every stack of the batch
+    if reverse {
+        for s in &mut stacks {
+            s.inputs.reverse();
+            s.times = s.times.map(|(a, b)| (b, a));
+        }
+        eprintln!("[lapstack] frames reversed: {} is frame 0", stacks[0].inputs[0]);
+    }
     let count = stacks.len();
     if let Some(rule) = split {
         eprintln!("[lapstack] {count} stack{} from {} frames ({}):", if count == 1 { "" } else { "s" }, stacks.iter().map(|s| s.inputs.len()).sum::<usize>(), describe_split(rule));
@@ -426,6 +452,10 @@ fn help() {
                                   --depth-raw are templates: {{n}} the stack's number, {{first}} its first frame's\n\
                                   stem, {{dir}} its folder; a path with no field gets _NN before its extension\n\
            --dry-run              list the stacks and their output names, then stop\n\
+           --skip LIST            leave frames out: 1-based positions and ranges in the frame list, after\n\
+                                  directories are expanded and before any split (3,7-9,12)\n\
+           --reverse              reverse the frame order (a stack shot back to front); each stack of a\n\
+                                  batch on its own, so frame 0 is the near end again for --stereo / --mesh\n\
            --stereo PCT[:LAYOUT]  synthetic stereo pair -> <stem>_stereo.<ext>: the result sheared by its depth map,\n\
                                   the far end of the stack moved -PCT / +PCT % of the width (left / right view);\n\
                                   LAYOUT sbs (left | right, default) | cross (right | left) | anaglyph (red-cyan)\n\

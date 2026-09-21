@@ -73,7 +73,8 @@ $('log-copy').onclick = async () => {
 
 // ---------- state ----------
 const st = {
-  files: [],            // File objects
+  files: [],            // File objects: the frames of the run, in order
+  off: [],              // excluded frames, {f, fr, at}: the file, its thumb entry, and the index of st.files it sits before (see frameList)
   frames: [],           // per processed frame: {name, w, h, proxy: ImageBitmap, sim}
   result: null,         // {w, h, bits, fused: OffscreenCanvas, dmap: OffscreenCanvas|null, depth: Float32Array, dw, dh, winner: Float32Array, ww, wh}
   depthBmp: new Map(),  // 'lut' -> ImageBitmap of the depth map (gray | turbo)
@@ -311,7 +312,11 @@ function onThumb(m) {
   // the file by its id: the list may have been cleared, or a batch may be showing one stack of it
   let i = st.files.findIndex((f) => f.uid === m.uid), frames = st.frames;
   if (i < 0 && B.all) { i = B.all.findIndex((f) => f.uid === m.uid); frames = B.frames; }
-  if (i < 0) return; // stale (cleared)
+  if (i < 0) {   // an excluded frame keeps its thumb on its own entry; else stale (cleared)
+    const o = st.off.find((o) => o.f.uid === m.uid);
+    if (o && !(o.fr && o.fr.proxy && o.fr.sim)) { o.fr = { ...(o.fr || {}), name: m.name, w: m.w, h: m.h, bits: m.bits, proxy: m.proxy, strip: m.strip }; renderFilmstrip(); }
+    return;
+  }
   const cur = frames[i];
   if (cur && cur.proxy && cur.sim) return; // the run already supplied an aligned proxy
   frames[i] = { ...(cur || {}), name: m.name, w: m.w, h: m.h, bits: m.bits, proxy: m.proxy, strip: m.strip };
@@ -323,7 +328,8 @@ async function makeThumb(f) {
   if (!/\.(png|jpe?g)$/i.test(f.name)) return; // the browser cannot decode TIFF; the run supplies a proxy
   try {
     const bmp = await createImageBitmap(f, { resizeWidth: 320, resizeQuality: 'medium' });
-    const i = st.files.indexOf(f); if (i < 0) return;
+    const i = st.files.indexOf(f);
+    if (i < 0) { const o = st.off.find((o) => o.f === f); if (o) { o.fr = o.fr || { name: f.name }; if (!o.fr.proxy) { o.fr.thumb = bmp; renderFilmstrip(); } } return; }
     st.frames[i] = st.frames[i] || { name: f.name };
     if (!st.frames[i].proxy) { st.frames[i].thumb = bmp; renderThumb(i); if (st.view === 'source' && st.selected === i) draw(); }
   } catch {}
@@ -331,12 +337,17 @@ async function makeThumb(f) {
 function renderFilmstrip() {
   const fs = $('filmstrip'); fs.innerHTML = '';
   if (B.all) fs.appendChild(batchBanner());
-  if (!st.files.length) { fs.insertAdjacentHTML('beforeend', '<div class="empty dim">Add frames, or drop them here.</div>'); return; }
+  if (!st.files.length && !st.off.length) { fs.insertAdjacentHTML('beforeend', '<div class="empty dim">Add frames, or drop them here.</div>'); return; }
+  if (!B.all) fs.appendChild(frameTools());
   // the split's stacks head their frames (one stack, or a batch's stack in hand, has no header)
   const stacks = B.all ? [] : stacksOf(st.files) || [];
   const heads = new Map();
   if (stacks.length > 1) stacks.forEach((s, k) => heads.set(s.lo, groupHead(s, k, stacks)));
-  st.files.forEach((f, i) => { if (heads.has(i)) fs.appendChild(heads.get(i)); fs.appendChild(thumbEl(i)); });
+  // a batch's stack in hand shows its own frames alone; otherwise the excluded frames sit in their places
+  for (const e of (B.all ? st.files.map((f, i) => ({ f, i, on: true })) : frameList())) {
+    if (e.on && heads.has(e.i)) fs.appendChild(heads.get(e.i));
+    fs.appendChild(e.on ? thumbEl(e.i) : thumbEl(-1, e));
+  }
 }
 const clock = (t) => { const s = Math.floor(((t % 86400) + 86400) % 86400); return `${pad2(Math.floor(s / 3600))}:${pad2(Math.floor(s / 60) % 60)}:${pad2(s % 60)}`; };
 // a stack's header in the filmstrip: its number and size, the status a batch gave it, and in
@@ -371,14 +382,15 @@ function batchBanner() {
 // each time costs a drawImage per frame on the main thread, which stutters with a long stack)
 function renderThumb(i) {
   const fs = $('filmstrip'), cur = fs.querySelector(`.thumb[data-i="${i}"]`);
-  if (!cur || fs.querySelectorAll('.thumb').length !== st.files.length) return renderFilmstrip();
+  if (!cur || fs.querySelectorAll('.thumb:not(.off)').length !== st.files.length) return renderFilmstrip();
   fs.replaceChild(thumbEl(i), cur);
 }
-function thumbEl(i) {
-  const f = st.files[i];
-  const d = document.createElement('div'); d.className = 'thumb' + (i === st.selected && scrubbable() ? ' sel' : ''); d.dataset.i = i;
-  if (R.on && brushFrom() === 'slab') { const [lo, hi] = slabWanted(); if (i >= lo && i <= hi) d.classList.add('slab'); }   // the frames the brush source is fused from
-  const fr = st.frames[i];
+// the thumb of the run's frame i, or (i = -1) of the excluded entry o (see frameList)
+function thumbEl(i, o = null) {
+  const f = o ? o.f : st.files[i];
+  const d = document.createElement('div'); d.className = 'thumb' + (!o && i === st.selected && scrubbable() ? ' sel' : '') + (o ? ' off' : ''); d.dataset.uid = f.uid; if (!o) d.dataset.i = i;
+  if (!o && R.on && brushFrom() === 'slab') { const [lo, hi] = slabWanted(); if (i >= lo && i <= hi) d.classList.add('slab'); }   // the frames the brush source is fused from
+  const fr = o ? o.fr : st.frames[i];
   const bmp = fr && (fr.strip || fr.thumb);
   if (bmp) {
     const c = document.createElement('canvas'); c.width = STRIP_W; c.height = STRIP_H;
@@ -389,23 +401,153 @@ function thumbEl(i) {
     g.drawImage(bmp, ...r);
     if (peaking) { g.filter = 'none'; g.drawImage(peakThumb(fr, Math.round(r[2]), Math.round(r[3])), r[0], r[1]); }
     d.appendChild(c);
-  } else { const ph = document.createElement('div'); ph.className = 'ph'; ph.textContent = fr ? '…' : String(i); d.appendChild(ph); }
+  } else { const ph = document.createElement('div'); ph.className = 'ph'; ph.textContent = fr ? '…' : o ? '' : String(i); d.appendChild(ph); }
   const n = document.createElement('div'); n.className = 'name'; n.textContent = f.name; n.title = fileKey(f); d.appendChild(n);
   if (fr && fr.sim) { const s = document.createElement('div'); s.className = 'sim'; s.textContent = `${fr.sim[0].toFixed(1)}, ${fr.sim[1].toFixed(1)} px · ×${fr.sim[2].toFixed(4)} · ${fr.sim[3].toFixed(2)}°`; d.appendChild(s); }
   // the brightness gain on its own line (the registration line fills the column), only when there is one
   if (fr && gainText(fr.gain)) { const s = document.createElement('div'); s.className = 'sim'; s.textContent = `brightness ${gainText(fr.gain)}`; s.title = 'gain that brings this frame to frame 0\'s brightness'; d.appendChild(s); }
   if (st.peak.strip && fr && fr.peak) { const s = document.createElement('div'); s.className = 'sim pct'; s.textContent = `${peakPercent(fr).toFixed(1)} % in focus`; d.appendChild(s); }
-  d.addEventListener('click', () => { st.selected = i; if (!scrubbable()) st.view = 'source'; updateTabs(); renderFilmstrip(); draw(); });
+  if (o) { const s = document.createElement('div'); s.className = 'sim'; s.textContent = 'excluded from the run'; d.appendChild(s); }
+  if (!o) d.addEventListener('click', () => { st.selected = i; if (!scrubbable()) st.view = 'source'; updateTabs(); renderFilmstrip(); draw(); });
+  // the frame's tools, on hover: exclude / include, move up / down, remove; shift on exclude or remove
+  // takes every frame from the last one marked through this one (see markFrames)
+  const t = document.createElement('div'); t.className = 'fx';
+  const mk = (txt, title, fn) => { const b = document.createElement('button'); b.textContent = txt; b.title = title; b.tabIndex = -1; b.addEventListener('click', (e) => { e.stopPropagation(); fn(e); }); t.appendChild(b); };
+  mk(o ? '↩' : '⊘', o ? 'include in the run again (shift: every frame from the last one marked through this one)' : 'exclude from the run, keeping it in the list (shift: every frame from the last one marked through this one; X excludes the selected frame)', (e) => markFrames(f.uid, e.shiftKey, 'toggle'));
+  mk('▲', 'move up (alt+↑ moves the selected frame; frames can be dragged too)', () => moveFrame(f.uid, -1));
+  mk('▼', 'move down (alt+↓)', () => moveFrame(f.uid, 1));
+  mk('✕', 'remove from the list (shift: every frame from the last one marked through this one; Delete removes the selected frame)', (e) => markFrames(f.uid, e.shiftKey, 'remove'));
+  d.appendChild(t);
+  // drag to reorder: the thumb is the drag image, the drop mark (see the filmstrip's dragover) the place
+  d.draggable = true;
+  d.addEventListener('dragstart', (e) => { if (!canEditFrames()) { e.preventDefault(); return; } fsDrag = f.uid; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', f.name); d.classList.add('dragging'); });
+  d.addEventListener('dragend', () => { fsDrag = null; d.classList.remove('dragging'); clearDropMark(); });
   return d;
 }
 $('add').addEventListener('click', () => $('file').click());
 $('file').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
 $('addf').addEventListener('click', () => $('dir').click());
 $('dir').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
-$('clear').addEventListener('click', () => { if (st.running || SV.exporting) return; setPick(false); worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); B.all = null; B.frames = null; B.stacks = []; B.done = false; st.step = 'stack'; gotoStep('stack'); renderFilmstrip(); runLabel(); updateTabs(); setView('source'); });
-document.addEventListener('dragover', (e) => { e.preventDefault(); document.body.classList.add('drop'); });
+$('clear').addEventListener('click', () => { if (st.running || SV.exporting) return; setPick(false); worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.off = []; st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); B.all = null; B.frames = null; B.stacks = []; B.done = false; st.step = 'stack'; gotoStep('stack'); renderFilmstrip(); runLabel(); updateTabs(); setView('source'); });
+document.addEventListener('dragover', (e) => { if (fsDrag !== null) return; e.preventDefault(); document.body.classList.add('drop'); });
 document.addEventListener('dragleave', () => document.body.classList.remove('drop'));
-document.addEventListener('drop', (e) => { e.preventDefault(); document.body.classList.remove('drop'); if (!st.running) droppedFiles(e.dataTransfer).then(addFiles); });
+document.addEventListener('drop', (e) => { if (fsDrag !== null) return; e.preventDefault(); document.body.classList.remove('drop'); if (!st.running) droppedFiles(e.dataTransfer).then(addFiles); });
+
+// ---------- frame management ----------
+// The run's frames are st.files, st.frames alongside, and everything from the split to the
+// retouch indexes them; an excluded frame leaves them for st.off ({f, fr, at}: the file, its
+// thumb entry, and the index of st.files it sits before), and the filmstrip merges the two
+// back in order (frameList). Every edit goes through editFrames on that merged list — exclude
+// or include, move, drag, remove, reverse — and any edit after a run drops the result, since
+// the result's frame indices are the list's. A batch's stack in hand cannot be edited ("all
+// frames" first), nor can the list while a run or save is going.
+let fsDrag = null, dropMark = null, lastMark = null;   // the dragged frame's uid; where it would land {uid, after}; the last frame marked by a thumb's tool (shift ranges start from it)
+const canEditFrames = () => !st.running && !SV.exporting && !B.all;
+function frameList() {   // [{f, fr, on, i?}] in filmstrip order; i = the index of st.files while on
+  const out = [], off = [...st.off].sort((a, b) => a.at - b.at); let k = 0;
+  for (let i = 0; i <= st.files.length; i++) {
+    while (k < off.length && off[k].at <= i) { out.push({ f: off[k].f, fr: off[k].fr, on: false }); k++; }
+    if (i < st.files.length) out.push({ f: st.files[i], fr: st.frames[i], on: true, i });
+  }
+  return out;
+}
+function setFrameList(list) {
+  const files = [], frames = [], off = [];
+  for (const e of list) { if (e.on) { files.push(e.f); frames.push(e.fr); } else off.push({ f: e.f, fr: e.fr, at: files.length }); }
+  st.files = files; st.frames = frames; st.off = off;
+}
+// the result and everything hanging off it: the list is about to change under it (the frames'
+// registration, gain and peaking came from the run too: bareFrame strips them, and the
+// aligned proxies stay as the thumbs)
+const bareFrame = (f) => (f ? { name: f.name, thumb: f.thumb, proxy: f.proxy, strip: f.strip, w: f.w, h: f.h, bits: f.bits } : f);
+function dropResult(why) {
+  if (R.on) leaveRetouch(false);
+  st.result = null; st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); setPick(false);
+  st.frames = st.frames.map(bareFrame);
+  for (const o of st.off) o.fr = bareFrame(o.fr);
+  st.compare = false; st.view = 'source'; if (st.step !== 'stack') gotoStep('stack');
+  $('progress').className = ''; setStatus('result dropped, run again');
+  log(`[lapstack] ${why}: the result is dropped, run again`);
+}
+// apply `fn` to the merged list (in place; false = nothing to do), keep the selection on its
+// frame, and refresh everything that reads the list
+function editFrames(what, fn) {
+  if (st.running || SV.exporting) { toast('Frames can be edited once the run or save in progress is done.'); return false; }
+  if (B.all) { toast('A batch\'s stack is on screen: "all frames" brings the list back first.'); return false; }
+  const sel = st.files[st.selected], list = frameList();
+  if (fn(list) === false) return false;
+  if (st.result) { dropResult(what); for (const e of list) e.fr = bareFrame(e.fr); }
+  setFrameList(list);
+  const j = st.files.indexOf(sel);
+  st.selected = j >= 0 ? j : Math.max(0, Math.min(st.selected, st.files.length - 1));
+  ensureTimes(); B.stacks = [];
+  $('run').disabled = st.running || !st.files.length; $('tab-source').disabled = !st.files.length;
+  runLabel(); updateTabs(); renderFilmstrip(); revealSelected(); draw();
+  return true;
+}
+const listIndex = (list, uid) => list.findIndex((e) => e.f.uid === uid);
+// a thumb's exclude / include or remove: the frame, or with shift every frame from the last one
+// marked through it, in filmstrip order
+function markFrames(uid, range, op) {
+  const list0 = frameList(), a = listIndex(list0, uid), b = range && lastMark !== null ? listIndex(list0, lastMark) : -1;
+  if (a < 0) return;
+  const [lo, hi] = b < 0 ? [a, a] : [Math.min(a, b), Math.max(a, b)];
+  const uids = new Set(list0.slice(lo, hi + 1).map((e) => e.f.uid)), n = uids.size;
+  lastMark = uid;
+  if (op === 'remove') {
+    const names = list0.slice(lo, hi + 1).map((e) => e.f.name);
+    editFrames(`${n} frame${n > 1 ? 's' : ''} removed`, (list) => { for (let k = list.length - 1; k >= 0; k--) if (uids.has(list[k].f.uid)) list.splice(k, 1); }) &&
+      log(`[lapstack] removed ${n === 1 ? names[0] : `${n} frames, ${names[0]} .. ${names[n - 1]}`} (${st.files.length} in the run)`);
+  } else {
+    const on = !list0[a].on;   // a range takes the clicked frame's new state
+    editFrames(`${n} frame${n > 1 ? 's' : ''} ${on ? 'included' : 'excluded'}`, (list) => { for (const e of list) if (uids.has(e.f.uid)) e.on = on; }) &&
+      log(`[lapstack] ${on ? 'included' : 'excluded'} ${n === 1 ? list0[a].f.name : `${n} frames`} (${st.files.length} in the run, ${st.off.length} excluded)`);
+  }
+}
+function moveFrame(uid, delta) {
+  editFrames('frame moved', (list) => {
+    const k = listIndex(list, uid), j = k + delta;
+    if (k < 0 || j < 0 || j >= list.length) return false;
+    const [e] = list.splice(k, 1); list.splice(j, 0, e);
+  });
+}
+function dropFrame(uid, mark) {   // the dragged frame lands before or after the marked one
+  if (uid === mark.uid) return;
+  editFrames('frame moved', (list) => {
+    const k = listIndex(list, uid); if (k < 0) return false;
+    const [e] = list.splice(k, 1);
+    let j = listIndex(list, mark.uid); if (j < 0) return false;
+    if (mark.after) j++;
+    list.splice(j, 0, e);
+  });
+}
+function reverseFrames() {
+  editFrames('frames reversed', (list) => { if (list.length < 2) return false; list.reverse(); }) && log(`[lapstack] frames reversed${st.files[0] ? `: ${st.files[0].name} is now frame 1` : ''}`);
+}
+function includeAll() {
+  const n = st.off.length;
+  editFrames(`${n} frame${n > 1 ? 's' : ''} included`, (list) => { if (!n) return false; for (const e of list) e.on = true; }) && log(`[lapstack] included ${n} frame${n > 1 ? 's' : ''} (${st.files.length} in the run)`);
+}
+// the filmstrip's head: the count, reverse, and (with excluded frames) include all
+function frameTools() {
+  const d = document.createElement('div'); d.className = 'fs-tools';
+  const n = st.files.length, m = st.off.length;
+  const s = document.createElement('span'); s.textContent = `${n} frame${n === 1 ? '' : 's'}${m ? ` · ${m} off` : ''}`; s.title = `${n} in the run${m ? `, ${m} excluded` : ''}. Drag a frame to reorder it; hover one for exclude, move and remove.`;
+  const b = document.createElement('button'); b.textContent = 'reverse'; b.title = 'reverse the order of the frames (the stack was shot back to front; excluded frames keep their places)'; b.disabled = n + m < 2; b.addEventListener('click', reverseFrames);
+  d.append(s, b);
+  if (m) { const a = document.createElement('button'); a.textContent = 'include all'; a.title = 'bring every excluded frame back into the run'; a.addEventListener('click', includeAll); d.appendChild(a); }
+  return d;
+}
+function clearDropMark() { if (dropMark) { const t = $('filmstrip').querySelector(`.thumb[data-uid="${dropMark.uid}"]`); if (t) t.classList.remove('drop-before', 'drop-after'); dropMark = null; } }
+$('filmstrip').addEventListener('dragover', (e) => {
+  if (fsDrag === null) return;
+  e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move';
+  const t = e.target.closest('.thumb'); if (!t) return;
+  const r = t.getBoundingClientRect(), after = e.clientY > r.top + r.height / 2, uid = Number(t.dataset.uid);
+  if (dropMark && dropMark.uid === uid && dropMark.after === after) return;
+  clearDropMark(); dropMark = { uid, after }; t.classList.add(after ? 'drop-after' : 'drop-before');
+});
+$('filmstrip').addEventListener('drop', (e) => { if (fsDrag === null) return; e.preventDefault(); e.stopPropagation(); if (dropMark) dropFrame(fsDrag, dropMark); fsDrag = null; clearDropMark(); });
 
 // ---------- run ----------
 function setProgress(text, done, total) {
@@ -1937,7 +2079,7 @@ function updateTabs() {
   $('peak').checked = st.peak.on; $('peakthr').textContent = st.peak.thr.toFixed(2); $('peakstep').hidden = !(st.peak.on || st.peak.strip);
   $('peak-strip').checked = st.peak.strip; $('peak-strip').disabled = !havePeaks;
   // shortcut card: rows for a result / retouch / compare appear once they apply
-  const when = { result: have, retouch, canretouch: canRetouch, compare: st.compare && have && !retouch };
+  const when = { result: have, retouch, canretouch: canRetouch, compare: st.compare && have && !retouch, frames: st.files.length > 0 && !retouch };
   document.querySelectorAll('#keys-list [data-when]').forEach((r) => { r.hidden = !when[r.dataset.when]; });
   const scrubbing = st.files.length > 1 && scrubbable();
   $('scrub').hidden = !scrubbing; $('scrubber').max = String(Math.max(0, st.files.length - 1)); $('scrubber').value = String(st.selected);
@@ -2013,6 +2155,9 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === '1') gotoStep('stack'); else if (e.key === '2') gotoStep('save');
   else if (e.key === 'r' && !e.ctrlKey && !e.metaKey) toggleRetouch();
   else if (e.key === 'ArrowLeft') scrub(e.shiftKey ? -10 : -1); else if (e.key === 'ArrowRight') scrub(e.shiftKey ? 10 : 1);
+  else if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && st.files[st.selected]) { e.preventDefault(); moveFrame(st.files[st.selected].uid, e.key === 'ArrowUp' ? -1 : 1); }
+  else if (e.key === 'x' && !e.ctrlKey && !e.metaKey && !R.on && st.files[st.selected]) markFrames(st.files[st.selected].uid, false, 'toggle');
+  else if (e.key === 'Delete' && !R.on && st.files[st.selected]) markFrames(st.files[st.selected].uid, false, 'remove');
   else if (e.key === 'f') fit(); else if (e.key === 'z' && !e.ctrlKey) zoom100();
   else if (e.key === ' ' && st.compare && !R.on) { e.preventDefault(); flip(true); }
   else if (e.key === '?') toggleKeys();
