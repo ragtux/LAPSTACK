@@ -193,18 +193,39 @@ async function handle(m) {
              rgba: res.rgba.buffer, depth_w: res.depth_w, depth_h: res.depth_h, depth: res.depth.buffer,
              winner_w: res.winner_w, winner_h: res.winner_h, winner: res.winner.buffer,
              ms: performance.now() - t0 }, [res.rgba.buffer, res.depth.buffer, res.winner.buffer]);
-      // optional second pass: render a second image from the depth map (frames are decoded again)
+      // optional second pass: render a second image from the depth map (frames are decoded
+      // again) — blending the frames nearest each pixel's depth, or, slabbed, the LAP fusions
+      // of overlapping slabs of the stack (each slab fused like the retouch slab, then
+      // blended in by its frame range; frames in the overlaps are decoded once per slab)
       if (m.params.render_dmap) {
         const t1 = performance.now();
-        let next = readAhead(m.files[0]);
-        for (let i = 0; i < m.files.length; i++) {
-          if (cancelled) break;
-          post({ type: 'stage', text: `rendering from depth map: ${m.files[i].name}`, done: i, total: m.files.length });
-          const bytes = new Uint8Array(await next);
-          next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
-          await engine.render_push(i, bytes);
+        if (m.params.render_slabs) {
+          const slabs = engine.render_slabs_begin(m.params.slab_size || 10, m.params.slab_overlap ?? 2);   // [[lo, hi], …]
+          const total = slabs.reduce((s, [lo, hi]) => s + hi - lo + 1, 0);
+          let done = 0;
+          for (let k = 0; k < slabs.length && !cancelled; k++) {
+            const [lo, hi] = slabs[k];
+            engine.slab_begin(lo, hi);
+            let next = readAhead(m.files[lo]);
+            for (let i = lo; i <= hi && !cancelled; i++) {
+              post({ type: 'stage', text: `slab ${k + 1}/${slabs.length}: ${m.files[i].name}`, done, total });
+              const bytes = new Uint8Array(await next);
+              next = i < hi ? readAhead(m.files[i + 1]) : null;
+              await engine.slab_push(i, bytes); done++;
+            }
+            if (!cancelled) await engine.render_slab_finish();
+          }
+        } else {
+          let next = readAhead(m.files[0]);
+          for (let i = 0; i < m.files.length; i++) {
+            if (cancelled) break;
+            post({ type: 'stage', text: `rendering from depth map: ${m.files[i].name}`, done: i, total: m.files.length });
+            const bytes = new Uint8Array(await next);
+            next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
+            await engine.render_push(i, bytes);
+          }
         }
-        if (cancelled) { post({ type: 'render-cancelled' }); running = false; return; }
+        if (cancelled) { engine.render_cancel(); post({ type: 'render-cancelled' }); running = false; return; }
         const r = await engine.render_finish();
         post({ type: 'done2', w: r.w, h: r.h, rgba: r.rgba.buffer, ms: performance.now() - t1 }, [r.rgba.buffer]);
       }

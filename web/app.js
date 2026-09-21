@@ -96,7 +96,7 @@ const dpr = () => window.devicePixelRatio || 1;
 
 // ---------- settings (persisted) ----------
 const PK = 'lapstack.settings';
-const stepDefaults = { 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5 };
+const stepDefaults = { 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5, 'p-dslab-size': 10, 'p-dslab-ov': 2 };
 function readParams() {
   const n = (id) => Number($(id).textContent === 'auto' ? 0 : $(id).textContent);
   return {
@@ -104,6 +104,7 @@ function readParams() {
     coarsen: n('p-coarsen'), levels: n('p-levels') || null, energy_radius: n('p-energy'), top: $('p-top').value,
     top_radius: n('p-topr'), use_chroma: $('p-chroma').checked, proxy_edge: n('p-proxy'),
     depth_scale: n('p-depthscale'), depth_level: n('p-depthlevel'), render_dmap: $('p-dmap').checked,
+    render_slabs: $('p-dslabs').checked, slab_size: n('p-dslab-size'), slab_overlap: n('p-dslab-ov'),
     turbo: st.turbo, slice: st.slice, peak_on: st.peak.on, peak_strip: st.peak.strip, peak_thr: st.peak.thr, cmp_mode: st.retouch.on && st.retouch.prev ? st.retouch.prev.cmpMode : st.cmpMode,
     brush_size: st.retouch.size, brush_hard: st.retouch.hard, brush_from: st.retouch.from, brush_slab: n('p-slab'),
   };
@@ -120,6 +121,7 @@ function applyParams(p) {
   $('p-top').value = p.top ?? 'de'; setStep('p-topr', p.top_radius ?? 2); $('p-chroma').checked = p.use_chroma ?? false;
   setStep('p-proxy', p.proxy_edge ?? 1400); st.turbo = p.turbo ?? false;
   setStep('p-depthscale', p.depth_scale ?? 2); setStep('p-depthlevel', p.depth_level ?? 2); $('p-dmap').checked = p.render_dmap ?? false; st.cmpMode = p.cmp_mode ?? 'swipe';
+  $('p-dslabs').checked = p.render_slabs ?? false; setStep('p-dslab-size', p.slab_size ?? 10); setStep('p-dslab-ov', p.slab_overlap ?? 2);
   st.peak.on = p.peak_on ?? false; st.peak.strip = p.peak_strip ?? false; st.peak.thr = p.peak_thr ?? 0.5; st.slice = p.slice ?? true;
   st.retouch.size = p.brush_size ?? 100; st.retouch.hard = p.brush_hard ?? 0.5; st.retouch.from = ['stack', 'slab'].includes(p.brush_from) ? p.brush_from : 'source';
   setStep('p-slab', p.brush_slab ?? 5);
@@ -127,16 +129,20 @@ function applyParams(p) {
 function saveParams() { try { localStorage.setItem(PK, JSON.stringify(readParams())); } catch {} }
 try { applyParams(JSON.parse(localStorage.getItem(PK))); } catch {}
 for (const id of Object.keys(stepDefaults)) setStep(id, Number($(id).textContent === 'auto' ? 0 : $(id).textContent));
-document.querySelectorAll('#params [data-step]').forEach((b) => b.addEventListener('click', () => {
+document.querySelectorAll('#params [data-step], #runmenu [data-step]').forEach((b) => b.addEventListener('click', () => {
   const id = b.dataset.step; const cur = Number($(id).textContent === 'auto' ? 0 : $(id).textContent);
-  setStep(id, cur + Number(b.dataset.d)); saveParams();
+  setStep(id, cur + Number(b.dataset.d));
+  // a slab's overlap stays short of its size (the engine clamps it too), so consecutive slabs advance
+  if (id === 'p-dslab-size' || id === 'p-dslab-ov') setStep('p-dslab-ov', Math.min(Number($('p-dslab-ov').textContent), Number($('p-dslab-size').textContent) - 1));
+  saveParams();
 }));
 document.querySelectorAll('#params input, #params select').forEach((el) => el.addEventListener('change', saveParams));
 // the slab half-width is a brush setting: a change moves the slab's range (ensureSlab, via updateTabs)
 document.querySelectorAll('[data-step="p-slab"]').forEach((b) => b.addEventListener('click', () => { updateTabs(); renderFilmstrip(); draw(); }));
 // Run menu (DFR lives here, not in the parameter panel): the Run label shows the state
-const runLabel = () => { $('run').textContent = $('p-dmap').checked ? 'Run LAP + DFR' : 'Run LAP'; };
+const runLabel = () => { $('run').textContent = $('p-dmap').checked ? 'Run LAP + DFR' : 'Run LAP'; $('dslab-ctl').hidden = !$('p-dslabs').checked; };
 $('p-dmap').addEventListener('change', () => { saveParams(); runLabel(); });
+$('p-dslabs').addEventListener('change', () => { if ($('p-dslabs').checked) $('p-dmap').checked = true; saveParams(); runLabel(); });   // slabs are a way of rendering DFR
 $('run-more').addEventListener('click', (e) => { e.stopPropagation(); $('runmenu').hidden = !$('runmenu').hidden; });
 $('runmenu').addEventListener('click', (e) => e.stopPropagation());
 document.addEventListener('click', () => { $('runmenu').hidden = true; $('cmp-menu').hidden = true; });
@@ -1647,6 +1653,7 @@ if (q.get('autorun')) {
     addFiles(files);
     if (q.has('align')) $('p-align').checked = q.get('align') === '1';
     if (q.has('render')) { $('p-dmap').checked = q.get('render') === '1'; runLabel(); }
+    if (q.has('slabs')) { $('p-dslabs').checked = q.get('slabs') === '1'; if ($('p-dslabs').checked) $('p-dmap').checked = true; runLabel(); }
     if (q.get('norun')) return;
     const tick = () => { if ($('status').textContent === 'ready') $('run').click(); else setTimeout(tick, 100); };
     tick();

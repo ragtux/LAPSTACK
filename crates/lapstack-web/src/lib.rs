@@ -170,6 +170,8 @@ struct Run {
     /// Depth-map rendering (second pass): frames folded so far, and the result.
     render_count: usize,
     dmap_rgb16: Option<Vec<u16>>,
+    /// The slabbed depth-map rendering in progress (`render_slabs_begin`).
+    srender: Option<SlabRender>,
     /// Retouch: the currently loaded aligned source frame (index, RGB u16).
     src_rgb16: Option<(usize, Vec<u16>)>,
     /// Retouch: the on-demand slab, the other brush source — the frames
@@ -188,6 +190,16 @@ struct Run {
     undo: Vec<Patch>,
     redo: Vec<Patch>,
     undo_bytes: usize,
+}
+
+/// A depth-map rendering from slabs (LAP within slabs, the depth-map blend
+/// across them): its own accumulator and weight sum — the run's `acc` / `best`
+/// are busy fusing the slabs — the slab ranges, and how many are blended in.
+struct SlabRender {
+    acc: wgpu::Buffer,
+    wt: wgpu::Buffer,
+    slabs: Vec<(usize, usize)>,
+    done: usize,
 }
 
 /// A slab being fused: its frame range and the residuals folded so far.
@@ -363,10 +375,10 @@ fn record_fold(run: &Run, rec: &mut Rec<'_>, scratch: &wgpu::Buffer, winner: Opt
     }
 }
 
-/// Fuse the residuals `tops`, collapse the accumulator pyramid into `acc[0]`
-/// (which keeps the float image) and read the result back: (RGBA8 for
-/// display, RGB u16 master).
-async fn collapse(g: &Gpu, run: &Run, tops: &[Img3]) -> Result<(Vec<u8>, Vec<u16>), String> {
+/// Record the collapse: fuse the residuals `tops` (on the CPU) into
+/// `acc[levels]`, expand-and-add down the accumulator pyramid, and clamp
+/// the image left in `acc[0]` to [0, 1].
+fn record_collapse(g: &Gpu, run: &Run, rec: &mut Rec<'_>, tops: &[Img3]) {
     let (w, h, n) = (run.w, run.h, run.w * run.h);
     let top = fuse_residuals(tops, &run.fp);
     let (tw, th) = run.dims[run.levels];
@@ -375,7 +387,6 @@ async fn collapse(g: &Gpu, run: &Run, tops: &[Img3]) -> Result<(Vec<u8>, Vec<u16
         flat.extend_from_slice(&top.p[c]);
     }
     g.queue.write_buffer(&run.acc[run.levels], 0, bytemuck::cast_slice(&flat));
-    let mut rec = g.rec();
     for l in (0..run.levels).rev() {
         let (fw, fh) = run.dims[l];
         let (cw, ch) = run.dims[l + 1];
@@ -385,11 +396,18 @@ async fn collapse(g: &Gpu, run: &Run, tops: &[Img3]) -> Result<(Vec<u8>, Vec<u16
             rec.dispatch("exp_v", [None, Some(&run.tmp_half), Some(&run.acc[l]), None, None, None], pe, grid2(fw, fh));
         }
     }
+    rec.dispatch("clamp01", [None, None, Some(&run.acc[0]), None, None, None], P { w: w as u32, h: h as u32, ..Default::default() }, grid1(3 * n));
+}
+
+/// Read a float image (3 planes in `img`) back as (RGBA8 for display, RGB
+/// u16 master); `tmp_full` is the RGBA8 staging.
+async fn readback_image(g: &Gpu, run: &Run, img: &wgpu::Buffer) -> Result<(Vec<u8>, Vec<u16>), String> {
+    let (w, h, n) = (run.w, run.h, run.w * run.h);
     let pw = P { w: w as u32, h: h as u32, ..Default::default() };
-    rec.dispatch("clamp01", [None, None, Some(&run.acc[0]), None, None, None], pw, grid1(3 * n));
-    rec.dispatch("to_rgba8", [Some(&run.acc[0]), None, Some(&run.tmp_full), None, None, None], pw, grid1(n));
+    let mut rec = g.rec();
+    rec.dispatch("to_rgba8", [Some(img), None, Some(&run.tmp_full), None, None, None], pw, grid1(n));
     let rgb16 = g.buffer("rgb16 out", ((3 * n).div_ceil(2) * 4) as u64);
-    rec.dispatch("to_rgb16", [Some(&run.acc[0]), None, Some(&rgb16), None, None, None], pw, grid1((3 * n).div_ceil(2)));
+    rec.dispatch("to_rgb16", [Some(img), None, Some(&rgb16), None, None, None], pw, grid1((3 * n).div_ceil(2)));
     rec.submit();
     let rgba = g.read(&run.tmp_full, (n * 4) as u64).await?;
     let r16 = g.read(&rgb16, ((3 * n).div_ceil(2) * 4) as u64).await?;
@@ -397,6 +415,16 @@ async fn collapse(g: &Gpu, run: &Run, tops: &[Img3]) -> Result<(Vec<u8>, Vec<u16
     let mut v16: Vec<u16> = bytemuck::cast_slice(&r16).to_vec();
     v16.truncate(3 * n);
     Ok((rgba, v16))
+}
+
+/// Fuse the residuals `tops`, collapse the accumulator pyramid into `acc[0]`
+/// (which keeps the float image) and read the result back: (RGBA8 for
+/// display, RGB u16 master).
+async fn collapse(g: &Gpu, run: &Run, tops: &[Img3]) -> Result<(Vec<u8>, Vec<u16>), String> {
+    let mut rec = g.rec();
+    record_collapse(g, run, &mut rec, tops);
+    rec.submit();
+    readback_image(g, run, &run.acc[0]).await
 }
 
 #[wasm_bindgen]
@@ -654,7 +682,7 @@ impl Engine {
         rec.dispatch(
             "dmap_acc",
             [Some(&run.cur[0]), Some(&run.acc[0]), Some(&run.best[0]), None, Some(&run.en2), None],
-            P { w: w as u32, h: h as u32, f0: index as f32, ..Default::default() },
+            P { w: w as u32, h: h as u32, f0: index as f32, f1: index as f32, ..Default::default() },
             grid1(n),
         );
         rec.submit();
@@ -665,29 +693,126 @@ impl Engine {
         Ok(o.into())
     }
 
-    /// Normalise the depth-map rendering and read it back: {w, h, rgba, ms}.
+    /// Slabbed depth-map rendering (Zerene's slabbing, second pass): the
+    /// stack is cut into slabs of `size` frames overlapping by `overlap`,
+    /// each is fused on its own (`slab_begin` / `slab_push`, LAP within the
+    /// slab) and `render_slab_finish` blends the collapsed slab in with
+    /// weight 1 − dist(depth, its range) per pixel, so a pixel takes the
+    /// slab(s) whose frames hold its depth — fine detail and crossing
+    /// structures from LAP within a slab, and the far-out-of-focus frames
+    /// that build noise and halos over a whole stack never blend in. The
+    /// run's accumulator fuses the slabs, so the blend gets buffers of its
+    /// own (4 floats per pixel, freed by `render_finish`). Returns the slab
+    /// ranges as [[lo, hi], …].
+    pub fn render_slabs_begin(&mut self, size: usize, overlap: usize) -> Result<JsValue, JsValue> {
+        let g = &self.gpu;
+        let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
+        if run.fused_rgb16.is_none() {
+            return Err(JsValue::from_str("finish the run first"));
+        }
+        let n = run.w * run.h;
+        let size = size.clamp(1, run.count.max(1));
+        let overlap = overlap.min(size - 1);
+        let mut slabs = Vec::new();
+        let mut lo = 0;
+        loop {
+            let hi = (lo + size - 1).min(run.count - 1);
+            slabs.push((lo, hi));
+            if hi + 1 >= run.count {
+                break;
+            }
+            lo = hi + 1 - overlap;
+        }
+        let acc = g.buffer_f32("slab render acc", 3 * n);
+        let wt = g.buffer_f32("slab render weights", n);
+        let mut rec = g.rec();
+        rec.clear(&acc);
+        rec.clear(&wt);
+        rec.submit();
+        log(&format!("[lapstack] depth-map rendering from {} slabs of {size} frames, overlap {overlap}", slabs.len()));
+        let out = js_sys::Array::new();
+        for &(lo, hi) in &slabs {
+            out.push(&js_sys::Array::from_iter([JsValue::from(lo as u32), JsValue::from(hi as u32)]));
+        }
+        run.srender = Some(SlabRender { acc, wt, slabs, done: 0 });
+        run.render_count = 0;
+        Ok(out.into())
+    }
+
+    /// Collapse the slab in progress and blend it into the slabbed depth-map
+    /// rendering. Returns {lo, hi, ms}.
+    pub async fn render_slab_finish(&mut self) -> Result<JsValue, JsValue> {
+        let t0 = now();
+        let g = &self.gpu;
+        let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
+        let slab = run.slab.take().ok_or_else(|| JsValue::from_str("no slab begun"))?;
+        let sr = run.srender.as_ref().ok_or_else(|| JsValue::from_str("no slabbed rendering begun"))?;
+        if slab.tops.is_empty() {
+            return Err(JsValue::from_str("no frames folded into the slab"));
+        }
+        if sr.slabs.get(sr.done) != Some(&(slab.lo, slab.hi)) {
+            return Err(JsValue::from_str(&format!("slab {}..{} is not slab {} of the rendering", slab.lo, slab.hi, sr.done)));
+        }
+        let (w, h, n) = (run.w, run.h, run.w * run.h);
+        let mut rec = g.rec();
+        record_collapse(g, run, &mut rec, &slab.tops);
+        rec.dispatch(
+            "dmap_acc",
+            [Some(&run.acc[0]), Some(&sr.acc), Some(&sr.wt), None, Some(&run.en2), None],
+            P { w: w as u32, h: h as u32, f0: slab.lo as f32, f1: slab.hi as f32, ..Default::default() },
+            grid1(n),
+        );
+        rec.submit();
+        let ms = now() - t0;
+        log(&format!("[lapstack] slab {}..{} ({} frames) blended into the depth-map rendering ({ms:.0} ms)", slab.lo, slab.hi, slab.tops.len()));
+        run.srender.as_mut().unwrap().done += 1;
+        let o = js_sys::Object::new();
+        set(&o, "lo", slab.lo as u32);
+        set(&o, "hi", slab.hi as u32);
+        set(&o, "ms", ms);
+        Ok(o.into())
+    }
+
+    /// Drop a depth-map rendering in progress (cancelled), slabbed or not.
+    pub fn render_cancel(&mut self) {
+        if let Some(run) = self.run.as_mut() {
+            run.srender = None;
+            run.slab = None;
+            run.render_count = 0;
+        }
+    }
+
+    /// Normalise the depth-map rendering (from frames, or from slabs) and read
+    /// it back: {w, h, rgba, ms}.
     pub async fn render_finish(&mut self) -> Result<JsValue, JsValue> {
         let t0 = now();
         let g = &self.gpu;
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
-        if run.render_count == 0 {
-            return Err(JsValue::from_str("no frames rendered"));
-        }
         let (w, h, n) = (run.w, run.h, run.w * run.h);
         let pw = P { w: w as u32, h: h as u32, ..Default::default() };
+        let sr = run.srender.take();
+        let (acc, wt, what) = match &sr {
+            Some(sr) => {
+                if sr.done == 0 {
+                    return Err(JsValue::from_str("no slabs rendered"));
+                }
+                (&sr.acc, &sr.wt, format!("{} slabs", sr.done))
+            }
+            None => {
+                if run.render_count == 0 {
+                    return Err(JsValue::from_str("no frames rendered"));
+                }
+                (&run.acc[0], &run.best[0], format!("{} frames", run.render_count))
+            }
+        };
         let mut rec = g.rec();
-        rec.dispatch("dmap_norm", [None, Some(&run.acc[0]), Some(&run.best[0]), None, None, None], pw, grid1(n));
-        rec.dispatch("to_rgba8", [Some(&run.acc[0]), None, Some(&run.tmp_full), None, None, None], pw, grid1(n));
-        let rgb16 = g.buffer("dmap rgb16", ((3 * n).div_ceil(2) * 4) as u64);
-        rec.dispatch("to_rgb16", [Some(&run.acc[0]), None, Some(&rgb16), None, None, None], pw, grid1((3 * n).div_ceil(2)));
+        rec.dispatch("dmap_norm", [None, Some(acc), Some(wt), None, None, None], pw, grid1(n));
         rec.submit();
-        let rgba = g.read(&run.tmp_full, (n * 4) as u64).await.map_err(|e| JsValue::from_str(&e))?;
-        let r16 = g.read(&rgb16, ((3 * n).div_ceil(2) * 4) as u64).await.map_err(|e| JsValue::from_str(&e))?;
-        let mut v16: Vec<u16> = bytemuck::cast_slice(&r16).to_vec();
-        v16.truncate(3 * n);
+        let (rgba, v16) = readback_image(g, run, acc).await.map_err(|e| JsValue::from_str(&e))?;
+        drop(sr);
         run.dmap_rgb16 = Some(v16);
         run.render_count = 0;
-        log(&format!("[lapstack] depth-map rendering finished ({:.0} ms)", now() - t0));
+        log(&format!("[lapstack] depth-map rendering finished from {what} ({:.0} ms)", now() - t0));
         let o = js_sys::Object::new();
         set(&o, "w", w as u32);
         set(&o, "h", h as u32);
@@ -1226,6 +1351,7 @@ impl Engine {
             dff,
             render_count: 0,
             dmap_rgb16: None,
+            srender: None,
             src_rgb16: None,
             slab: None,
             slab_rgb16: None,

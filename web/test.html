@@ -66,7 +66,8 @@ try {
   // differs from it
   let slabGen = 0;   // a newer request supersedes an older one: generations must rise
   const slabOf = async (lo, hi) => { const p = wait('slab'); worker.postMessage({ type: 'slab', lo, hi, files: files.slice(lo, hi + 1), gen: ++slabGen }); return new Uint8Array((await p).rgba); };
-  const slabDiff = (s) => { let mx = 0, nd = 0; for (let i = 0; i < got.length; i += 4) { const d = Math.max(Math.abs(s[i] - got[i]), Math.abs(s[i + 1] - got[i + 1]), Math.abs(s[i + 2] - got[i + 2])); mx = Math.max(mx, d); if (d) nd++; } return { maxdiff: mx, ndiff_frac: nd / (res.w * res.h) }; };
+  const diffOf = (s, ref) => { let mx = 0, nd = 0; for (let i = 0; i < ref.length; i += 4) { const d = Math.max(Math.abs(s[i] - ref[i]), Math.abs(s[i + 1] - ref[i + 1]), Math.abs(s[i + 2] - ref[i + 2])); mx = Math.max(mx, d); if (d) nd++; } return { maxdiff: mx, ndiff_frac: nd / (res.w * res.h) }; };
+  const slabDiff = (s) => diffOf(s, got);
   const slab = { full: slabDiff(await slabOf(0, res.frames - 1)), part: slabDiff(await slabOf(0, Math.max(0, res.frames >> 1))) };
   log(`slab: all frames vs LAP maxdiff ${slab.full.maxdiff}; first half vs LAP ${(100 * slab.part.ndiff_frac).toFixed(1)} % of pixels differ`);
   if (slab.full.maxdiff !== 0) throw new Error(`a slab of every frame differs from the LAP result (maxdiff ${slab.full.maxdiff})`);
@@ -101,8 +102,22 @@ try {
       } else log('no ' + expectedDff + ' (skipping the depth comparison)');
     }
   }
+  // slabbed DFR: LAP within slabs, the depth-map blend across the slab images. One slab of
+  // every frame gets weight 1 everywhere, so that rendering is the LAP result itself; short
+  // slabs give a different image. Each is a run of its own (the engine keeps one).
+  const runWith = async (extra) => {
+    const d1 = wait('done'), d2 = wait('done2');
+    worker.postMessage({ type: 'run', files, params: { align, coarsen, brightness: false, proxy_edge: 400, depth: depthMode, depth_scale: depthScale, ...extra } });
+    const a = await d1, b = await d2; return [new Uint8Array(a.rgba), new Uint8Array(b.rgba), b.ms];
+  };
+  const [lapA, oneSlab, msA] = await runWith({ render_dmap: true, render_slabs: true, slab_size: res.frames, slab_overlap: 0 });
+  const [lapB, slabs3, msB] = await runWith({ render_dmap: true, render_slabs: true, slab_size: 3, slab_overlap: 1 });
+  const slabbed = { one_slab_vs_lap: diffOf(oneSlab, lapA), slabs3_vs_lap: diffOf(slabs3, lapB), ms: [msA, msB] };
+  log(`slabbed DFR: one slab vs LAP maxdiff ${slabbed.one_slab_vs_lap.maxdiff}; slabs of 3 vs LAP ${(100 * slabbed.slabs3_vs_lap.ndiff_frac).toFixed(1)} % of pixels differ (${msA.toFixed(0)} / ${msB.toFixed(0)} ms)`);
+  if (slabbed.one_slab_vs_lap.maxdiff !== 0) throw new Error(`a slabbed DFR of one slab differs from the LAP result (maxdiff ${slabbed.one_slab_vs_lap.maxdiff})`);
+  if (res.frames > 3 && slabbed.slabs3_vs_lap.ndiff_frac === 0) throw new Error('a slabbed DFR of 3-frame slabs equals the LAP result');
   const result = { ok: true, align, frames: res.frames, w: res.w, h: res.h, maxdiff: maxd, ndiff, ndiff_frac: ndiff / (res.w * res.h),
-    mean_abs: sum / (3 * res.w * res.h), depth_range: [dmin, dmax], depth_dims: [res.depth_w, res.depth_h], dff, dmap, slab, png_bytes: png.bytes.byteLength, ms: res.ms,
+    mean_abs: sum / (3 * res.w * res.h), depth_range: [dmin, dmax], depth_dims: [res.depth_w, res.depth_h], dff, dmap, slab, slabbed, png_bytes: png.bytes.byteLength, ms: res.ms,
     sims: frames.map(f => f.sim), info };
   log('RESULT ' + JSON.stringify(result));
   window.__result = JSON.stringify(result);

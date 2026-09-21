@@ -336,6 +336,21 @@ the right; DFR has its own layer under Stack, is the retouch target while
 it is the shown layer, and can be the saved image (*result*). On the 25 × 45 MP stack the second pass
 adds 6.7 s to a 27.7 s run.
 
+*From slabs* in the same menu is Zerene's slabbing as a rendering mode:
+the stack is cut into slabs of *slab size* frames overlapping by
+*overlap* (defaults 10 and 2), each slab is fused on its own with the
+run's settings (LAP within the slab, the same fold as the retouch slab)
+and DFR blends the slab images instead of the frames, with weight
+`1 − dist(depth, [lo, hi])` per pixel — full weight for every slab whose
+frames hold the pixel's depth, a one-frame fall-off outside, so a frame is
+the special case `lo = hi`. Fine detail and crossing structures come from
+LAP within a slab, while the far-out-of-focus frames that build up noise
+and halos over a whole stack never blend in, since a slab's frames all lie
+near its depth. Frames in the overlaps are decoded once per slab, and the
+blend keeps its own accumulator on the GPU (4 floats per pixel, freed
+afterwards) while the run's fuses the slabs. A single slab of the whole
+stack reproduces the LAP result exactly, which the test page checks.
+
 **Retouch** is a mode of the Stack step, not a step of its own: the
 **Retouch** button in the viewer's top-right corner (or `R`) is there
 whenever LAP or DFR is on screen. It turns the view into a side-by-side

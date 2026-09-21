@@ -729,14 +729,18 @@ fn up_apply(@builtin(global_invocation_id) g: vec3<u32>) {
     o[i] = clamp(A * e[i] + B, 0.0, p.f0);
 }
 
-// ---- depth-map rendering (DMAP): each frame is blended in
-// with triangular weight 1 - |index - depth| around the pixel's depth index.
-// a = warped frame (3 planes, p.w x p.h), wt = full-res depth, b = accumulator
-// (3 planes), o = weight sum; f0 = frame index.
+// ---- depth-map rendering (DMAP): each image is blended in with weight
+// 1 - dist(depth, [f0, f1]), the distance of the pixel's depth index from the
+// image's frame range, clamped to [0, 1]: a frame (f0 = f1 = its index) gets the
+// triangular weight 1 - |index - depth|; a slab (f0..f1 = its frames) full weight
+// wherever the depth lies within it and the same one-frame fall-off outside.
+// a = warped frame or collapsed slab (3 planes, p.w x p.h), wt = full-res depth,
+// b = accumulator (3 planes), o = weight sum.
 @compute @workgroup_size(256)
 fn dmap_acc(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = gid1(g, nwg); let n = p.w * p.h; if (i >= n) { return; }
-    let t = clamp(1.0 - abs(p.f0 - wt[i]), 0.0, 1.0);
+    let d = wt[i];
+    let t = clamp(1.0 - max(max(p.f0 - d, d - p.f1), 0.0), 0.0, 1.0);
     if (t > 0.0) {
         b[i] += t * a[i]; b[n + i] += t * a[n + i]; b[2u * n + i] += t * a[2u * n + i];
         o[i] += t;

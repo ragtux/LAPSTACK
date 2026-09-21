@@ -19,6 +19,12 @@
       <div id="runmenu" class="menu" hidden>
         <label class="tog"><input type="checkbox" id="p-dmap"> DFR (depth map)</label>
         <div class="dim small">Render a second stacked image from the focus depth map: each pixel blends the frames nearest its depth. DFR will be shown side by side with LAP. Increases run time by ~25%.</div>
+        <label class="tog"><input type="checkbox" id="p-dslabs"> from slabs</label>
+        <div class="dim small">Zerene's slabbing: the stack is cut into overlapping slabs, each fused on its own (LAP), and DFR blends the slab images instead of the frames — a pixel takes the slab(s) whose frames hold its depth. Fine detail and crossing structures come from LAP within a slab; the far-out-of-focus frames that build noise and halos over a whole stack never blend in. Frames in the overlaps are decoded once per slab.</div>
+        <div id="dslab-ctl">
+          <label class="stepper">slab size <span><button data-step="p-dslab-size" data-d="-1">−</button><span id="p-dslab-size" data-min="1" data-max="200">10</span><button data-step="p-dslab-size" data-d="1">+</button></span></label>
+          <label class="stepper">overlap <span><button data-step="p-dslab-ov" data-d="-1">−</button><span id="p-dslab-ov" data-min="0" data-max="199">2</span><button data-step="p-dslab-ov" data-d="1">+</button></span></label>
+        </div>
       </div>
     </span>
     <button id="cancel" hidden>Cancel</button>
@@ -81,7 +87,7 @@
         </div>
         <div class="seg sub" id="subseg" hidden>
           <button data-tab="fused" data-group="stack" title="Laplacian-pyramid fusion">LAP</button>
-          <button data-tab="dmap" data-group="stack" title="rendered from the depth map: each pixel blends the frames nearest its depth">DFR</button>
+          <button data-tab="dmap" data-group="stack" title="rendered from the depth map: each pixel blends the frames (or the slabs) nearest its depth">DFR</button>
           <button data-tab="depth" data-group="depth" title="depth from focus (working grid)">Focus depth</button>
           <button data-tab="focus" data-group="depth" title="the scrubbed frame's own pixels, dimmed where it is out of focus: scrub to sweep the plane of focus">In focus</button>
         </div>
