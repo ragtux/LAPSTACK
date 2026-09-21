@@ -16,6 +16,7 @@ const depthMode = q.get('depth') || 'dff';                 // dff | winner
 const depthScale = Number(q.get('depth_scale') || 2);
 const render = q.get('render') === '1';                     // also render from the depth map (second pass)
 const expectedDff = q.has('expected_dff') ? q.get('expected_dff') : 'test/expected_dff.u16'; // raw u16 LE, '' = skip
+const expectedConf = q.has('expected_conf') ? q.get('expected_conf') : 'test/expected_conf.u16'; // raw u16 LE of the confidence (65535 = 1), '' = skip
 const worker = new Worker('./worker.js?t=' + Date.now(), { type: 'module' });
 const wait = (type) => new Promise((res, rej) => {
   const h = (ev) => { const m = ev.data; if (m.type === 'error') { worker.removeEventListener('message', h); rej(new Error(m.text)); }
@@ -85,6 +86,11 @@ try {
   }
   const depth = new Float32Array(res.depth);
   let dmin = Infinity, dmax = -Infinity; for (const v of depth) { dmin = Math.min(dmin, v); dmax = Math.max(dmax, v); }
+  // the confidence: the depth's grid, [0, 1], empty with the winner depth
+  const conf = new Float32Array(res.conf);
+  if (conf.length !== (depthMode === 'dff' ? depth.length : 0)) throw new Error(`confidence size ${conf.length} vs depth ${depth.length}`);
+  let cmin = Infinity, cmax = -Infinity, csum = 0; for (const v of conf) { cmin = Math.min(cmin, v); cmax = Math.max(cmax, v); csum += v; }
+  if (conf.length && (cmin < 0 || cmax > 1)) throw new Error(`confidence out of [0, 1]: ${cmin}..${cmax}`);
   const pngP = wait('png'); worker.postMessage({ type: 'save', kind: 'fused' }); const png = await pngP;
   // depth from focus: full-res map vs the native reference (same frames, same scale)
   let dff = null;
@@ -100,6 +106,21 @@ try {
         for (let i = 0; i < got16.length; i++) { const d = Math.abs(got16[i] - exp16[i]) * k; mx = Math.max(mx, d); s1 += d; if (d <= 0.5) within++; }
         dff = { n: got16.length, max_abs_frames: mx, mean_abs_frames: s1 / got16.length, within_half_frame: within / got16.length };
       } else log('no ' + expectedDff + ' (skipping the depth comparison)');
+    }
+    // the full-resolution confidence vs the native one (`--save-conf`), 65535 = 1
+    const cfP = wait('conf_full'); worker.postMessage({ type: 'conf_full' }); const gotC = new Uint16Array((await cfP).data);
+    if (gotC.length !== got16.length) throw new Error(`confidence size mismatch ${gotC.length} vs depth ${got16.length}`);
+    dff.conf = { mean: csum / conf.length, range: [cmin, cmax] };
+    if (expectedConf) {
+      const r = await fetch('./' + expectedConf);
+      if (r.ok) {
+        const expC = new Uint16Array(await r.arrayBuffer());
+        if (expC.length !== gotC.length) throw new Error(`confidence size mismatch ${expC.length} vs ${gotC.length}`);
+        let mx = 0, s1 = 0, over = 0;   // over: pixels off by more than 0.05 (a tie between two peaks resolved the other way)
+        for (let i = 0; i < gotC.length; i++) { const d = Math.abs(gotC[i] - expC[i]) / 65535; mx = Math.max(mx, d); s1 += d; if (d > 0.05) over++; }
+        Object.assign(dff.conf, { max_abs: mx, mean_abs: s1 / gotC.length, over_0_05_frac: over / gotC.length });
+        log(`confidence vs native: max |diff| ${mx.toFixed(4)}, mean ${(s1 / gotC.length).toFixed(5)}, ${(100 * over / gotC.length).toFixed(3)} % of pixels off by > 0.05`);
+      } else log('no ' + expectedConf + ' (skipping the confidence comparison)');
     }
   }
   // slabbed DFR: LAP within slabs, the depth-map blend across the slab images. One slab of

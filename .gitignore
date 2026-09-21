@@ -8,3 +8,4 @@ web/test/big/
 web/test/big25/
 docs/*
 !docs/*.pdf
+web/test/expected_conf.*

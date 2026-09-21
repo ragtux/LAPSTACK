@@ -375,9 +375,10 @@ added, with each frame's registration once aligned), a parameter panel (all
 `lapstack` knobs, persisted in localStorage), Run/Cancel with progress and a
 log, and a viewer whose header is a segmented **Source / Stack / Depth**
 control with a second-level control for the group's layers — **LAP / DFR**
-under Stack (DFR only when the depth-map render ran), **Focus depth / In focus**
-under Depth — followed by controls that only show for what is on screen: on
-Source a **peaking** toggle with a threshold stepper; on Focus depth a
+under Stack (DFR only when the depth-map render ran), **Focus depth /
+Confidence / In focus** under Depth — followed by controls that only show
+for what is on screen: on Source a **peaking** toggle with a threshold
+stepper; on Focus depth and Confidence a
 Gray/Turbo LUT and a **slice** toggle; a frame slider whenever the shown
 layers depend on a frame; and on the right a **compare** toggle whose "vs" dropdown lists
 the other layers (the divider is draggable, `flip` or space swaps sides);
@@ -395,7 +396,8 @@ a thumbnail and the exact file name per output) and the settings. Stills:
 the (retouched) LAP and DFR images as PNG at the input bit depth, 8-bit PNG
 or JPEG with a quality slider; the depth map as an 8-bit gray PNG (min–max
 scaled) or a 16-bit PNG with a fixed scale (65535 = last frame, the same
-encoding as the CLI's `--depth-raw`); the winner map. The stacked images
+encoding as the CLI's `--depth-raw`); the confidence map as a 16-bit PNG
+(65535 = 1, as `--save-conf`); the winner map. The stacked images
 carry the **first frame's EXIF, ICC profile and XMP** like the CLI's output
 (the run reads them from the first frame's bytes; the card's *Metadata*
 section says what was found and has the switch). Every file, animations
@@ -496,9 +498,17 @@ guide), the peaks are tracked with sub-frame interpolation and confidence,
 the confidence-weighted WLS with its robust reweight runs as fast-global-
 smoother sweeps plus conjugate gradient on the device, and the map is
 guided-upsampled to full resolution for saving. The viewer shows the
-working-grid map under **Depth → Focus depth**; the 16-bit save writes the full-resolution
-one. The browser map matches the native one on the same frames to
-4 × 10⁻⁴ frames (the u16 quantisation), see `web/test.html`. The pass costs
+working-grid map under **Depth → Focus depth** and its confidence under
+**Depth → Confidence** — the peak-ratio confidence of each pixel's focus
+profile, normalised so the 90th percentile is 1: the weight the WLS gave the
+pixel's own depth, so the dark parts are where the map was filled in from
+the neighbours (flat, noisy or ambiguous areas); the ctrl+G readout logs
+both values for the clicked pixel. The 16-bit saves write the full-resolution
+depth and the confidence bilinearly upsampled (65535 = 1, as `--save-conf`).
+The browser map matches the native one on the same frames to
+4 × 10⁻⁴ frames (the u16 quantisation) and the confidence to 3 × 10⁻³ on
+average (0.1 % of the pixels, near-ties between two peaks, differ by
+more), see `web/test.html`. The pass costs
 no measurable wall time on a 25 × 45 MP run and keeps one u16 slice per
 frame (5.7 MB at 45 MP and N = 2). The raw pyramid **winner map** (which
 frame won at pyramid level *winner map level*, a free by-product of fusion)

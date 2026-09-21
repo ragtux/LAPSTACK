@@ -116,8 +116,9 @@ impl DepthGpu {
     /// The finish stage. `luma_full` holds the fused luma (w×h, f32);
     /// `full_tmp` and `full_out` are w×h f32 scratch buffers; `up16` is a
     /// buffer of at least dw*dh/2 u32 for slice uploads. Returns the
-    /// working-grid depth (fractional frame index, dw×dh) and the full-res
-    /// depth quantised to u16 (65535 = last frame).
+    /// working-grid depth (fractional frame index, dw×dh), the working-grid
+    /// confidence normalised like the WLS data weight (`min(1, c / p90)`,
+    /// dw×dh) and the full-res depth quantised to u16 (65535 = last frame).
     pub async fn finish(
         &mut self,
         g: &Gpu,
@@ -128,7 +129,7 @@ impl DepthGpu {
         full_out: &wgpu::Buffer,
         up16: &wgpu::Buffer,
         log: &dyn Fn(&str),
-    ) -> Result<(Vec<f32>, Vec<u16>), String> {
+    ) -> Result<(Vec<f32>, Vec<f32>, Vec<u16>), String> {
         let (dw, dh, n) = (self.dw, self.dh, self.dw * self.dh);
         let slices = std::mem::take(&mut self.slices);
         let nf = slices.len();
@@ -222,7 +223,9 @@ impl DepthGpu {
         let mut sample: Vec<f32> = conf.iter().step_by(7).copied().collect();
         let k90 = (sample.len() * 9 / 10).min(sample.len() - 1);
         let p90 = *sample.select_nth_unstable_by(k90, |a, b| a.total_cmp(b)).1;
-        let mean_conf = conf.iter().map(|&c| (c / p90.max(1e-6)).min(1.0) as f64).sum::<f64>() / n as f64;
+        // the confidence the viewer shows and the save writes: the WLS data weight before its epsilon
+        let conf_w: Vec<f32> = conf.iter().map(|&c| (c / p90.max(1e-6)).min(1.0)).collect();
+        let mean_conf = conf_w.iter().map(|&c| c as f64).sum::<f64>() / n as f64;
         log(&format!("[lapstack] depth: {nf} slices folded on the {dw}x{dh} grid, confidence p90 {p90:.3}, mean {mean_conf:.3}"));
 
         // ---- WLS (+ one robust reweight)
@@ -280,7 +283,7 @@ impl DepthGpu {
         let packed = g.read(full_tmp, (nfull.div_ceil(2) * 4) as u64).await?;
         let mut full: Vec<u16> = bytemuck::cast_slice::<u8, u16>(&packed).to_vec();
         full.truncate(nfull);
-        Ok((depth_w, full))
+        Ok((depth_w, conf_w, full))
     }
 
     /// Box mean with border clipping: src -> dst (radius r), row sums in wk.rt.

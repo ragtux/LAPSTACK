@@ -14,6 +14,7 @@ for k in 0 3 6 9 12 15 18 21; do
     i=$((i + 1))
 done
 python3 -c "import json,os; json.dump(sorted(f for f in os.listdir('web/test/frames') if f.endswith('.png')), open('web/test/frames/list.json','w'))"
-target/release/lapstack --no-align --depth-scale 2 --depth-raw web/test/expected_dff.png -o web/test/expected.png web/test/frames/f0*.png
-# raw little-endian u16 of the depth map (the page cannot decode 16-bit PNG losslessly)
+target/release/lapstack --no-align --depth-scale 2 --depth-raw web/test/expected_dff.png --save-conf -o web/test/expected.png web/test/frames/f0*.png
+# raw little-endian u16 of the depth and confidence maps (the page cannot decode 16-bit PNG losslessly)
 magick web/test/expected_dff.png -depth 16 -endian LSB gray:web/test/expected_dff.u16
+magick web/test/expected_conf.png -depth 16 -endian LSB gray:web/test/expected_conf.u16

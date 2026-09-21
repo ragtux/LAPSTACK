@@ -250,9 +250,9 @@ async function handle(m) {
       const res = await engine.finish();
       res.meta = engine.meta_info();   // what the first frame carried, for the Save step
       post({ type: 'done', w: res.w, h: res.h, bits: res.bits, frames: res.frames, meta: res.meta, crop: res.crop,
-             rgba: res.rgba.buffer, depth_w: res.depth_w, depth_h: res.depth_h, depth: res.depth.buffer,
+             rgba: res.rgba.buffer, depth_w: res.depth_w, depth_h: res.depth_h, depth: res.depth.buffer, conf: res.conf.buffer,
              winner_w: res.winner_w, winner_h: res.winner_h, winner: res.winner.buffer,
-             ms: performance.now() - t0 }, [res.rgba.buffer, res.depth.buffer, res.winner.buffer]);
+             ms: performance.now() - t0 }, [res.rgba.buffer, res.depth.buffer, res.conf.buffer, res.winner.buffer]);
       // optional second pass: render a second image from the depth map (frames are decoded
       // again) — blending the frames nearest each pixel's depth, or, slabbed, the LAP fusions
       // of overlapping slabs of the stack (each slab fused like the retouch slab, then
@@ -394,6 +394,9 @@ async function handle(m) {
     } else if (m.type === 'depth_full') {
       const d = engine.depth_full();
       post({ type: 'depth_full', w: 0, data: d.buffer }, [d.buffer]);
+    } else if (m.type === 'conf_full') {
+      const d = engine.conf_full();
+      post({ type: 'conf_full', w: 0, data: d.buffer }, [d.buffer]);
     } else if (m.type === 'save') {
       const bytes = engine.encode(m.kind, m.format || 'png', m.quality || 90, !!m.meta, !!m.crop);
       post({ type: 'png', kind: m.kind, format: m.format || 'png', bytes: bytes.buffer }, [bytes.buffer]);

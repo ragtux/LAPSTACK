@@ -116,6 +116,7 @@
           <button data-tab="dmap" data-group="stack" title="rendered from the depth map: each pixel blends the frames (or the slabs) nearest its depth">DFR</button>
           <button data-tab="wav" data-group="stack" title="the weighted average: every frame's pixels weighed by their local contrast (Helicon's method A)">WAV</button>
           <button data-tab="depth" data-group="depth" title="depth from focus (working grid)">Focus depth</button>
+          <button data-tab="conf" data-group="depth" title="how sure the depth is, per pixel: the peak-ratio confidence of its focus profile (1 = the 90th percentile and above; dark = the depth there was filled in from the neighbours)">Confidence</button>
           <button data-tab="focus" data-group="depth" title="the scrubbed frame's own pixels, dimmed where it is out of focus: scrub to sweep the plane of focus">In focus</button>
         </div>
         <span class="sep"></span>

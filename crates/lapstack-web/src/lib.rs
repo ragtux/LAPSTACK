@@ -164,6 +164,8 @@ struct Run {
     /// Depth map at reduced resolution (values, w, h): the DFF working grid
     /// (fractional frame index) or the pyramid winner map of `depth_level`.
     depth_small: Option<(Vec<f32>, usize, usize)>,
+    /// DFF confidence on the working grid, in [0, 1] (`None` for the winner map).
+    conf_small: Option<Vec<f32>>,
     /// Pyramid winner map of level `depth_level` (values, w, h): free by-product of fusion.
     winner_small: Option<(Vec<f32>, usize, usize)>,
     /// Depth from focus: full-resolution depth, 65535 = last frame.
@@ -404,6 +406,15 @@ fn depth_full_u16(run: &Run) -> Result<std::borrow::Cow<'_, [u16]>, JsValue> {
             Ok(std::borrow::Cow::Owned(upsample_index(d, *dw, *dh, run.w, run.h, run.depth_level).iter().map(|&v| (v * k + 0.5) as u16).collect()))
         }
     }
+}
+
+/// The DFF confidence at full resolution, bilinear from the working grid like the
+/// native pipeline (`lapstack_core::depth`), quantised to u16 with 65535 = 1.
+fn conf_full_u16(run: &Run) -> Result<Vec<u16>, JsValue> {
+    let c = run.conf_small.as_ref().ok_or_else(|| JsValue::from_str("no confidence map with the winner depth"))?;
+    let dff = run.dff.as_ref().ok_or_else(|| JsValue::from_str("not finished"))?;
+    let full = if dff.k == 1 { std::borrow::Cow::Borrowed(&c[..]) } else { std::borrow::Cow::Owned(lapstack_core::depth::upsample_bilinear(c, dff.dw, dff.dh, run.w, run.h, dff.k)) };
+    Ok(full.iter().map(|&v| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16).collect())
 }
 
 fn set(obj: &js_sys::Object, k: &str, v: impl Into<JsValue>) {
@@ -884,8 +895,9 @@ impl Engine {
 
     /// Fuse the residuals, collapse, and read back the result. Returns
     /// {w, h, bits, frames, rgba: Uint8Array, depth_w, depth_h, depth: Float32Array,
-    /// winner_w, winner_h, winner: Float32Array, ms} — `depth` is the depth-from-focus
-    /// map on its working grid, `winner` the pyramid winner index of `depth_level`.
+    /// conf: Float32Array, winner_w, winner_h, winner: Float32Array, ms} — `depth` is
+    /// the depth-from-focus map on its working grid, `conf` its confidence on the same
+    /// grid ([0, 1]; empty with the winner depth), `winner` the pyramid winner index of `depth_level`.
     pub async fn finish(&mut self) -> Result<JsValue, JsValue> {
         let t0 = now();
         let g = &self.gpu;
@@ -899,25 +911,26 @@ impl Engine {
         let (ww, wh) = run.dims[run.depth_level];
         let wn = ww * wh;
         let winner = g.read_f32(&run.acc[run.depth_level], 4 * wn).await.map_err(|e| JsValue::from_str(&e))?[3 * wn..].to_vec();
-        let (depth, dw, dh) = if let Some(dff) = &mut run.dff {
+        let (depth, conf, dw, dh) = if let Some(dff) = &mut run.dff {
             // depth from focus, guided by the fused luma
             let mut rec = g.rec();
             rec.dispatch("luma_f32", [Some(&run.acc[0]), None, Some(&run.en), None, None, None], pw, grid1(n));
             rec.submit();
             let (dw, dh) = (dff.dw, dff.dh);
-            let (depth_w, full) = dff
+            let (depth_w, conf_w, full) = dff
                 .finish(g, w, h, &run.en, &run.tmp_full, &run.en2, &run.up, &|s| log(s))
                 .await
                 .map_err(|e| JsValue::from_str(&e))?;
             run.depth_full = Some(full);
-            (depth_w, dw, dh)
+            (depth_w, Some(conf_w), dw, dh)
         } else {
             // the renderer reads the full-res depth from en2
             let full = upsample_index(&winner, ww, wh, w, h, run.depth_level);
             g.queue.write_buffer(&run.en2, 0, bytemuck::cast_slice(&full));
-            (winner.clone(), ww, wh)
+            (winner.clone(), None, ww, wh)
         };
         run.depth_small = Some((depth.clone(), dw, dh));
+        run.conf_small = conf.clone();
         run.winner_small = Some((winner.clone(), ww, wh));
         let t1 = now();
         log(&format!("[lapstack] finish: {:.0} ms (collapse {:.0} ms, depth {:.0} ms)", t1 - t0, t_fuse - t0, t1 - t_fuse));
@@ -937,6 +950,7 @@ impl Engine {
         set(&o, "depth_w", dw as u32);
         set(&o, "depth_h", dh as u32);
         set(&o, "depth", js_sys::Float32Array::from(&depth[..]));
+        set(&o, "conf", js_sys::Float32Array::from(conf.as_deref().unwrap_or(&[])));
         set(&o, "winner_w", ww as u32);
         set(&o, "winner_h", wh as u32);
         set(&o, "winner", js_sys::Float32Array::from(&winner[..]));
@@ -1530,6 +1544,15 @@ impl Engine {
                 let range = (hi - lo).max(1e-6);
                 (full.iter().map(|&v| ((v - lo) / range * 255.0 + 0.5) as u8).collect(), None, image::ExtendedColorType::L8)
             }
+            "conf" => {
+                // the confidence at full resolution, 65535 = 1: the CLI's --save-conf
+                let full = conf_full_u16(run)?;
+                let full = match &area { Some(r) => cut(&full, 1, r), None => full };
+                let bytes: Vec<u8> = full.iter().flat_map(|v| v.to_be_bytes()).collect();
+                let enc = image::codecs::png::PngEncoder::new(&mut out);
+                enc.write_image(&bytes, w, h, image::ExtendedColorType::L16).map_err(err)?;
+                return Ok(js_sys::Uint8Array::from(&out[..]));
+            }
             "depth" | "depth16" => {
                 // full-resolution frame index, 65535 = last frame
                 let full = depth_full_u16(run)?;
@@ -1544,7 +1567,7 @@ impl Engine {
                 let range = (hi as f32 - lo as f32).max(1e-6);
                 (full.iter().map(|&v| ((v - lo) as f32 / range * 255.0 + 0.5) as u8).collect(), None, image::ExtendedColorType::L8)
             }
-            _ => return Err(JsValue::from_str("kind must be fused|dmap|wav|depth|depth16|winner")),
+            _ => return Err(JsValue::from_str("kind must be fused|dmap|wav|depth|depth16|conf|winner")),
         };
         match format {
             "jpeg" => {
@@ -1914,6 +1937,12 @@ impl Engine {
         let d = run.depth_full.as_ref().ok_or_else(|| JsValue::from_str("no depth-from-focus result"))?;
         Ok(js_sys::Uint16Array::from(&d[..]))
     }
+
+    /// Full-resolution confidence map (u16, 65535 = 1); for tests.
+    pub fn conf_full(&self) -> Result<js_sys::Uint16Array, JsValue> {
+        let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no result"))?;
+        Ok(js_sys::Uint16Array::from(&conf_full_u16(run)?[..]))
+    }
 }
 
 impl Engine {
@@ -2015,6 +2044,7 @@ impl Engine {
             count: 0,
             fused_rgb16: None,
             depth_small: None,
+            conf_small: None,
             winner_small: None,
             depth_full: None,
             dff,

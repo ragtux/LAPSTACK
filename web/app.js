@@ -77,11 +77,11 @@ const st = {
   files: [],            // File objects: the frames of the run, in order
   off: [],              // excluded frames, {f, fr, at}: the file, its thumb entry, and the index of st.files it sits before (see frameList)
   frames: [],           // per processed frame: {name, w, h, proxy: ImageBitmap, sim}
-  result: null,         // {w, h, bits, fused: OffscreenCanvas, dmap: OffscreenCanvas|null, depth: Float32Array, dw, dh, winner: Float32Array, ww, wh}
+  result: null,         // {w, h, bits, fused: OffscreenCanvas, dmap: OffscreenCanvas|null, depth: Float32Array, conf: Float32Array (empty with the winner depth), dw, dh, winner: Float32Array, ww, wh}
   dirs: [],             // folders opened through the File System Access API, {id, name, handle}: a frame's f.dir, remembered for a project
   kept: [],             // results kept past their run, see keepResult: {id, kind, label, w, h, bits, canvas, crop, meta, params, frames, first, last, secs, when}
   runs: 0,              // runs started this session: a kept result is named after its run
-  depthBmp: new Map(),  // 'lut' -> ImageBitmap of the depth map (gray | turbo)
+  depthBmp: new Map(),  // 'depth:lut' | 'conf:lut' -> ImageBitmap of the depth / confidence map (lut = gray | turbo); 'winner' -> the winner map
   step: 'stack', view: 'source', selected: 0,
   compare: false, cmp: 'depth', cmpMode: 'swipe', divider: 0.5, flipped: false,
   turbo: false, slice: true,
@@ -943,7 +943,7 @@ async function onDone(m) {
   const img = new ImageData(new Uint8ClampedArray(m.rgba), m.w, m.h);
   const fused = new OffscreenCanvas(m.w, m.h);
   fused.getContext('2d').putImageData(img, 0, 0);
-  st.result = { w: m.w, h: m.h, bits: m.bits, fused, dmap: null, depth: new Float32Array(m.depth), dw: m.depth_w, dh: m.depth_h,
+  st.result = { w: m.w, h: m.h, bits: m.bits, fused, dmap: null, depth: new Float32Array(m.depth), conf: new Float32Array(m.conf || 0), dw: m.depth_w, dh: m.depth_h,
                 winner: new Float32Array(m.winner), ww: m.winner_w, wh: m.winner_h, meta: m.meta || null,   // meta: what the first frame carried (EXIF / ICC / XMP sizes)
                 crop: m.crop ? { x: m.crop[0], y: m.crop[1], w: m.crop[2], h: m.crop[3] } : null };            // crop: the window every aligned frame covers, null = all of it
   resetRetouch();
@@ -1014,6 +1014,7 @@ const OUTPUTS = [
   { id: 'mesh', token: '3d', kind: 'mesh', name: '3D model', desc: () => MESH_DESC[m3().format], ext: () => m3().format, avail: () => !!st.result },
   { id: 'depth', token: 'depth', kind: 'depth', name: 'Depth map', desc: '8-bit gray PNG, min–max scaled', ext: 'png', avail: () => !!st.result },
   { id: 'depth16', token: 'depth16', kind: 'depth16', name: 'Depth map, 16-bit', desc: '16-bit gray PNG, 65535 = last frame', ext: 'png', avail: () => !!st.result },
+  { id: 'conf', token: 'conf', kind: 'conf', name: 'Confidence map', desc: '16-bit gray PNG, 65535 = full confidence in the depth (the CLI\'s --save-conf)', ext: 'png', avail: () => haveConf() },
   { id: 'winner', token: 'winner', kind: 'winner', name: 'Winner map', desc: '8-bit gray PNG, LAP winner index', ext: 'png', avail: () => !!st.result },
   { id: 'anim-depth', token: 'depth-slice', anim: true, name: 'Focus depth, Turbo, slice sweeping', desc: 'animated GIF: the depth map with the magenta slice moving through the frames', ext: () => animExt(), avail: () => !!st.result && st.files.length > 1 },
   { id: 'anim-focus', token: 'infocus', anim: true, name: 'In focus sweep', desc: 'animated GIF: each frame\'s in-focus plane lit, the rest dimmed to outlines', ext: () => animExt(), avail: () => !!st.result && st.files.length > 1 },
@@ -1363,6 +1364,7 @@ async function thumbInto(o, cv) {
     else { for (let i = 0; i < L.data.length; i += 4) { L.data[i + 1] = R.data[i + 1]; L.data[i + 2] = R.data[i + 2]; } c.putImageData(L, x0, y0); }
   }
   else if (o.kind === 'depth' || o.kind === 'depth16') fit(await depthBitmap(false), true);
+  else if (o.kind === 'conf') fit(await mapBitmap('conf', false), true);
   else if (o.kind === 'mesh') await meshThumb(cv, c);
   else if (o.kind === 'winner') fit(await winnerBitmap(), true);
   else if (o.id === 'anim-depth') { fit(await depthBitmap(true), true); const ov = await sliceBitmap(mid); if (ov) fit(ov, true); }
@@ -1588,17 +1590,25 @@ function turbo(t) { // Google Turbo colormap, polynomial fit
   const b = 27.2 + t * (3211.1 + t * (-15327.97 + t * (27814 + t * (-22569.18 + t * 6838.66))));
   return [r, g, b].map((v) => Math.max(0, Math.min(255, v)));
 }
-// the depth layer: depth from focus (DFF) on its working grid, a fractional frame index
-const isDepthLayer = (t) => t === 'depth';
-function depthData() {
+// The depth layers drawn from the working grid: Focus depth, depth from focus (DFF) as a
+// fractional frame index, min–max scaled; and Confidence, how sure that depth is — the
+// peak-ratio confidence of each pixel's focus profile, normalised so the 90th percentile
+// and everything above it is 1 (the weight the WLS gives the pixel's own depth), on a
+// fixed 0–1 scale so dark means the depth there was taken from the neighbours.
+const isDepthLayer = (t) => t === 'depth' || t === 'conf';
+const haveConf = () => !!(st.result && st.result.conf && st.result.conf.length);
+function depthData(kind = 'depth') {
   const r = st.result; if (!r) return null;
+  if (kind === 'conf') return haveConf() ? { data: r.conf, w: r.dw, h: r.dh } : null;
   return { data: r.depth, w: r.dw, h: r.dh };
 }
-async function depthBitmap(useTurbo) {
-  const D = depthData(); if (!D) return null;
-  const key = useTurbo ? 'turbo' : 'gray';
+const depthBitmap = (useTurbo) => mapBitmap('depth', useTurbo);
+async function mapBitmap(kind, useTurbo) {
+  const D = depthData(kind); if (!D) return null;
+  const key = `${kind}:${useTurbo ? 'turbo' : 'gray'}`;
   if (st.depthBmp.has(key)) return st.depthBmp.get(key);
-  let lo = Infinity, hi = -Infinity; for (const v of D.data) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  let lo = 0, hi = 1;   // the confidence's scale is fixed; the depth is stretched to its range
+  if (kind !== 'conf') { lo = Infinity; hi = -Infinity; for (const v of D.data) { if (v < lo) lo = v; if (v > hi) hi = v; } }
   const range = Math.max(hi - lo, 1e-6);
   const px = new Uint8ClampedArray(D.w * D.h * 4);
   for (let i = 0; i < D.w * D.h; i++) {
@@ -2076,8 +2086,8 @@ function layerFor(tab) {
   if (tab === 'fused') return st.result ? { bmp: st.result.fused, w: st.result.w, h: st.result.h } : null;
   if (tab === 'dmap') return st.result && st.result.dmap ? { bmp: st.result.dmap, w: st.result.w, h: st.result.h } : null;
   if (isDepthLayer(tab)) {
-    if (!st.result) return null;
-    const bmp = st.depthBmp.get(st.turbo ? 'turbo' : 'gray'); if (!bmp) { depthBitmap(st.turbo).then(draw); return null; }
+    if (!st.result || (tab === 'conf' && !haveConf())) return null;
+    const bmp = st.depthBmp.get(`${tab}:${st.turbo ? 'turbo' : 'gray'}`); if (!bmp) { mapBitmap(tab, st.turbo).then(draw); return null; }
     let overlay = null;
     if (st.slice && st.files.length) { overlay = st.sliceBmps.get(`slice:${st.selected}`) || null; if (!overlay) sliceBitmap(st.selected).then(draw); }
     return { bmp, w: st.result.w, h: st.result.h, pixelated: true, overlay, overlayPixelated: true };
@@ -2341,7 +2351,13 @@ function pickAt(cv, e) {
   st.selected = i;
   if (!scrubbable()) st.view = 'source';            // otherwise the jump would be invisible
   updateTabs(); renderFilmstrip(); revealSelected(); draw();
-  log(`[lapstack] (${Math.round(x)}, ${Math.round(y)}) is sharpest in frame ${i + 1}/${st.files.length}: ${st.files[i].name}`);
+  log(`[lapstack] (${Math.round(x)}, ${Math.round(y)}) is sharpest in frame ${i + 1}/${st.files.length}: ${st.files[i].name}${dffAt(x, y)}`);
+}
+// the depth pass's reading of a pixel, for the log: its depth (as a 1-based frame) and confidence off the working grid
+function dffAt(x, y) {
+  const r = st.result; if (!r || !r.depth || !r.depth.length) return '';
+  const cx = Math.min(r.dw - 1, Math.floor(x * r.dw / r.w)), cy = Math.min(r.dh - 1, Math.floor(y * r.dh / r.h)), j = cy * r.dw + cx;
+  return `; depth map frame ${(r.depth[j] + 1).toFixed(2)}` + (haveConf() ? `, confidence ${r.conf[j].toFixed(2)}` : '');
 }
 // Shift means pan: it suspends the brush (pointerdown below) and pans instead, so while it is
 // held the pane shows the move cursor in place of grab — and in retouch mode in place of the
@@ -2402,10 +2418,10 @@ $('divider').addEventListener('pointerup', () => { ddrag = false; });
 $('fit').addEventListener('click', fit); $('z100').addEventListener('click', zoom100);
 
 // ---------- header: view / context / compare / scrub ----------
-const LAYERS = [['fused', 'LAP'], ['dmap', 'DFR'], ['wav', 'WAV'], ['depth', 'Focus depth'], ['focus', 'In focus'], ['source', 'Source'], ['slab', 'Slab']];   // slab: the retouch brush source, once one has been fused
+const LAYERS = [['fused', 'LAP'], ['dmap', 'DFR'], ['wav', 'WAV'], ['depth', 'Focus depth'], ['conf', 'Confidence'], ['focus', 'In focus'], ['source', 'Source'], ['slab', 'Slab']];   // slab: the retouch brush source, once one has been fused
 // Header groups: Source | Stack (LAP, DFR) | Depth (Focus depth, In focus). The sub-control
 // lists the group's layers and is hidden when the group has only one.
-const GROUPS = { source: ['source'], stack: ['fused', 'dmap', 'wav'], depth: ['depth', 'focus'] };
+const GROUPS = { source: ['source'], stack: ['fused', 'dmap', 'wav'], depth: ['depth', 'conf', 'focus'] };
 const groupOf = (v) => (keptOf(v) ? 'stack' : Object.keys(GROUPS).find((g) => GROUPS[g].includes(v)) || null);   // kept results are Stack layers
 const lastIn = { stack: 'fused', depth: 'depth' };   // last layer picked in each group
 const layerName = (id) => (keptOf(id) ? keptOf(id).label : (LAYERS.find((l) => l[0] === id) || [id, id])[1]);
@@ -2423,6 +2439,7 @@ function updateTabs() {
   const have = !!st.result, haveStack = have || st.kept.length > 0;   // the Stack group: the run's images, and the kept results
   $('tab-source').disabled = !st.files.length; $('tab-stack').disabled = !haveStack; $('tab-depth').disabled = !have; $('ab').disabled = !haveStack || st.step !== 'stack';
   for (const k of ['dmap', 'wav']) { if (!haveKind(k) && st.view === k) st.view = 'fused'; if (!haveKind(k) && lastIn.stack === k) lastIn.stack = 'fused'; }
+  if (have && !haveConf()) { if (st.view === 'conf') st.view = 'depth'; if (lastIn.depth === 'conf') lastIn.depth = 'depth'; }   // the winner depth has no confidence
   // a kept result that was let go, or the run's image with no run: the newest kept result stands in, else Source
   const newest = st.kept.length ? keptId(st.kept[st.kept.length - 1]) : null;
   if ((st.view.startsWith('kept:') && !keptOf(st.view)) || (!have && isTarget(st.view))) st.view = newest || 'source';
@@ -2450,7 +2467,7 @@ function updateTabs() {
   $('rtseg').hidden = !canRetouch; $('retouch').classList.toggle('on', retouch);
   ensureSource(); ensureSlab();
   document.querySelectorAll('#viewseg button').forEach((b) => b.classList.toggle('on', b.dataset.group === group));
-  const subs = (GROUPS[group] || []).filter((t) => (t !== 'dmap' || haveDmap()) && (t !== 'wav' || haveWav()) && (t !== 'fused' || have)).concat(group === 'stack' ? st.kept.map(keptId) : []);
+  const subs = (GROUPS[group] || []).filter((t) => (t !== 'dmap' || haveDmap()) && (t !== 'wav' || haveWav()) && (t !== 'fused' || have) && (t !== 'conf' || haveConf())).concat(group === 'stack' ? st.kept.map(keptId) : []);
   $('subseg').hidden = st.step !== 'stack' || subs.length < 2;
   // the kept results' chips are made here, after the fixed ones, newest first
   document.querySelectorAll('#subseg button.kept').forEach((b) => b.remove());
@@ -2459,7 +2476,7 @@ function updateTabs() {
   { const rev = [...st.kept].reverse(); document.querySelectorAll('#kept-list .kept').forEach((d, i) => { const k = rev[i]; d.classList.toggle('on', !!k && (st.view === keptId(k) || (st.compare && st.cmp === keptId(k)))); }); }
   if (group) $('subseg').dataset.group = group; else delete $('subseg').dataset.group;
   // compare partner: any layer but the current view
-  const choices = LAYERS.filter(([id]) => id !== st.view && (id !== 'source' || st.files.length) && (id !== 'dmap' || haveDmap()) && (id !== 'wav' || haveWav()) && (id !== 'fused' || have) && (!isDepthLayer(id) && id !== 'focus' || have) && (id !== 'slab' || !!R.slab || (retouch && brushFrom() === 'slab')))   // the slab: once one exists, and while it is being made for the brush
+  const choices = LAYERS.filter(([id]) => id !== st.view && (id !== 'source' || st.files.length) && (id !== 'dmap' || haveDmap()) && (id !== 'wav' || haveWav()) && (id !== 'fused' || have) && (!isDepthLayer(id) && id !== 'focus' || have) && (id !== 'conf' || haveConf()) && (id !== 'slab' || !!R.slab || (retouch && brushFrom() === 'slab')))   // the slab: once one exists, and while it is being made for the brush
     .concat([...st.kept].reverse().filter((k) => keptId(k) !== st.view).map((k) => [keptId(k), k.label]));
   if (!choices.some(([id]) => id === st.cmp)) st.cmp = choices[0] ? choices[0][0] : 'depth';
   const menu = $('cmp-menu'); menu.innerHTML = '';
