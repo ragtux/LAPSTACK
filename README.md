@@ -305,14 +305,24 @@ whenever LAP or DFR is on screen. It turns the view into a side-by-side
 compare with one zoom/pan — the stacked image on the left (LAP or DFR,
 whichever is selected: that is the paint target), the scrubbed source frame
 on the right — and shows the brush controls above the run parameters in the
-panel. A soft brush copies the *aligned* source into the stacked image.
-Drag on either pane to paint (a circle shows the brush on both), shift+drag
-pans, the wheel zooms, the panel's sliders (or `[` / `]`) set the brush
-size and hardness, and ctrl+z / ctrl+shift+z undo and redo whole strokes.
-The frame slider, filmstrip or ←/→ choose the source; since full frames are
-not kept after the run, the chosen one is decoded again and re-warped with
-the registration found during the run (about a second at 45 MP; the pane
-label says *loading full res…* until then). The button again, `Esc`,
+panel. A soft brush copies the *aligned* source into the stacked image, and
+it shows its work before the button goes down: wherever the cursor is, the
+dab a click would lay down is composited into the paint pane, under the
+circle that marks the brush edge and its hard core (the circle shows on both
+panes, the preview on the paint pane, built at the pane's own scale and cut
+to it so a brush wider than the window costs no more than the window). The
+preview lives on the display canvas alone — no pixel is committed until a
+stroke is painted — and it stands aside for one pointer move after an undo or
+redo, so a stroke reverted under the cursor is seen going. Drag on either
+pane to paint, shift+drag pans, ctrl+wheel zooms, the panel's sliders (or `[`
+/ `]`) set the brush size and hardness, and ctrl+z / ctrl+shift+z undo and
+redo whole strokes.
+The wheel, frame slider, filmstrip or ←/→ choose the source (the wheel goes
+on zooming while a stroke is being dragged, so the frame cannot change under
+the brush mid-stroke); since full frames are not kept after the run, the
+chosen one is decoded again and re-warped with the registration found during
+the run (about a second at 45 MP; the pane label says *loading full res…*
+until then). The button again, `Esc`,
 unticking *vs*, or leaving the Stack layers ends the mode and brings back
 the compare that was open before it. While dragging, the stroke is previewed
 on the display copy; on release the worker applies it to the 16-bit master,

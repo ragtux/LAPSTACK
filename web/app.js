@@ -86,7 +86,7 @@ const st = {
   zoom: 1, ox: 0, oy: 0, fitted: true,
   pick: false,          // ctrl+G: the next canvas click jumps to the frame that won that pixel
   running: false,
-  retouch: { on: false, prev: null, size: 100, hard: 0.5, painting: false, dabs: [], last: null, cursor: null,   // on: retouch mode (a compare split, stack layer | Source); prev: the compare state to restore on exit
+  retouch: { on: false, prev: null, size: 100, hard: 0.5, painting: false, dabs: [], last: null, cursor: null, hold: false,   // on: retouch mode (a compare split, stack layer | Source); prev: the compare state to restore on exit; hold: the hover preview waits for the next pointer move (see onPatch)
              wasmIndex: -1, loading: -1, gen: 0, genMin: 0, undo: 0, redo: 0,
              gpuIndex: -1, prefetch: -1, ahead: null, dir: 1, lastSel: -1 },   // see ensureSource(): the frame the worker holds on the GPU, the one being prefetched, the read-ahead slot, the scrub direction
 };
@@ -830,7 +830,7 @@ function srcPut(i, cv) {
 }
 function srcClear() { for (const cv of srcCache.values()) cv.width = 1; srcCache.clear(); }
 window.__srcCache = srcCache; window.__srcBudget = (b) => { SRC_BUDGET = b; };
-function resetRetouch() { srcClear(); R.on = false; R.prev = null; R.cursor = null; R.wasmIndex = -1; R.gpuIndex = -1; R.loading = -1; R.prefetch = -1; R.ahead = null; R.gen++; R.genMin = R.gen; R.undo = 0; R.redo = 0; R.painting = false; R.dabs = []; }
+function resetRetouch() { srcClear(); R.on = false; R.prev = null; R.cursor = null; R.hold = false; R.wasmIndex = -1; R.gpuIndex = -1; R.loading = -1; R.prefetch = -1; R.ahead = null; R.gen++; R.genMin = R.gen; R.undo = 0; R.redo = 0; R.painting = false; R.dabs = []; }
 let srcTimer = null;
 // The Source and In focus layers are drawn from the proxy (proxy_edge px long
 // side) until the full-res aligned frame arrives, so a run's result is never
@@ -912,22 +912,58 @@ const targetCanvas = () => st.result && st.result[target()];
 function onPatch(m) {
   R.undo = m.undo; R.redo = m.redo; updateTabs();
   if (!m.rgba || !st.result) return;
+  R.hold = true;   // an undo under the cursor has to be visible: the hover preview, which would paint the same pixels straight back over it, waits for the next pointer move
   const cv = m.target === 'dmap' ? st.result.dmap : st.result.fused; if (!cv) return;
   cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(m.rgba), m.w, m.h), m.x, m.y);
   draw();
 }
 const dabCv = new OffscreenCanvas(16, 16);
-function previewDab(x, y) {
-  const src = srcGet(st.selected); if (!src || !st.result) return;
-  const r = R.size, d = Math.ceil(2 * r) + 2;
-  if (dabCv.width !== d) { dabCv.width = d; dabCv.height = d; }
+// One dab, built into dabCv: the aligned source frame under the brush, masked by the
+// brush falloff — the engine's smoothstep from hardness*r to r, so what a preview shows
+// and what the worker later paints have the same edge. Two knobs keep a preview's cost
+// off the brush's size: `scale` is dab canvas px per image px (1 for the dabs of a
+// stroke, which land in the master's display copy at its own resolution; the on-screen
+// scale for the hover preview), and `clip` is an image-space [x0, y0, x1, y1] the dab is
+// cut to (the visible part of the pane). Returns the dab's box in image px, or null when
+// the source frame is not on hand or nothing of the dab is left.
+function makeDab(x, y, scale = 1, clip = null) {
+  const src = srcGet(st.selected); if (!src || !st.result) return null;
+  const r = R.size;
+  let bx = x - r - 1, by = y - r - 1, bw = 2 * r + 2, bh = 2 * r + 2;
+  if (clip) {
+    const x1 = Math.min(bx + bw, clip[2]), y1 = Math.min(by + bh, clip[3]);
+    bx = Math.max(bx, clip[0]); by = Math.max(by, clip[1]); bw = x1 - bx; bh = y1 - by;
+    if (bw <= 0 || bh <= 0) return null;
+  }
+  const dw = Math.max(2, Math.ceil(bw * scale)), dh = Math.max(2, Math.ceil(bh * scale));
+  if (dabCv.width !== dw || dabCv.height !== dh) { dabCv.width = dw; dabCv.height = dh; }
   const c = dabCv.getContext('2d');
-  c.globalCompositeOperation = 'source-over'; c.clearRect(0, 0, d, d);
-  c.drawImage(src, x - r, y - r, d, d, 0, 0, d, d);
-  const g = c.createRadialGradient(r + 1, r + 1, r * R.hard, r + 1, r + 1, r);
-  g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)');
-  c.globalCompositeOperation = 'destination-in'; c.fillStyle = g; c.fillRect(0, 0, d, d);
-  targetCanvas().getContext('2d').drawImage(dabCv, x - r, y - r);
+  c.setTransform(dw / bw, 0, 0, dh / bh, -bx * dw / bw, -by * dh / bh);   // image px, whatever the dab's own resolution
+  c.globalCompositeOperation = 'source-over'; c.clearRect(bx, by, bw, bh);
+  c.drawImage(src, bx, by, bw, bh, bx, by, bw, bh);
+  const g = c.createRadialGradient(x, y, r * R.hard, x, y, r);
+  for (let i = 0; i <= 8; i++) { const u = i / 8; g.addColorStop(u, `rgba(0,0,0,${1 - u * u * (3 - 2 * u)})`); }
+  c.globalCompositeOperation = 'destination-in'; c.fillStyle = g; c.fillRect(bx, by, bw, bh);
+  return [bx, by, bw, bh];
+}
+// a dab of the stroke under the pointer: onto the display copy of the master, where it
+// stands in for the stroke until the worker's exact patch replaces it
+function previewDab(x, y) {
+  const b = makeDab(x, y);
+  if (b) targetCanvas().getContext('2d').drawImage(dabCv, b[0], b[1], b[2], b[3]);
+}
+// The hover preview: the dab a click here would lay down, composited onto the paint
+// pane's canvas alone. Neither the master nor its display copy is touched, so it follows
+// the cursor, and leaves nothing behind when the cursor moves on or off the pane. It is
+// built at the pane's own scale and cut to the pane, so a brush wider than the window
+// costs what the window costs, not what the brush does.
+function hoverDab(c, d) {
+  if (!R.cursor || R.hold) return;
+  const [x, y] = R.cursor, [w, h] = imageDims();
+  const clip = [Math.max(0, -st.ox / st.zoom), Math.max(0, -st.oy / st.zoom),
+                Math.min(w, (canvas.clientWidth - st.ox) / st.zoom), Math.min(h, (canvas.clientHeight - st.oy) / st.zoom)];
+  const b = makeDab(x, y, Math.min(1, st.zoom * d), clip);
+  if (b) c.drawImage(dabCv, b[0], b[1], b[2], b[3]);
 }
 function addDab(x, y) {
   const step = Math.max(1, R.size / 3);
@@ -972,7 +1008,7 @@ function enterRetouch() {
 // state only (no redraw): updateTabs and gotoStep call this mid-refresh
 function leaveRetouch(restore = true) {
   if (!R.on) return;
-  endStroke(); R.on = false; R.cursor = null;
+  endStroke(); R.on = false; R.cursor = null; R.hold = false;
   if (R.prev) { st.cmpMode = R.prev.cmpMode; if (restore && st.step === 'stack') { st.compare = R.prev.compare; st.cmp = R.prev.cmp; } }
   R.prev = null;
 }
@@ -1080,7 +1116,7 @@ function draw() {
     const [L, Rt] = st.flipped ? [B, A] : [A, B];
     const labels = st.flipped ? [layerLabel(st.cmp), layerLabel(st.view)] : [layerLabel(st.view), layerLabel(st.cmp)];
     if (retouch) labels[0] += ' — drag to paint, shift+drag pans';
-    drawLayer(L); if (retouch) drawCursor(ctx, d);
+    drawLayer(L); if (retouch) { hoverDab(ctx, d); drawCursor(ctx, d); }   // the paint pane: the brush's preview under its circle
     ctx2.setTransform(1, 0, 0, 1, 0, 0); ctx2.fillStyle = '#141416'; ctx2.fillRect(0, 0, canvas2.width, canvas2.height);
     ctx2.setTransform(st.zoom * d, 0, 0, st.zoom * d, st.ox * d, st.oy * d);
     drawLayer(Rt, ctx2); if (retouch) drawCursor(ctx2, d);
@@ -1114,14 +1150,20 @@ function draw() {
   }
   $('zoom').textContent = `${(st.zoom * d * 100).toFixed(0)}%`;
 }
+// Pointer moves arrive faster than frames, and each one now repaints a brush preview:
+// coalesce them, one redraw per frame.
+let drawReq = 0;
+function drawSoon() { if (drawReq) return; drawReq = requestAnimationFrame(() => { drawReq = 0; draw(); }); }
 new ResizeObserver(() => { layoutScrub(); draw(); }).observe($('vwrap'));
 // One wheel rule for both panes: plain wheel scrubs whenever any visible layer
 // depends on a frame (shift = 10 frames); ctrl/cmd+wheel always zooms at the
 // cursor; plain wheel zooms only when nothing on screen is scrubbable.
 function onWheel(cv, e) {
   e.preventDefault();
-  // retouch: the wheel zooms under the brush; scrub with the keys or the slider
-  if (!R.on && scrubbable() && !(e.ctrlKey || e.metaKey) && st.files.length > 1) { scrub((e.deltaY > 0 ? 1 : -1) * (e.shiftKey ? 10 : 1)); return; }
+  // retouch is no exception — the Source pane is scrubbable, so the wheel picks the
+  // frame to paint from — except mid-stroke, where changing the source under the brush
+  // would be nobody's intent: there the wheel keeps zooming.
+  if (scrubbable() && !R.painting && !(e.ctrlKey || e.metaKey) && st.files.length > 1) { scrub((e.deltaY > 0 ? 1 : -1) * (e.shiftKey ? 10 : 1)); return; }
   const f = Math.pow(1.0015, -e.deltaY); const r = cv.getBoundingClientRect();
   const mx = e.clientX - r.left, my = e.clientY - r.top;
   st.ox = mx - (mx - st.ox) * f; st.oy = my - (my - st.oy) * f; st.zoom *= f; st.fitted = false; draw();
@@ -1175,10 +1217,10 @@ for (const cv of [canvas, canvas2]) {
     drag = { x: e.clientX, y: e.clientY, ox: st.ox, oy: st.oy }; cv.classList.add('drag');
   });
   cv.addEventListener('pointermove', (e) => {
-    if (R.on) { R.cursor = imgXY(cv, e); }
-    if (R.painting) { const [x, y] = imgXY(cv, e); addDab(x, y); draw(); return; }
+    if (R.on) { R.cursor = imgXY(cv, e); R.hold = false; }
+    if (R.painting) { const [x, y] = imgXY(cv, e); addDab(x, y); drawSoon(); return; }
     if (drag) { st.ox = drag.ox + e.clientX - drag.x; st.oy = drag.oy + e.clientY - drag.y; st.fitted = false; }
-    if (drag || R.on) draw();
+    if (drag || R.on) drawSoon();
   });
   cv.addEventListener('pointerup', () => { endStroke(); drag = null; cv.classList.remove('drag'); });
   cv.addEventListener('pointerleave', () => { if (R.on) { R.cursor = null; draw(); } });
