@@ -199,6 +199,7 @@
       <label><input type="checkbox" id="p-scale" checked> scale</label>
       <label><input type="checkbox" id="p-rotation" checked> rotation</label>
       <label class="stepper">align coarsen <span><button data-step="p-coarsen" data-d="-1">−</button><span id="p-coarsen" data-min="0" data-max="5">2</span><button data-step="p-coarsen" data-d="1">+</button></span></label>
+      <label title="the kernel each aligned frame is resampled with (the registration search itself always uses spline 4×4): the wider the kernel, the sharper fine detail survives a fractional shift, and the more noise and ringing at hard edges — nearest keeps the pixels as they are (jagged sub-pixel shifts), bilinear is soft, spline 4×4 is Zerene's default, spline 6×6 and Lanczos 3 are sharper">interpolation <select id="p-interp"><option value="nearest">nearest</option><option value="bilinear">bilinear</option><option value="bicubic">bicubic</option><option value="spline4x4" selected>spline 4×4</option><option value="spline6x6">spline 6×6</option><option value="lanczos3">Lanczos 3</option></select></label>
     </div>
     <button class="section" type="button" data-sec="fusion">Fusion</button>
     <div class="sec-body">

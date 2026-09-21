@@ -113,12 +113,13 @@ const dpr = () => window.devicePixelRatio || 1;
 
 // ---------- settings (persisted) ----------
 const PK = 'lapstack.settings';
+const INTERPS = ['nearest', 'bilinear', 'bicubic', 'spline4x4', 'spline6x6', 'lanczos3'];
 const stepDefaults = { 'p-dust-thr': 3, 'p-dust-margin': 3, 'p-kept': 1536, 'p-wav-pow': 2, 'p-wav-smooth': 1, 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5, 'p-dslab-size': 10, 'p-dslab-ov': 2, 'p-split-n': 30, 'p-split-gap': 10 };
 function readParams() {
   const n = (id) => Number($(id).textContent === 'auto' ? 0 : $(id).textContent);
   return {
     align: $('p-align').checked, shift: $('p-shift').checked, scale: $('p-scale').checked, rotation: $('p-rotation').checked, brightness: $('p-bright').checked,
-    coarsen: n('p-coarsen'), levels: n('p-levels') || null, energy_radius: n('p-energy'), top: $('p-top').value,
+    coarsen: n('p-coarsen'), interp: $('p-interp').value, levels: n('p-levels') || null, energy_radius: n('p-energy'), top: $('p-top').value,
     top_radius: n('p-topr'), use_chroma: $('p-chroma').checked, proxy_edge: n('p-proxy'),
     depth_scale: n('p-depthscale'), depth_level: n('p-depthlevel'), render_dmap: $('p-dmap').checked,
     render_wav: $('p-wav').checked, wav_power: n('p-wav-pow'), wav_smooth: n('p-wav-smooth'),
@@ -137,7 +138,8 @@ function setStep(id, v) {
 function applyParams(p) {
   if (!p) return;
   $('p-align').checked = p.align ?? true; $('p-shift').checked = p.shift ?? true; $('p-scale').checked = p.scale ?? true; $('p-rotation').checked = p.rotation ?? true; $('p-bright').checked = p.brightness ?? true;
-  setStep('p-coarsen', p.coarsen ?? 2); setStep('p-levels', p.levels ?? 0); setStep('p-energy', p.energy_radius ?? 1);
+  setStep('p-coarsen', p.coarsen ?? 2); $('p-interp').value = INTERPS.includes(p.interp) ? p.interp : 'spline4x4';
+  setStep('p-levels', p.levels ?? 0); setStep('p-energy', p.energy_radius ?? 1);
   $('p-top').value = p.top ?? 'de'; setStep('p-topr', p.top_radius ?? 2); $('p-chroma').checked = p.use_chroma ?? false;
   setStep('p-proxy', p.proxy_edge ?? 1400); st.turbo = p.turbo ?? false;
   setStep('p-depthscale', p.depth_scale ?? 2); setStep('p-depthlevel', p.depth_level ?? 2); $('p-dmap').checked = p.render_dmap ?? false; st.cmpMode = p.cmp_mode ?? 'swipe';
@@ -530,7 +532,7 @@ function keptTip(k) {
   if (k.kind === 'file') return `${k.name}\n${k.w}×${k.h}, ${k.bits}-bit${k.meta && k.meta.text ? `\n${k.meta.text}` : ''}`;
   const p = k.params || {};
   const fus = `levels ${p.levels || 'auto'}, energy radius ${p.energy_radius}, top ${p.top} r${p.top_radius}${p.use_chroma ? ', chroma' : ''}`;
-  const al = p.align ? `aligned (coarsen ${p.coarsen}${!p.shift ? ', no shift' : ''}${!p.scale ? ', no scale' : ''}${!p.rotation ? ', no rotation' : ''})` : 'not aligned';
+  const al = p.align ? `aligned (coarsen ${p.coarsen}${p.interp && p.interp !== 'spline4x4' ? `, ${p.interp}` : ''}${!p.shift ? ', no shift' : ''}${!p.scale ? ', no scale' : ''}${!p.rotation ? ', no rotation' : ''})` : 'not aligned';
   return `run ${k.run}: ${k.frames} frames, ${k.first} .. ${k.last}\n${al}${p.brightness ? ', brightness equalised' : ''}${k.dust ? `, dust map ${k.dust}` : ''}\n${fus}\ndepth scale ${p.depth_scale}${p.render_dmap ? `, DFR${p.render_slabs ? ` from slabs of ${p.slab_size} (overlap ${p.slab_overlap})` : ''}` : ''}${p.render_wav ? `, WAV (power ${p.wav_power}, smoothing ${p.wav_smooth})` : ''}\n${k.w}×${k.h}, ${k.bits}-bit, ${k.secs} s, ${k.when.toLocaleTimeString()}`;
 }
 function keepResult(why) {

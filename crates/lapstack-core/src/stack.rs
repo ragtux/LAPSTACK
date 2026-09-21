@@ -449,19 +449,19 @@ pub fn run_with(
                 frames.len(), bit_depth.bits(), rayon::current_num_threads(), t.elapsed().as_secs_f64()
             ));
             let t = Instant::now();
-            log(format!("aligning (shift={} scale={} rot={} coarsen={}{}) ...", a.shift, a.scale, a.rotation, a.coarsen, if a.gpu && cfg!(feature = "gpu") { ", GPU" } else { "" }));
+            log(format!("aligning (shift={} scale={} rot={} coarsen={} {}{}) ...", a.shift, a.scale, a.rotation, a.coarsen, a.interp.name(), if a.gpu && cfg!(feature = "gpu") { ", GPU" } else { "" }));
             if a.gpu && !cfg!(feature = "gpu") {
                 log("--gpu-align requested but built without the 'gpu' feature; aligning on the CPU".into());
             }
             let mut on_frame = |idx: usize, sim: Sim| log(format!("  frame {idx:>3}: {}", align::report(&sim, w, h)));
             #[cfg(feature = "gpu")]
             let res = if a.gpu {
-                crate::gpu::align_gpu(&frames, a.shift, a.scale, a.rotation, a.coarsen, &CancelToken::new(), &mut on_frame)
+                crate::gpu::align_gpu(&frames, a.shift, a.scale, a.rotation, a.coarsen, a.interp, &CancelToken::new(), &mut on_frame)
             } else {
-                align::align_stack(&frames, a.shift, a.scale, a.rotation, a.coarsen, &CancelToken::new(), &mut on_frame)
+                align::align_stack(&frames, a.shift, a.scale, a.rotation, a.coarsen, a.interp, &CancelToken::new(), &mut on_frame)
             };
             #[cfg(not(feature = "gpu"))]
-            let res = align::align_stack(&frames, a.shift, a.scale, a.rotation, a.coarsen, &CancelToken::new(), &mut on_frame);
+            let res = align::align_stack(&frames, a.shift, a.scale, a.rotation, a.coarsen, a.interp, &CancelToken::new(), &mut on_frame);
             let (mut aligned, sims) = res.map_err(|_| "cancelled".to_string())?;
             drop(frames);
             log(format!("aligned  ({:.1}s)", t.elapsed().as_secs_f64()));
@@ -484,7 +484,7 @@ pub fn run_with(
             let (image, depth, conf, levels) = fuse_and_depth(&mut src, params, log)?;
             let wav = weighted(&mut src, params, log)?;
             // the borders some frames only reach with smeared edge pixels go
-            let area = common_area(&sims, w, h);
+            let area = common_area(&sims, w, h, a.interp);
             let (image, depth, conf, wav, crop) = if params.crop && !area.is_full(w, h) {
                 log(format!("cropped to the area every frame covers: {}x{} at ({}, {})", area.w, area.h, area.x, area.y));
                 (image.crop(&area), crop_plane(&depth, w, &area), conf.map(|c| crop_plane(&c, w, &area)), wav.map(|i| i.crop(&area)), Some(area))

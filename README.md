@@ -84,6 +84,23 @@ independent, so this is a large speed-up at sub-pixel accuracy);
 `--no-shift/--no-scale/--no-rotation` restrict the model; `--save-aligned DIR`
 writes the registered frames.
 
+**Interpolation** (`--interpolation K`; `align::Interp`): the kernel each
+aligned frame is resampled with once its transform is found — the choice
+Zerene Stacker and Helicon Focus offer. `nearest` (the nearest source pixel:
+nothing blurred, nothing rung, and sub-pixel shifts land jagged — for stacks
+already aligned to the pixel, or to see the pixels as shot), `bilinear`
+(soft), `bicubic` (Keys' cubic convolution, a = −0.5), `spline4x4`
+(Panorama Tools' spline16, Zerene's default and ours), `spline6x6` (spline36,
+sharper, a little ringing at hard edges) and `lanczos3` (three lobes, the
+sharpest and the most ringing). All are separable and interpolating (a
+pixel-centred sample comes back as it is; the weights sum to 1, Lanczos's
+normalised to make it so). The registration search itself always resamples
+with spline4x4 — the fit does not depend on the kernel, and the CUDA and
+WebGPU cost kernels stay one thing — so the choice changes only how the
+frames are read, not where they land. The crop below keeps each kernel's own
+support out (nearest 0 px, bilinear 1, the 4-taps 2, the 6-taps 3), so a
+wider kernel loses a pixel or two more at the border.
+
 **Slabs** (`--slabs SIZE[:OVERLAP]`, `--slab-dir DIR`): Zerene's slabbing
 for the native path — after the result, every run of SIZE consecutive
 frames overlapping by OVERLAP (default 2) is fused on its own with the same
@@ -97,8 +114,8 @@ repeats its edge, so the output (image, depth and confidence maps) is
 **cropped to the largest rectangle every frame covers** with real pixels
 (`align::common_area`: each frame's sound area is a convex quad, cut per pixel
 row into an interval, intersected over frames, and the best rectangle over
-consecutive rows is taken; the warp's 2 px interpolation support is kept
-out); `--no-crop` keeps the full frame.
+consecutive rows is taken; the interpolation kernel's support — 2 px for
+spline4x4 — is kept out); `--no-crop` keeps the full frame.
 
 **Batch runs and stack splitting** (`batch.rs`; `--split RULE`, `--dry-run`):
 a directory among the inputs stands for the image files in it (PNG, JPEG,
@@ -771,7 +788,10 @@ previous warped one like the native one, runs Nelder-Mead on the CPU side
 cost on WebGPU (Spline4x4 warp + DC-removed RMS partial sums, one small
 readback per evaluation). It stops `align coarsen` levels short of full
 resolution (default 2). The final warp of the 16-bit frame also runs on the
-GPU.
+GPU, with the kernel of the panel's *interpolation* (the CLI's
+`--interpolation`: nearest, bilinear, bicubic, spline 4×4, spline 6×6,
+Lanczos 3); a frame brought back after the run (the Source view, a slab, the
+depth-map render, a refold) is warped with the same kernel.
 
 Measured in headless Chrome on the RTX 3060 (`web/test/headless.mjs`):
 

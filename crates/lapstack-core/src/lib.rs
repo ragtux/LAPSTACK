@@ -39,7 +39,7 @@ pub mod stack;
 pub mod view;
 pub mod wav;
 
-pub use align::{AlignParams, CancelToken, Cancelled, Sim};
+pub use align::{AlignParams, CancelToken, Cancelled, Interp, Sim};
 pub use batch::{Split, Stack};
 pub use depth::{DepthMap, DepthParams, FocusMeasure, Upsample};
 pub use dust::{DustMap, DustMode, DustParams};

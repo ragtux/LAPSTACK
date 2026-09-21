@@ -19,7 +19,7 @@ use gpu::{Gpu, P, Rec, grid1, grid2};
 use depth::DepthGpu;
 use lapstack_core::depth::{DepthParams, FocusMeasure, Upsample};
 use lapstack_core::fuse::{FuseParams, TopRule, binomial, fuse_residuals, upsample_index};
-use lapstack_core::align::{Rect, common_area};
+use lapstack_core::align::{Interp, Rect, common_area};
 use lapstack_core::dust::{self, DustMap, DustMode, DustParams};
 use lapstack_core::pyramid::{Img3, auto_levels, half};
 use lapstack_core::view::{self, Layout, View};
@@ -51,6 +51,8 @@ pub struct Params {
     pub scale: bool,
     pub rotation: bool,
     pub coarsen: usize,
+    /// The kernel the aligned frames are resampled with (`lapstack_core::align::Interp` by name).
+    pub interp: String,
     pub proxy_edge: usize,
     /// "dff" = depth from focus (default) | "winner" = pyramid winner map of `depth_level`.
     pub depth: String,
@@ -105,6 +107,7 @@ impl Default for Params {
             scale: true,
             rotation: true,
             coarsen: 2,
+            interp: Interp::default().name().into(),
             proxy_edge: 1400,
             depth: "dff".into(),
             // quarter resolution: the browser pass trades a little accuracy for
@@ -130,6 +133,8 @@ struct Run {
     bits: u32,
     fp: FuseParams,
     params: Params,
+    /// `params.interp`, parsed.
+    interp: Interp,
     levels: usize,
     depth_level: usize,
     dims: Vec<(usize, usize)>,
@@ -525,7 +530,7 @@ fn record_rewarp(g: &Gpu, run: &Run, rec: &mut Rec<'_>, index: usize, dx: f32) -
     let (w, h) = (run.w, run.h);
     let registered = run.params.align && index != 0;
     let identity = !registered && dx == 0.0;
-    let mut p = P { w: w as u32, h: h as u32, flag: identity as u32, ..Default::default() };
+    let mut p = P { w: w as u32, h: h as u32, flag: identity as u32, klen: run.interp.id(), ..Default::default() };
     if !identity {
         let inv = affine_inv(if registered { sim } else { Sim::id() }.matrix(w, h));
         // the output moves dx right, so its source is taken dx to the left: t' = t − A·(dx, 0)
@@ -900,7 +905,7 @@ impl Engine {
         // ---- warp into cur[0], proxy, reference luma pyramid for the next frame, Laplacian pyramid
         let mut rec = g.rec();
         let identity = !run.params.align || run.count == 0;
-        let mut p = P { w: w as u32, h: h as u32, flag: identity as u32, ..Default::default() };
+        let mut p = P { w: w as u32, h: h as u32, flag: identity as u32, klen: run.interp.id(), ..Default::default() };
         if !identity {
             let inv = affine_inv(sim.matrix(w, h));
             g.queue.write_buffer(&run.aff, 0, bytemuck::cast_slice(&[inv[0][2] as f32, inv[1][2] as f32, 0.0, 0.0]));
@@ -1049,7 +1054,7 @@ impl Engine {
         set(&o, "bits", run.bits);
         set(&o, "frames", run.count as u32);
         // the window every frame covers without a smeared edge: [x, y, w, h], or null for the whole frame
-        let area = common_area(&run.sims, w, h);
+        let area = common_area(&run.sims, w, h, run.interp);
         run.crop = (!area.is_full(w, h)).then_some(area);
         match run.crop {
             Some(r) => set(&o, "crop", js_sys::Array::from_iter([r.x, r.y, r.w, r.h].iter().map(|&v| JsValue::from(v as u32)))),
@@ -2068,6 +2073,7 @@ impl Engine {
             ));
         }
         let top_rule = TopRule::parse(&params.top).ok_or_else(|| format!("unknown top rule '{}'", params.top))?;
+        let interp = Interp::parse(&params.interp).ok_or_else(|| format!("unknown interpolation '{}'", params.interp))?;
         let fp = FuseParams {
             levels: params.levels,
             energy_radius: params.energy_radius,
@@ -2115,8 +2121,8 @@ impl Engine {
             (None, None, None)
         };
         log(&format!(
-            "[lapstack] run: {w}x{h} {bits}-bit, {levels} levels (residual {}x{}), window {klen}x{klen}, top {:?}, align {}, depth {}",
-            dims[levels].0, dims[levels].1, top_rule, params.align,
+            "[lapstack] run: {w}x{h} {bits}-bit, {levels} levels (residual {}x{}), window {klen}x{klen}, top {:?}, align {} ({}), depth {}",
+            dims[levels].0, dims[levels].1, top_rule, params.align, interp.name(),
             match &dff { Some(d) => format!("from focus on a {}x{} grid", d.dw, d.dh), None => format!("winner map of level {depth_level}") }
         ));
         Ok(Run {
@@ -2125,6 +2131,7 @@ impl Engine {
             bits,
             fp,
             params,
+            interp,
             levels,
             depth_level,
             dims,

@@ -17,7 +17,7 @@
 //! per-frame warp stay on the CPU (each is cheap next to the ~200-iteration
 //! cost search); every cost evaluation is one `warp_cost` launch.
 
-use crate::align::{CancelToken, Cancelled, Sim, affine_inv, gauss_pyramid, luma, nelder_mead, warp_img3, warp_plane};
+use crate::align::{CancelToken, Cancelled, Interp, Sim, affine_inv, gauss_pyramid, luma, nelder_mead, warp_img3, warp_plane};
 use crate::fuse::{FuseParams, binomial, fuse_residuals, upsample_index};
 use crate::pyramid::{Img3, auto_levels, half};
 use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, LaunchConfig, PushKernelArg};
@@ -426,6 +426,7 @@ pub fn align_gpu(
     allow_scale: bool,
     allow_rotation: bool,
     coarsen: usize,
+    interp: Interp,
     cancel: &CancelToken,
     on_frame: &mut dyn FnMut(usize, Sim),
 ) -> Result<(Vec<Img3>, Vec<Sim>), Cancelled> {
@@ -445,7 +446,7 @@ pub fn align_gpu(
         cancel.check()?;
         let sim = aligner.align_pair(&prev_ref, &ys[i], w, h, guess, free, coarsen);
         params.push(sim);
-        let (mut wimg, valid) = warp_img3(&frames[i], &sim);
+        let (mut wimg, valid) = warp_img3(&frames[i], &sim, interp);
         for c in 0..3 {
             for p in 0..w * h {
                 if valid[p] == 0 {
@@ -454,7 +455,7 @@ pub fn align_gpu(
             }
         }
         aligned.push(wimg);
-        let (pr, _) = warp_plane(&ys[i], w, h, &sim, w, h);
+        let (pr, _) = warp_plane(&ys[i], w, h, &sim, w, h, interp);
         prev_ref = pr;
         guess = sim;
         on_frame(i, sim);

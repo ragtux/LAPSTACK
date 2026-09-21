@@ -2,8 +2,10 @@
 // INTERNAL USE ONLY
 
 //! Alignment — 4-DOF similarity registration. Direct intensity-based,
-//! coarse-to-fine, DC-removed-RMS on luminance, Spline4x4 resampling,
-//! sequential chaining to frame 0. Uses a bounded Nelder-Mead optimiser.
+//! coarse-to-fine, DC-removed-RMS on luminance, sequential chaining to
+//! frame 0. Uses a bounded Nelder-Mead optimiser. The search resamples with
+//! Spline4x4; the aligned frames are resampled with the kernel of the user's
+//! choice (`Interp`, Spline4x4 by default).
 //!
 //! The registration search runs on its own Gaussian pyramid (Burt's
 //! generating kernel with a = 0.33, border-renormalised, halved while
@@ -25,11 +27,87 @@ pub struct AlignParams {
     pub coarsen: usize,
     /// Run the cost search on the CUDA GPU (needs the `gpu` build feature).
     pub gpu: bool,
+    /// The kernel the aligned frames are resampled with.
+    pub interp: Interp,
 }
 
 impl Default for AlignParams {
     fn default() -> AlignParams {
-        AlignParams { shift: true, scale: true, rotation: true, coarsen: 0, gpu: false }
+        AlignParams { shift: true, scale: true, rotation: true, coarsen: 0, gpu: false, interp: Interp::default() }
+    }
+}
+
+/// The interpolation kernel of the warp: how an aligned frame's pixel is read
+/// from between its source's. All separable, all interpolating (a pixel-centred
+/// sample comes back as it is; the sum of the weights is 1 — Lanczos's are
+/// normalised to make it so). The choice is the one Zerene Stacker and Helicon
+/// Focus offer: the wider the kernel, the sharper the fine detail survives a
+/// fractional shift, and the more the noise and the ringing at hard edges.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Interp {
+    /// The nearest source pixel: no blur, no ringing, and jagged sub-pixel
+    /// shifts. For test renders and stacks already aligned to the pixel.
+    Nearest,
+    /// The 2×2 linear blend: soft.
+    Bilinear,
+    /// Keys' cubic convolution (a = −0.5), 4×4.
+    Bicubic,
+    /// Panorama Tools' spline16, 4×4: Zerene's default and ours.
+    #[default]
+    Spline4x4,
+    /// Panorama Tools' spline36, 6×6: sharper, a little ringing.
+    Spline6x6,
+    /// Lanczos, 3 lobes, 6×6: the sharpest, and the most ringing.
+    Lanczos3,
+}
+
+impl Interp {
+    pub const ALL: [Interp; 6] = [Interp::Nearest, Interp::Bilinear, Interp::Bicubic, Interp::Spline4x4, Interp::Spline6x6, Interp::Lanczos3];
+
+    pub fn parse(s: &str) -> Option<Interp> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "nearest" | "nn" => Some(Interp::Nearest),
+            "bilinear" | "linear" => Some(Interp::Bilinear),
+            "bicubic" | "cubic" => Some(Interp::Bicubic),
+            "spline4x4" | "spline16" => Some(Interp::Spline4x4),
+            "spline6x6" | "spline36" => Some(Interp::Spline6x6),
+            "lanczos3" | "lanczos" => Some(Interp::Lanczos3),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Interp::Nearest => "nearest",
+            Interp::Bilinear => "bilinear",
+            Interp::Bicubic => "bicubic",
+            Interp::Spline4x4 => "spline4x4",
+            Interp::Spline6x6 => "spline6x6",
+            Interp::Lanczos3 => "lanczos3",
+        }
+    }
+
+    /// The kernel's number in the GPU warp kernels (`p.klen` of the browser's
+    /// `warp`): the order of `ALL`.
+    pub fn id(self) -> u32 {
+        Interp::ALL.iter().position(|k| *k == self).unwrap() as u32
+    }
+
+    /// Taps along each axis.
+    pub fn taps(self) -> usize {
+        match self {
+            Interp::Nearest => 1,
+            Interp::Bilinear => 2,
+            Interp::Bicubic | Interp::Spline4x4 => 4,
+            Interp::Spline6x6 | Interp::Lanczos3 => 6,
+        }
+    }
+
+    /// The kernel's support each way, in source pixels: a destination pixel
+    /// is only sound when its source point lies this far inside the frame
+    /// (outside, the warp repeats the edge).
+    pub fn margin(self) -> f64 {
+        (self.taps() / 2) as f64
     }
 }
 
@@ -109,22 +187,18 @@ impl Rect {
     }
 }
 
-/// Interpolation support of the warp: a destination pixel is only sound when
-/// its source point lies this far inside the frame (Spline4x4 reads two
-/// samples each way; outside, the warp repeats the edge).
-const WARP_MARGIN: f64 = 2.0;
-
 /// The largest axis-aligned rectangle every aligned frame covers with real
 /// pixels: the area to crop the result to, so no smeared border of any warped
 /// frame is left in it. For each frame, a destination pixel is covered when its
-/// source point (the frame's inverse transform of it) lies `WARP_MARGIN` inside
-/// the source; that is a convex quadrilateral, and its cut with a pixel row is
+/// source point (the frame's inverse transform of it) lies the kernel's
+/// support (`interp.margin()`) inside the source; that is a convex
+/// quadrilateral, and its cut with a pixel row is
 /// one interval, so each row's common interval is an intersection over frames
 /// and the best rectangle is the largest one spanning consecutive rows. Frames
 /// at the identity are sampled straight and cover everything. Rows are pixel
 /// centres, rectangles pixel-aligned; the full frame comes back when nothing
 /// is cut. The whole frame when the frames leave no common area.
-pub fn common_area(sims: &[Sim], w: usize, h: usize) -> Rect {
+pub fn common_area(sims: &[Sim], w: usize, h: usize, interp: Interp) -> Rect {
     let full = Rect::full(w, h);
     if w == 0 || h == 0 {
         return full;
@@ -133,7 +207,8 @@ pub fn common_area(sims: &[Sim], w: usize, h: usize) -> Rect {
     if invs.is_empty() {
         return full;
     }
-    let (m, xmax, ymax) = (WARP_MARGIN, (w - 1) as f64 - WARP_MARGIN, (h - 1) as f64 - WARP_MARGIN);
+    let m = interp.margin();
+    let (xmax, ymax) = ((w - 1) as f64 - m, (h - 1) as f64 - m);
     // per row, the x-interval [lo, hi] (inclusive pixel columns) covered by every frame
     let mut rows: Vec<(i64, i64)> = Vec::with_capacity(h);
     for y in 0..h {
@@ -180,7 +255,8 @@ pub fn affine_inv(m: [[f64; 3]; 2]) -> [[f64; 3]; 2] {
     [[ia, ib, -(ia * tx + ib * ty)], [id, ie, -(id * tx + ie * ty)]]
 }
 
-/// 4-tap interpolating cubic (Spline4x4Kernel).
+/// Panorama Tools' spline16 (Zerene's Spline4x4Kernel): the 4 weights at
+/// fraction `t`, taps at −1, 0, +1, +2 from the floor.
 #[inline]
 fn spline4(t: f64) -> [f64; 4] {
     [
@@ -191,9 +267,66 @@ fn spline4(t: f64) -> [f64; 4] {
     ]
 }
 
-/// Warp a single plane by `sim` into (ow x oh); edge-clamped, with a validity mask.
-pub fn warp_plane(src: &[f32], w: usize, h: usize, sim: &Sim, ow: usize, oh: usize) -> (Vec<f32>, Vec<u8>) {
+/// Keys' cubic convolution, a = −0.5, at distance `d`.
+#[inline]
+fn keys(d: f64) -> f64 {
+    if d < 1.0 { (1.5 * d - 2.5) * d * d + 1.0 } else if d < 2.0 { ((-0.5 * d + 2.5) * d - 4.0) * d + 2.0 } else { 0.0 }
+}
+
+/// Panorama Tools' spline36 at distance `d`.
+#[inline]
+fn spline36(d: f64) -> f64 {
+    if d < 1.0 {
+        ((13.0 / 11.0 * d - 453.0 / 209.0) * d - 3.0 / 209.0) * d + 1.0
+    } else if d < 2.0 {
+        let u = d - 1.0;
+        ((-6.0 / 11.0 * u + 270.0 / 209.0) * u - 156.0 / 209.0) * u
+    } else if d < 3.0 {
+        let u = d - 2.0;
+        ((1.0 / 11.0 * u - 45.0 / 209.0) * u + 26.0 / 209.0) * u
+    } else {
+        0.0
+    }
+}
+
+/// The 3-lobe Lanczos window at distance `d` (not yet normalised).
+#[inline]
+fn lanczos3(d: f64) -> f64 {
+    if d < 1e-9 {
+        1.0
+    } else if d < 3.0 {
+        let (a, b) = (std::f64::consts::PI * d, std::f64::consts::PI * d / 3.0);
+        a.sin() / a * (b.sin() / b)
+    } else {
+        0.0
+    }
+}
+
+/// The weights of an `N`-tap kernel `k(d)` at fraction `t`: taps at
+/// `1 − N/2 ..` from the floor, normalised to sum 1.
+#[inline]
+fn taps_of<const N: usize>(k: impl Fn(f64) -> f64, t: f64) -> [f64; N] {
+    let mut w = [0f64; N];
+    let mut sum = 0.0;
+    for (i, wi) in w.iter_mut().enumerate() {
+        *wi = k((t - (i as f64 + 1.0 - (N / 2) as f64)).abs());
+        sum += *wi;
+    }
+    for wi in &mut w {
+        *wi /= sum;
+    }
+    w
+}
+
+/// Warp a single plane by `sim` into (ow x oh) with the `N`-tap kernel
+/// `weights` (taps at `1 − N/2 ..` from the floor of the source point);
+/// edge-clamped, with a validity mask (1 where the source point is inside the
+/// frame).
+fn warp_with<const N: usize>(
+    src: &[f32], w: usize, h: usize, sim: &Sim, ow: usize, oh: usize, weights: impl Fn(f64) -> [f64; N] + Sync,
+) -> (Vec<f32>, Vec<u8>) {
     let inv = affine_inv(sim.matrix(w, h));
+    let start = 1 - (N / 2) as isize;
     let mut out = vec![0f32; ow * oh];
     let mut valid = vec![0u8; ow * oh];
     out.par_chunks_mut(ow).zip(valid.par_chunks_mut(ow)).enumerate().for_each(|(y, (orow, vrow))| {
@@ -203,14 +336,14 @@ pub fn warp_plane(src: &[f32], w: usize, h: usize, sim: &Sim, ow: usize, oh: usi
             vrow[x] = (sx >= 0.0 && sx <= (w - 1) as f64 && sy >= 0.0 && sy <= (h - 1) as f64) as u8;
             let x0 = sx.floor() as isize;
             let y0 = sy.floor() as isize;
-            let wx = spline4(sx - x0 as f64);
-            let wy = spline4(sy - y0 as f64);
+            let wx = weights(sx - x0 as f64);
+            let wy = weights(sy - y0 as f64);
             let mut acc = 0f64;
-            for j in 0..4 {
-                let yy = (y0 + j as isize - 1).clamp(0, h as isize - 1) as usize;
+            for j in 0..N {
+                let yy = (y0 + j as isize + start).clamp(0, h as isize - 1) as usize;
                 let mut r = 0f64;
-                for i in 0..4 {
-                    let xx = (x0 + i as isize - 1).clamp(0, w as isize - 1) as usize;
+                for i in 0..N {
+                    let xx = (x0 + i as isize + start).clamp(0, w as isize - 1) as usize;
                     r += wx[i] * src[yy * w + xx] as f64;
                 }
                 acc += wy[j] * r;
@@ -221,10 +354,24 @@ pub fn warp_plane(src: &[f32], w: usize, h: usize, sim: &Sim, ow: usize, oh: usi
     (out, valid)
 }
 
-pub fn warp_img3(im: &Img3, sim: &Sim) -> (Img3, Vec<u8>) {
-    let (a, valid) = warp_plane(&im.p[0], im.w, im.h, sim, im.w, im.h);
-    let (b, _) = warp_plane(&im.p[1], im.w, im.h, sim, im.w, im.h);
-    let (c, _) = warp_plane(&im.p[2], im.w, im.h, sim, im.w, im.h);
+/// Warp a single plane by `sim` into (ow x oh) with the kernel `interp`;
+/// edge-clamped, with a validity mask.
+pub fn warp_plane(src: &[f32], w: usize, h: usize, sim: &Sim, ow: usize, oh: usize, interp: Interp) -> (Vec<f32>, Vec<u8>) {
+    match interp {
+        // the nearer of the two neighbours, in the bilinear frame
+        Interp::Nearest => warp_with::<2>(src, w, h, sim, ow, oh, |t| if t < 0.5 { [1.0, 0.0] } else { [0.0, 1.0] }),
+        Interp::Bilinear => warp_with::<2>(src, w, h, sim, ow, oh, |t| [1.0 - t, t]),
+        Interp::Bicubic => warp_with::<4>(src, w, h, sim, ow, oh, |t| taps_of::<4>(keys, t)),
+        Interp::Spline4x4 => warp_with::<4>(src, w, h, sim, ow, oh, spline4),
+        Interp::Spline6x6 => warp_with::<6>(src, w, h, sim, ow, oh, |t| taps_of::<6>(spline36, t)),
+        Interp::Lanczos3 => warp_with::<6>(src, w, h, sim, ow, oh, |t| taps_of::<6>(lanczos3, t)),
+    }
+}
+
+pub fn warp_img3(im: &Img3, sim: &Sim, interp: Interp) -> (Img3, Vec<u8>) {
+    let (a, valid) = warp_plane(&im.p[0], im.w, im.h, sim, im.w, im.h, interp);
+    let (b, _) = warp_plane(&im.p[1], im.w, im.h, sim, im.w, im.h, interp);
+    let (c, _) = warp_plane(&im.p[2], im.w, im.h, sim, im.w, im.h, interp);
     (Img3 { w: im.w, h: im.h, p: [a, b, c] }, valid)
 }
 
@@ -474,7 +621,8 @@ pub(crate) fn multiscale_align(
             for (k, &idx) in free_idx.iter().enumerate() {
                 v[idx] = xf[k];
             }
-            let (bw, valid) = warp_plane(t_d, tw, th, &Sim::from_vec(&v), aw, ah);
+            // the search's own kernel, whatever the frames are resampled with
+            let (bw, valid) = warp_plane(t_d, tw, th, &Sim::from_vec(&v), aw, ah, Interp::Spline4x4);
             dc_removed_rms(a_d, &bw, &valid)
         };
         let x0: Vec<f64> = free_idx.iter().map(|&k| cur[k]).collect();
@@ -486,14 +634,16 @@ pub(crate) fn multiscale_align(
     Sim::from_vec(&cur)
 }
 
-/// Register all frames into frame-0 coordinates (sequential chaining).
-/// `on_frame(i, sim)` fires as each frame lands; `cancel` is checked per frame.
+/// Register all frames into frame-0 coordinates (sequential chaining), the
+/// aligned frames resampled with `interp`. `on_frame(i, sim)` fires as each
+/// frame lands; `cancel` is checked per frame.
 pub fn align_stack(
     frames: &[Img3],
     allow_shift: bool,
     allow_scale: bool,
     allow_rotation: bool,
     coarsen: usize,
+    interp: Interp,
     cancel: &CancelToken,
     on_frame: &mut dyn FnMut(usize, Sim),
 ) -> Result<(Vec<Img3>, Vec<Sim>), Cancelled> {
@@ -512,7 +662,7 @@ pub fn align_stack(
         cancel.check()?;
         let sim = multiscale_align(&prev_ref, &ys[i], w, h, guess, free, coarsen);
         params.push(sim);
-        let (mut wimg, valid) = warp_img3(&frames[i], &sim);
+        let (mut wimg, valid) = warp_img3(&frames[i], &sim, interp);
         for c in 0..3 {
             for p in 0..w * h {
                 if valid[p] == 0 {
@@ -521,7 +671,7 @@ pub fn align_stack(
             }
         }
         aligned.push(wimg);
-        let (pr, _) = warp_plane(&ys[i], w, h, &sim, w, h);
+        let (pr, _) = warp_plane(&ys[i], w, h, &sim, w, h, interp);
         prev_ref = pr;
         guess = sim;
         on_frame(i, sim);
@@ -545,8 +695,8 @@ mod tests {
 
     #[test]
     fn common_area_identity_is_full() {
-        assert_eq!(common_area(&[Sim::id(), Sim::id()], 640, 480), Rect::full(640, 480));
-        assert_eq!(common_area(&[], 640, 480), Rect::full(640, 480));
+        assert_eq!(common_area(&[Sim::id(), Sim::id()], 640, 480, Interp::Spline4x4), Rect::full(640, 480));
+        assert_eq!(common_area(&[], 640, 480, Interp::Spline4x4), Rect::full(640, 480));
     }
 
     #[test]
@@ -555,15 +705,88 @@ mod tests {
         // the warp's 2 px support trims the other sides
         let (w, h) = (640, 480);
         let s = Sim { xoff: 10.0 / w as f64, yoff: 0.0, scale: 1.0, rot: 0.0 };
-        let r = common_area(&[Sim::id(), s], w, h);
+        let r = common_area(&[Sim::id(), s], w, h, Interp::Spline4x4);
         assert_eq!(r, Rect { x: 12, y: 2, w: w - 12, h: h - 4 });
+        // a wider kernel trims more, a narrower one less, nearest nothing beyond the shift
+        assert_eq!(common_area(&[Sim::id(), s], w, h, Interp::Lanczos3), Rect { x: 13, y: 3, w: w - 13, h: h - 6 });
+        assert_eq!(common_area(&[Sim::id(), s], w, h, Interp::Bilinear), Rect { x: 11, y: 1, w: w - 11, h: h - 2 });
+        assert_eq!(common_area(&[Sim::id(), s], w, h, Interp::Nearest), Rect { x: 10, y: 0, w: w - 10, h });
+    }
+
+    /// A shift of a whole pixel reads the source pixels straight, with every
+    /// kernel; the identity comes back as it is.
+    #[test]
+    fn every_kernel_interpolates() {
+        let (w, h) = (40, 30);
+        let src: Vec<f32> = (0..w * h).map(|i| ((i * 7919) % 1000) as f32 / 1000.0).collect();
+        for k in Interp::ALL {
+            let (o, _) = warp_plane(&src, w, h, &Sim::id(), w, h, k);
+            assert!(o.iter().zip(&src).all(|(a, b)| (a - b).abs() < 1e-6), "{k:?} identity");
+            let s = Sim { xoff: 3.0 / w as f64, yoff: -2.0 / h as f64, scale: 1.0, rot: 0.0 };
+            let (o, valid) = warp_plane(&src, w, h, &s, w, h, k);
+            for y in 6..h - 6 {
+                for x in 6..w - 6 {
+                    // the output moved 3 right and 2 up: its (x, y) reads the source's (x − 3, y + 2)
+                    assert!(valid[y * w + x] == 1);
+                    assert!((o[y * w + x] - src[(y + 2) * w + x - 3]).abs() < 1e-5, "{k:?} at ({x},{y})");
+                }
+            }
+        }
+    }
+
+    /// Every kernel reproduces a plane (partition of unity and first-order
+    /// accuracy) at fractional shifts, and nearest picks the nearer neighbour.
+    /// Lanczos is the exception: a windowed sinc is not first-order accurate,
+    /// and a ramp comes back with a ripple of about a percent of a step.
+    #[test]
+    fn kernels_reproduce_a_ramp() {
+        let (w, h) = (48, 40);
+        let ramp: Vec<f32> = (0..w * h).map(|i| (i % w) as f32 + 0.5 * (i / w) as f32).collect();
+        let s = Sim { xoff: 2.3 / w as f64, yoff: 1.6 / h as f64, scale: 1.0, rot: 0.0 };
+        for k in Interp::ALL {
+            let (o, _) = warp_plane(&ramp, w, h, &s, w, h, k);
+            for y in 8..h - 8 {
+                for x in 8..w - 8 {
+                    let (sx, sy) = (x as f32 - 2.3, y as f32 - 1.6);
+                    let want = if k == Interp::Nearest { sx.round() + 0.5 * sy.round() } else { sx + 0.5 * sy };
+                    let tol = if k == Interp::Lanczos3 { 0.03 } else { 1e-3 };
+                    assert!((o[y * w + x] - want).abs() < tol, "{k:?} at ({x},{y}): {} vs {want}", o[y * w + x]);
+                }
+            }
+        }
+    }
+
+    /// The weights of each kernel sum to 1 and the kernels interpolate (a
+    /// pixel-centred sample takes only that pixel).
+    #[test]
+    fn kernel_weights() {
+        for t in [0.0, 0.1, 0.5, 0.9] {
+            let all: Vec<Vec<f64>> = vec![
+                spline4(t).to_vec(),
+                taps_of::<4>(keys, t).to_vec(),
+                taps_of::<6>(spline36, t).to_vec(),
+                taps_of::<6>(lanczos3, t).to_vec(),
+            ];
+            for ws in all {
+                assert!((ws.iter().sum::<f64>() - 1.0).abs() < 1e-6, "{ws:?}");
+                if t == 0.0 {
+                    let c = ws.len() / 2 - 1;
+                    assert!((ws[c] - 1.0).abs() < 1e-6 && ws.iter().enumerate().all(|(i, w)| i == c || w.abs() < 1e-6), "{ws:?}");
+                }
+            }
+        }
+        // spline36 unnormalised is already a partition of unity
+        assert!((spline36(0.5) * 2.0 + spline36(1.5) * 2.0 + spline36(2.5) * 2.0 - 1.0).abs() < 1e-9);
+        assert_eq!(Interp::parse("Spline36"), Some(Interp::Spline6x6));
+        assert!(Interp::ALL.iter().all(|k| Interp::parse(k.name()) == Some(*k) && Interp::ALL[k.id() as usize] == *k));
     }
 
     #[test]
     fn common_area_rotation_is_inside_every_frame() {
         let (w, h) = (640, 480);
         let sims = [Sim::id(), Sim { xoff: -0.01, yoff: 0.02, scale: 1.03, rot: 0.02 }, Sim { xoff: 0.005, yoff: -0.01, scale: 0.98, rot: -0.015 }];
-        let r = common_area(&sims, w, h);
+        let m = Interp::Spline4x4.margin();
+        let r = common_area(&sims, w, h, Interp::Spline4x4);
         assert!(r.w > w / 2 && r.h > h / 2 && !r.is_full(w, h), "{r:?}");
         // every corner pixel of the rectangle maps inside every frame's sound area
         for s in &sims[1..] {
@@ -571,7 +794,7 @@ mod tests {
             for (x, y) in [(r.x, r.y), (r.x + r.w - 1, r.y), (r.x, r.y + r.h - 1), (r.x + r.w - 1, r.y + r.h - 1)] {
                 let sx = inv[0][0] * x as f64 + inv[0][1] * y as f64 + inv[0][2];
                 let sy = inv[1][0] * x as f64 + inv[1][1] * y as f64 + inv[1][2];
-                assert!(sx >= WARP_MARGIN && sx <= (w - 1) as f64 - WARP_MARGIN && sy >= WARP_MARGIN && sy <= (h - 1) as f64 - WARP_MARGIN, "({x},{y}) -> ({sx:.1},{sy:.1})");
+                assert!(sx >= m && sx <= (w - 1) as f64 - m && sy >= m && sy <= (h - 1) as f64 - m, "({x},{y}) -> ({sx:.1},{sy:.1})");
             }
         }
         // and it is maximal: one more row or column on any side breaks that for some frame
@@ -579,7 +802,7 @@ mod tests {
             let inv = affine_inv(s.matrix(w, h));
             let sx = inv[0][0] * x as f64 + inv[0][1] * y as f64 + inv[0][2];
             let sy = inv[1][0] * x as f64 + inv[1][1] * y as f64 + inv[1][2];
-            sx >= WARP_MARGIN && sx <= (w - 1) as f64 - WARP_MARGIN && sy >= WARP_MARGIN && sy <= (h - 1) as f64 - WARP_MARGIN
+            sx >= m && sx <= (w - 1) as f64 - m && sy >= m && sy <= (h - 1) as f64 - m
         });
         let row_ok = |y: usize| (r.x..r.x + r.w).all(|x| sound(x, y));
         let col_ok = |x: usize| (r.y..r.y + r.h).all(|y| sound(x, y));

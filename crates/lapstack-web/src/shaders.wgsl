@@ -154,14 +154,17 @@ fn copy_plane(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgrou
     o[p.off_out + i] = a[p.off_in + i];
 }
 
-// ---- input unpack + Spline4x4 warp ----
+// ---- input unpack + warp ----
 // `u` holds the decoded frame as interleaved RGB u16 pairs (2 samples per u32),
 // p.w x p.h. Warp: dest (x,y) -> source (sx,sy) via inverse affine f0..f3 +
 // (wt[0], wt[1]) translation... we pass the 6 affine terms in f0..f3 + wt[0..1]:
 //   sx = f0*x + f1*y + wt[0];  sy = f2*x + f3*y + wt[1]
 // Out-of-bounds destination pixels take the unwarped source pixel (the native
 // aligner's `valid` fallback). flag 1 = identity (plain unpack), scale = 1/65535 (16-bit
-// samples; 8-bit inputs are widened to 16-bit on the CPU).
+// samples; 8-bit inputs are widened to 16-bit on the CPU). p.klen picks the
+// kernel (lapstack_core::align::Interp::id): 0 nearest, 1 bilinear, 2 bicubic,
+// 3 spline4x4, 4 spline6x6, 5 lanczos3 — `ktaps` taps at 1 - taps/2 .. from the
+// floor of the source point, weights `kweights` (the native warp_plane's).
 fn sample_u16(c: u32, x: u32, y: u32) -> f32 {
     let k = (y * p.w + x) * 3u + c;
     let word = u[k >> 1u];
@@ -174,6 +177,53 @@ fn spl4(t: f32) -> vec4<f32> {
         ((t - 1.8) * t - 0.2) * t + 1.0,
         ((1.2 - t) * t + 0.8) * t,
         ((1.0 / 3.0 * t - 0.2) * t - 0.13333334) * t);
+}
+fn ktaps(k: u32) -> i32 {
+    switch k {
+        case 0u, 1u: { return 2; }
+        case 2u, 3u: { return 4; }
+        default: { return 6; }
+    }
+}
+// Keys' cubic (a = -0.5), Panorama Tools' spline36 and the 3-lobe Lanczos window at distance d
+fn keys(d: f32) -> f32 {
+    if (d < 1.0) { return (1.5 * d - 2.5) * d * d + 1.0; }
+    if (d < 2.0) { return ((-0.5 * d + 2.5) * d - 4.0) * d + 2.0; }
+    return 0.0;
+}
+fn spline36(d: f32) -> f32 {
+    if (d < 1.0) { return ((13.0 / 11.0 * d - 453.0 / 209.0) * d - 3.0 / 209.0) * d + 1.0; }
+    if (d < 2.0) { let u = d - 1.0; return ((-6.0 / 11.0 * u + 270.0 / 209.0) * u - 156.0 / 209.0) * u; }
+    if (d < 3.0) { let u = d - 2.0; return ((1.0 / 11.0 * u - 45.0 / 209.0) * u + 26.0 / 209.0) * u; }
+    return 0.0;
+}
+fn lanczos3(d: f32) -> f32 {
+    if (d < 1e-6) { return 1.0; }
+    if (d >= 3.0) { return 0.0; }
+    let a = 3.14159265 * d; let b = a / 3.0;
+    return sin(a) / a * (sin(b) / b);
+}
+// the kernel's weights at fraction t, taps at 1 - taps/2 .. from the floor; the
+// distance-form kernels normalised to sum 1 (Lanczos needs it, the others are exact)
+fn kweights(k: u32, t: f32) -> array<f32, 6> {
+    var w = array<f32, 6>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    switch k {
+        case 0u: { let r = f32(t >= 0.5); w[0] = 1.0 - r; w[1] = r; }
+        case 1u: { w[0] = 1.0 - t; w[1] = t; }
+        case 3u: { let s = spl4(t); w[0] = s[0]; w[1] = s[1]; w[2] = s[2]; w[3] = s[3]; }
+        default: {
+            let n = ktaps(k); let start = 1 - n / 2;
+            var sum = 0.0;
+            for (var i = 0; i < n; i++) {
+                let d = abs(t - f32(i + start));
+                var v = 0.0;
+                if (k == 2u) { v = keys(d); } else if (k == 4u) { v = spline36(d); } else { v = lanczos3(d); }
+                w[i] = v; sum += v;
+            }
+            for (var i = 0; i < n; i++) { w[i] /= sum; }
+        }
+    }
+    return w;
 }
 @compute @workgroup_size(16, 16)
 fn warp(@builtin(global_invocation_id) g: vec3<u32>) {
@@ -192,14 +242,15 @@ fn warp(@builtin(global_invocation_id) g: vec3<u32>) {
         return;
     }
     let x0 = i32(floor(sx)); let y0 = i32(floor(sy));
-    let wx = spl4(sx - f32(x0)); let wy = spl4(sy - f32(y0));
+    let nt = ktaps(p.klen); let start = 1 - nt / 2;
+    var wx = kweights(p.klen, sx - f32(x0)); var wy = kweights(p.klen, sy - f32(y0));
     for (var c = 0u; c < 3u; c++) {
         var acc = 0.0;
-        for (var j = 0; j < 4; j++) {
-            let yy = u32(clamp(y0 + j - 1, 0, i32(p.h) - 1));
+        for (var j = 0; j < nt; j++) {
+            let yy = u32(clamp(y0 + j + start, 0, i32(p.h) - 1));
             var r = 0.0;
-            for (var i = 0; i < 4; i++) {
-                let xx = u32(clamp(x0 + i - 1, 0, i32(p.w) - 1));
+            for (var i = 0; i < nt; i++) {
+                let xx = u32(clamp(x0 + i + start, 0, i32(p.w) - 1));
                 r += wx[i] * sample_u16(c, xx, yy);
             }
             acc += wy[j] * r;

@@ -4,6 +4,7 @@
 //! lapstack — Laplacian-pyramid focus stacking CLI.
 
 use lapstack_core::{DepthParams, DustMode, DustParams, FocusMeasure, Layout, MeshParams, Params, Split, Stack, TexFormat, TopRule, Upsample, View, run_with};
+use lapstack_core::align::Interp;
 use lapstack_core::batch::{self, Names};
 use lapstack_core::mesh;
 use lapstack_core::io;
@@ -72,6 +73,10 @@ fn main() {
             "--no-scale" => a.scale = false,
             "--no-rotation" => a.rotation = false,
             "--align-coarsen" => a.coarsen = next(&mut i).parse().unwrap_or_else(|_| fail("--align-coarsen: integer")),
+            "--interpolation" => {
+                let s = next(&mut i);
+                a.interp = Interp::parse(&s).unwrap_or_else(|| fail(&format!("--interpolation: unknown kernel '{s}' (nearest | bilinear | bicubic | spline4x4 | spline6x6 | lanczos3)")));
+            }
             "--save-aligned" => p.save_aligned = Some(next(&mut i)),
             "--save-depth" => save_depth = true,
             "--save-conf" => save_conf = true,
@@ -491,6 +496,9 @@ fn help() {
            --no-align             frames are already registered (streams from disk)\n\
            --no-shift/scale/rotation   restrict the similarity model\n\
            --align-coarsen N      align at reduced resolution (skip N finest levels)\n\
+           --interpolation K      the kernel the aligned frames are resampled with: nearest | bilinear | bicubic |\n\
+                                  spline4x4 (Zerene's default) | spline6x6 | lanczos3 [spline4x4]; wider = sharper,\n\
+                                  more ringing at hard edges (the registration search itself always uses spline4x4)\n\
            --save-aligned DIR     write the aligned frames\n\
            --save-depth           write the depth map next to the output (8-bit, min-max scaled)\n\
            --depth-raw PATH       write the depth map as 16-bit PNG, fixed scale (65535 = last frame)\n\
