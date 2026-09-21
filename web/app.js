@@ -1079,11 +1079,12 @@ function drawCursor(c, d) {
   c.lineWidth = 1.5 / (st.zoom * d); c.strokeStyle = 'rgba(255,255,255,.9)'; c.beginPath(); c.arc(R.cursor[0], R.cursor[1], R.size, 0, 2 * Math.PI); c.stroke();
   c.strokeStyle = 'rgba(0,0,0,.6)'; c.beginPath(); c.arc(R.cursor[0], R.cursor[1], R.size * R.hard, 0, 2 * Math.PI); c.stroke();
 }
-// ctrl+G while retouch is on: the pick crosshair is the pointer's own cursor, so it marks
-// the pane under the hand and nothing in the other one. The two panes hold the same image
-// under the same transform, so this cross, drawn at the pointer in both, puts the pixel
-// about to be picked in front of the Source pane as well — the frame the jump lands on is
-// the one that pane is showing. It stands in for the brush rings, which a pick ignores.
+// The marks below stand in for the pointer's own cursor, which only ever lands on the pane
+// under the hand. Retouch's two panes hold the same image under the same transform, so a
+// mark drawn at the pointer in image space appears in both, over the same pixel: what is
+// about to happen is shown where it will happen, in the Source pane as much as the target.
+// ctrl+G: the cross marks the pixel whose sharpest frame the next click jumps to — the
+// frame the Source pane is about to show.
 function drawPick(c, d) {
   if (!R.cursor) return;
   const k = st.zoom * d, [x, y] = R.cursor, arm = 14 / k, gap = 4 / k;
@@ -1091,8 +1092,53 @@ function drawPick(c, d) {
   c.beginPath();
   c.moveTo(x - arm, y); c.lineTo(x - gap, y); c.moveTo(x + gap, y); c.lineTo(x + arm, y);
   c.moveTo(x, y - arm); c.lineTo(x, y - gap); c.moveTo(x, y + gap); c.lineTo(x, y + arm);
-  c.lineWidth = 3.5 / k; c.strokeStyle = 'rgba(0,0,0,.55)'; c.stroke();   // a dark liner, so it reads on a bright image
+  strokeMark(c, k);
+}
+// shift: the drag pans both panes at once (it suspends the brush), so the four arrows that
+// say so belong in both — the move cursor they stand in for is in one.
+function drawPan(c, d) {
+  if (!R.cursor) return;
+  const k = st.zoom * d, [x, y] = R.cursor, arm = 15 / k, gap = 4 / k, head = 4.5 / k;
+  c.setTransform(k, 0, 0, k, st.ox * d, st.oy * d);
+  c.beginPath();
+  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const px = dx * arm, py = dy * arm;
+    c.moveTo(x + dx * gap, y + dy * gap); c.lineTo(x + px, y + py);   // the arm, clear of the pixel itself
+    c.moveTo(x + px - (dx - dy) * head, y + py - (dy + dx) * head);   // its head: one barb, the tip, the other
+    c.lineTo(x + px, y + py);
+    c.lineTo(x + px - (dx + dy) * head, y + py - (dy - dx) * head);
+  }
+  strokeMark(c, k);
+}
+// ctrl: the wheel stops scrubbing and zooms about the pointer, so a lens marks the point
+// the zoom will hold still. It joins the brush ring rather than replacing it: ctrl changes
+// what the wheel does, not what a click does — a click still paints.
+function drawZoom(c, d) {
+  if (!R.cursor) return;
+  const k = st.zoom * d, [x, y] = R.cursor, r = 8 / k, t = 3.5 / k, h = 5 / k, q = Math.SQRT1_2;
+  c.setTransform(k, 0, 0, k, st.ox * d, st.oy * d);
+  c.beginPath();
+  c.arc(x, y, r, 0, 2 * Math.PI);
+  c.moveTo(x - t, y); c.lineTo(x + t, y); c.moveTo(x, y - t); c.lineTo(x, y + t);   // the + of a zoom-in lens
+  c.moveTo(x + r * q, y + r * q); c.lineTo(x + (r + h) * q, y + (r + h) * q);       // its handle
+  strokeMark(c, k);
+}
+// every mark twice: a dark liner under a light line, so it reads on any image
+function strokeMark(c, k) {
+  c.lineJoin = 'round'; c.lineCap = 'round';
+  c.lineWidth = 3.5 / k; c.strokeStyle = 'rgba(0,0,0,.55)'; c.stroke();
   c.lineWidth = 1.5 / k; c.strokeStyle = 'rgba(255,255,255,.95)'; c.stroke();
+  c.lineJoin = 'miter'; c.lineCap = 'butt';
+}
+// What the pointer is about to do, drawn into one pane: a pick jumps, shift pans, ctrl
+// zooms, and otherwise the brush paints — the hover preview only on the pane it would
+// land on, the rest in both.
+function paintMarks(c, d, paintPane) {
+  if (st.pick) { drawPick(c, d); return; }
+  if (shiftHeld) { drawPan(c, d); return; }
+  if (paintPane) hoverDab(c, d);
+  drawCursor(c, d);
+  if (ctrlHeld) drawZoom(c, d);
 }
 // Pane labels: a chip over every visible image. 'a' is the view layer, 'b' the
 // compare partner, plain = neutral (the retouch source). Positions are inline so
@@ -1114,10 +1160,10 @@ function draw() {
   const retouch = R.on && !!st.result;
   const split = st.compare && st.cmpMode === 'split' && !!st.result;
   $('vwrap').classList.toggle('split', split); $('vwrap').classList.toggle('paint', retouch); canvas2.hidden = !split;
-  // a pick in retouch mode draws its own cross in both panes: the pointer's native crosshair
-  // stands down for it, so the two panes mark the pixel the same way — but only once the
-  // drawn one has a place to be, so the pointer is never left with no cursor at all
-  $('vwrap').classList.toggle('xhair', retouch && st.pick && !!R.cursor);
+  // retouch draws its own marks into both panes, so the native cursor stands down for them
+  // and the two panes read the same — but only once a drawn mark has a place to be, so the
+  // pointer is never left with no cursor at all
+  $('vwrap').classList.toggle('marks', retouch && !!R.cursor);
   sizeCanvas(canvas, d); if (split) sizeCanvas(canvas2, d);
   const cw = canvas.clientWidth, ch = canvas.clientHeight;
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = '#141416'; ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -1135,12 +1181,10 @@ function draw() {
     const [L, Rt] = st.flipped ? [B, A] : [A, B];
     const labels = st.flipped ? [layerLabel(st.cmp), layerLabel(st.view)] : [layerLabel(st.view), layerLabel(st.cmp)];
     if (retouch) labels[0] += ' — drag to paint, shift+drag pans';
-    // the paint pane: the brush's preview under its circle — or, while a pick is armed, the
-    // crosshair alone, since the next click jumps to a frame instead of laying a dab down
-    drawLayer(L); if (retouch) { if (st.pick) drawPick(ctx, d); else { hoverDab(ctx, d); drawCursor(ctx, d); } }
+    drawLayer(L); if (retouch) paintMarks(ctx, d, true);   // the paint pane: the hover preview lands here
     ctx2.setTransform(1, 0, 0, 1, 0, 0); ctx2.fillStyle = '#141416'; ctx2.fillRect(0, 0, canvas2.width, canvas2.height);
     ctx2.setTransform(st.zoom * d, 0, 0, st.zoom * d, st.ox * d, st.oy * d);
-    drawLayer(Rt, ctx2); if (retouch) { if (st.pick) drawPick(ctx2, d); else drawCursor(ctx2, d); }
+    drawLayer(Rt, ctx2); if (retouch) paintMarks(ctx2, d, false);
     const [k1, k2] = st.flipped ? ['b', 'a'] : ['a', 'b'];
     const [l1, l2] = $('panelabels').children; $('panelabels').hidden = false;
     showLabel(l1, labels[0], k1, { left: '25%', transform: 'translateX(-50%)' });
@@ -1212,7 +1256,7 @@ function setPick(on) {
   st.pick = !!on && !!st.result;
   $('vwrap').classList.toggle('pick', st.pick);
   $('pickhint').hidden = !st.pick;
-  if (R.on) draw();   // retouch draws its own crosshair in both panes: arming and cancelling both change it
+  if (R.on) draw();   // retouch draws its own cross in both panes: arming and cancelling both change it
 }
 function frameAt(x, y) {
   const r = st.result; if (!r || !r.winner) return -1;
@@ -1241,9 +1285,10 @@ function pickAt(cv, e) {
 }
 // Shift means pan: it suspends the brush (pointerdown below) and pans instead, so while it is
 // held the pane shows the move cursor in place of grab — and in retouch mode in place of the
-// brush's cursor: none, with the brush ring and its hover preview hidden so the pointer is the
-// only cursor on screen. Pointer events carry the state too: the key may have gone down while
-// another window had focus, and it may come up there (blur).
+// brush's cursor: none, with the brush ring and its hover preview giving way to the four
+// arrows of drawPan, in both panes, since the pan moves both. Pointer events carry the state
+// too: the key may have gone down while another window had focus, and it may come up there
+// (blur).
 let shiftHeld = false;
 function setShift(on) {
   if (on === shiftHeld || (on && R.painting)) return;   // mid-stroke shift pans nothing: the brush keeps its ring
@@ -1251,13 +1296,24 @@ function setShift(on) {
   $('vwrap').classList.toggle('shift', on);
   if (R.on) draw();
 }
-addEventListener('keydown', (e) => setShift(e.shiftKey));
-addEventListener('keyup', (e) => setShift(e.shiftKey));
-addEventListener('blur', () => setShift(false));
+// Ctrl (cmd on a Mac) means zoom: it takes the wheel off the scrub and zooms about the
+// pointer. Nothing about the pointer itself changes, so the pane only says so — the zoom-in
+// cursor everywhere, and in retouch the lens of drawZoom beside the brush ring in both panes.
+let ctrlHeld = false;
+function setCtrl(on) {
+  if (on === ctrlHeld) return;
+  ctrlHeld = on;
+  $('vwrap').classList.toggle('zoom', on);
+  if (R.on) draw();
+}
+const setMods = (e) => { setShift(e.shiftKey); setCtrl(e.ctrlKey || e.metaKey); };
+addEventListener('keydown', setMods);
+addEventListener('keyup', setMods);
+addEventListener('blur', () => { setShift(false); setCtrl(false); });
 
 for (const cv of [canvas, canvas2]) {
   cv.addEventListener('pointerdown', (e) => {
-    setShift(e.shiftKey);
+    setMods(e);
     if (st.pick && e.button === 0) { e.preventDefault(); pickAt(cv, e); return; }
     const paint = R.on && st.result && e.button === 0 && !e.shiftKey && !(e.buttons & 4);
     try { cv.setPointerCapture(e.pointerId); } catch {}
@@ -1268,7 +1324,7 @@ for (const cv of [canvas, canvas2]) {
     drag = { x: e.clientX, y: e.clientY, ox: st.ox, oy: st.oy }; cv.classList.add('drag');
   });
   cv.addEventListener('pointermove', (e) => {
-    setShift(e.shiftKey);
+    setMods(e);
     if (R.on) { R.cursor = imgXY(cv, e); R.hold = false; }
     if (R.painting) { const [x, y] = imgXY(cv, e); addDab(x, y); drawSoon(); return; }
     if (drag) { st.ox = drag.ox + e.clientX - drag.x; st.oy = drag.oy + e.clientY - drag.y; st.fitted = false; }
