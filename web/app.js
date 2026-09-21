@@ -369,6 +369,7 @@ const OUTPUTS = [
   { id: 'lap', token: 'lap', kind: 'fused', name: 'LAP stack', desc: 'the fused image', avail: () => !!st.result },
   { id: 'dfr', token: 'dfr', kind: 'dmap', name: 'DFR stack', desc: 'rendered from the depth map', avail: () => haveDmap() },
   { id: 'stereo', token: 'stereo', kind: 'stereo', name: 'Stereo pair', desc: () => `synthetic stereo: the stacked image seen from the left and from the right, ${refolding() ? 'each view folded from the shifted frames' : 'sheared by its depth map'}`, avail: () => !!st.result },
+  { id: 'mesh', token: '3d', kind: 'mesh', name: '3D model', desc: () => MESH_DESC[m3().format], ext: () => m3().format, avail: () => !!st.result },
   { id: 'depth', token: 'depth', kind: 'depth', name: 'Depth map', desc: '8-bit gray PNG, min–max scaled', ext: 'png', avail: () => !!st.result },
   { id: 'depth16', token: 'depth16', kind: 'depth16', name: 'Depth map, 16-bit', desc: '16-bit gray PNG, 65535 = last frame', ext: 'png', avail: () => !!st.result },
   { id: 'winner', token: 'winner', kind: 'winner', name: 'Winner map', desc: '8-bit gray PNG, LAP winner index', ext: 'png', avail: () => !!st.result },
@@ -377,11 +378,13 @@ const OUTPUTS = [
   { id: 'anim-peak', token: 'peaking', anim: true, name: 'Source with focus peaking', desc: 'animated GIF: the aligned frames under their magenta peaking band', ext: 'gif', avail: () => !!st.result && st.files.length > 1 && st.frames.some((f) => f && f.peak) },
   { id: 'anim-rock', token: 'rocking', anim: true, rock: true, name: 'Rocking', desc: () => `animated GIF: the stacked image rocking from side to side, ${refolding() ? 'each view folded from the shifted frames' : 'sheared by its depth map'}`, ext: 'gif', avail: () => !!st.result },
 ];
+const MESH_DESC = { glb: 'glTF binary: the stacked image as a textured relief of its depth map, one file', obj: 'Wavefront OBJ + MTL + texture image: the textured relief as Helicon writes it, three files', stl: 'binary STL: the relief alone, no texture, for printing' };
+const MESH_MIME = { glb: 'model/gltf-binary', obj: 'model/obj', mtl: 'model/mtl', stl: 'model/stl', jpg: 'image/jpeg', png: 'image/png' };
 const SV = { sel: new Set(['lap']), exif: null, exifFor: null, exporting: false, cancel: false };
 const SK = 'lapstack.save';
-const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'sv-meta', 'sv-crop', 'an-edge', 'an-fps', 'an-loop', 'v3-method', 'v3-src', 'v3-shift', 'v3-layout', 'v3-rock', 'v3-near', 'cc-on', 'cc-name'];
+const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'sv-meta', 'sv-crop', 'an-edge', 'an-fps', 'an-loop', 'v3-method', 'v3-src', 'v3-shift', 'v3-layout', 'v3-rock', 'v3-near', 'm3-format', 'm3-relief', 'm3-grid', 'm3-tex', 'cc-on', 'cc-name'];
 const svSteps = ['an-step', 'v3-views'];   // the card's steppers (a number in a span between − and +)
-const svLive = ['sv-quality', 'sv-name', 'cc-name', 'v3-shift', 'v3-rock'];   // re-render on every input, not on change
+const svLive = ['sv-quality', 'sv-name', 'cc-name', 'v3-shift', 'v3-rock', 'm3-relief'];   // re-render on every input, not on change
 // The crop: the run reports the window every aligned frame covers with real pixels
 // (outside it some frame only has its smeared edge). With the Save card's switch on,
 // every saved file is cut to it and the viewer shows it as the bright window.
@@ -476,10 +479,11 @@ async function exifDate(file) {
   } catch { return null; }
 }
 window.__svTest = { exifDate, nameDate, save: (kind, format, quality, meta, crop) => call({ type: 'save', kind, format, quality, meta, crop }),   // tests
+                    mesh: (stem, format, extra) => { const m = m3(), v = v3(); return call({ type: 'mesh', stem, format, source: v.source, crop: v.crop, grid: m.grid, relief: m.relief, near: v.near, texture_edge: m.tex, texture: 'jpeg', quality: 90, ...(extra || {}) }); },
                     view: viewFrame, stereo: (format) => call({ type: 'view_stereo', ...v3(), format: format || 'png', quality: 90, meta: false }),
                     refold, refoldView: (index) => call({ type: 'refold_view', index }), refoldEnd: () => call({ type: 'refold_end' }),
                     sign: (bytes, mime, name) => signBlob(new Blob([bytes], { type: mime }), OUTPUTS[0], name, mime).then((b) => b.arrayBuffer()) };
-function svExt(o) { return o.ext || ($('sv-format').value === 'jpeg' ? 'jpg' : 'png'); }
+function svExt(o) { const e = typeof o.ext === 'function' ? o.ext() : o.ext; return e || ($('sv-format').value === 'jpeg' ? 'jpg' : 'png'); }
 function svName(o, now = new Date()) {
   const parts = [];
   if ($('fn-app').checked) parts.push('lapstack');
@@ -493,6 +497,20 @@ function svName(o, now = new Date()) {
 // the stereo / rocking settings: the shifts as fractions of the width (the card shows percent)
 const v3 = () => ({ method: $('v3-method').value, source: haveDmap() ? $('v3-src').value : 'fused', crop: !!cropArea(), near: $('v3-near').checked, shift: Number($('v3-shift').value) / 100, rock: Number($('v3-rock').value) / 100, views: Math.max(4, Number($('v3-views').textContent)), layout: $('v3-layout').value });
 const refolding = () => $('v3-method').value === 'refold';
+// the 3D model's settings (mesh.rs): the relief as a fraction of the width (the card shows percent); the
+// image and the near end are the stereo section's
+const m3 = () => ({ format: $('m3-format').value, grid: Number($('m3-grid').value), relief: Number($('m3-relief').value) / 100, tex: Number($('m3-tex').value) });
+// the mesh's vertex grid for the output size (core mesh::grid_dims) and a rough file size
+function meshPlan() {
+  const [W, H] = outDims(), m = m3(), long = Math.max(W, H, 2), g = Math.min(Math.max(m.grid, 2), long);
+  const axis = (n) => Math.min(Math.max(Math.round((Math.max(n, 2) - 1) * (g - 1) / (long - 1)) + 1, 2), Math.max(n, 2));
+  const nx = axis(W), ny = axis(H), nv = nx * ny, nt = 2 * (nx - 1) * (ny - 1);
+  const ts = m.tex && long > m.tex ? m.tex / long : 1, tw = Math.max(1, Math.round(W * ts)), th = Math.max(1, Math.round(H * ts));
+  const tex = tw * th * ($('sv-format').value === 'jpeg' ? 0.4 : 1.5);
+  const digits = String(nv).length;   // an OBJ face line carries nine indices
+  const size = m.format === 'stl' ? 84 + nt * 50 : m.format === 'obj' ? nv * 78 + nt * (9 * digits + 9) + tex : nv * 32 + nt * 12 + tex;
+  return { nx, ny, nv, nt, tw, th, size };
+}
 // Zerene's way: the stack folded again, each frame shifted by its index, one accumulator per view
 // (see Refold in lib.rs); the frames are read again. The views wait in the engine until refold_end.
 function refold(shifts, w, h) { const v = v3(); return call({ type: 'refold', files: st.files, shifts, near: v.near, w, h }); }
@@ -540,6 +558,9 @@ async function renderSave() {
   $('v3-src').querySelector('[value="dmap"]').disabled = !haveDmap(); if (!haveDmap()) $('v3-src').value = 'fused';
   $('v3-shift-val').textContent = `±${$('v3-shift').value} %`; $('v3-rock-val').textContent = `±${$('v3-rock').value} %`;
   $('v3-src').disabled = refolding();   // the refold fuses the frames itself
+  // the 3D model: its vertex grid and a size estimate for the chosen format
+  { const p = meshPlan(), m = m3(); $('m3-relief-val').textContent = `${$('m3-relief').value} %`;
+    $('m3-info').textContent = `${p.nx}×${p.ny} vertices, ${p.nt >= 1e6 ? (p.nt / 1e6).toFixed(1) + ' M' : Math.round(p.nt / 1e3) + ' k'} triangles` + (m.format === 'stl' ? '' : `, texture ${p.tw}×${p.th}`) + ` · roughly ${fmtMB(p.size)} as ${m.format.toUpperCase()}`; }
   // the file list
   const list = $('sv-files'); list.innerHTML = '';
   const avail = OUTPUTS.filter((o) => o.avail());
@@ -601,10 +622,35 @@ async function thumbInto(o, cv) {
     else { for (let i = 0; i < L.data.length; i += 4) { L.data[i + 1] = R.data[i + 1]; L.data[i + 2] = R.data[i + 2]; } c.putImageData(L, x0, y0); }
   }
   else if (o.kind === 'depth' || o.kind === 'depth16') fit(await depthBitmap(false), true);
+  else if (o.kind === 'mesh') await meshThumb(cv, c);
   else if (o.kind === 'winner') fit(await winnerBitmap(), true);
   else if (o.id === 'anim-depth') { fit(await depthBitmap(true), true); const ov = await sliceBitmap(mid); if (ov) fit(ov, true); }
   else if (o.id === 'anim-focus') { const b = await focusBitmap(mid); if (b) fit(b); else { const f = st.frames[mid]; if (f && (f.proxy || f.thumb)) fit(f.proxy || f.thumb); } }
   else if (o.id === 'anim-peak') { const f = st.frames[mid]; if (f && (f.proxy || f.thumb)) fit(f.proxy || f.thumb); if (f && f.peak) fit(await peakBitmap(f)); }
+}
+// the 3D model's thumbnail: the stacked image lit as the relief would be — the depth map's slopes
+// shade it, a light from the top-left; the relief and the near end are the card's
+async function meshThumb(cv, c) {
+  const r = st.result, [ow, oh] = outDims();
+  const s = Math.min(cv.width / ow, cv.height / oh), w = Math.max(2, Math.round(ow * s)), h = Math.max(2, Math.round(oh * s));
+  const x0 = Math.round((cv.width - w) / 2), y0 = Math.round((cv.height - h) / 2);
+  const src = haveDmap() && v3().source === 'dmap' ? r.dmap : r.fused;
+  c.imageSmoothingEnabled = true; c.drawImage(src, ...srcRect(src.width, src.height), x0, y0, w, h);
+  const img = c.getImageData(x0, y0, w, h);
+  const oc = new OffscreenCanvas(w, h).getContext('2d', { willReadFrequently: true });
+  const d = await depthBitmap(false); oc.imageSmoothingEnabled = true; oc.drawImage(d, ...srcRect(d.width, d.height), 0, 0, w, h);
+  const z = oc.getImageData(0, 0, w, h).data;
+  const k = (v3().near ? -1 : 1) * m3().relief * w / 255;   // gray → height in thumbnail pixels
+  const L = [-1, -1, 1.5], ln = Math.hypot(...L); L[0] /= ln; L[1] /= ln; L[2] /= ln;
+  const px = img.data;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x, xl = Math.max(x - 1, 0), xr = Math.min(x + 1, w - 1), yu = Math.max(y - 1, 0), yd = Math.min(y + 1, h - 1);
+    const dzx = k * (z[4 * (y * w + xr)] - z[4 * (y * w + xl)]) / (xr - xl || 1), dzy = k * (z[4 * (yd * w + x)] - z[4 * (yu * w + x)]) / (yd - yu || 1);
+    const nn = Math.hypot(dzx, dzy, 1), dot = (-dzx * L[0] - dzy * L[1] + L[2]) / nn;
+    const shade = Math.min(1.35, 0.3 + 0.7 * Math.max(0, dot) / L[2]);
+    px[4 * i] *= shade; px[4 * i + 1] *= shade; px[4 * i + 2] *= shade;
+  }
+  c.putImageData(img, x0, y0);
 }
 async function winnerBitmap() {
   if (st.depthBmp.has('winner')) return st.depthBmp.get('winner');
@@ -721,6 +767,16 @@ async function saveSelected() {
     for (const o of items) {
       const name = svName(o, now);
       let blob, mime;
+      if (o.kind === 'mesh') {
+        // the 3D model: one file, or three for OBJ, from the engine; nothing to sign
+        prog(`building ${name}`, 0, 0); setState(o, 'building…');
+        const m = m3(), v = v3();
+        const r = await call({ type: 'mesh', stem: name.slice(0, name.lastIndexOf('.')), format: m.format, source: v.source, crop: v.crop, grid: m.grid, relief: m.relief, near: v.near, texture_edge: m.tex, texture: fmt === 'jpeg' ? 'jpeg' : 'png', quality: q });
+        let total = 0;
+        for (const f of r.files) { const b = new Blob([f.bytes], { type: MESH_MIME[f.name.slice(f.name.lastIndexOf('.') + 1)] || 'application/octet-stream' }); downloadBlob(b, f.name); total += b.size; }
+        setState(o, `saved · ${fmtMB(total)}${r.files.length > 1 ? ` in ${r.files.length} files` : ''}`);
+        continue;
+      }
       if (o.anim) {
         setState(o, 'rendering…');
         blob = await renderAnim(o, (k, n) => { prog(`${o.name}: frame ${k + 1}/${n}`, k, n); setState(o, `${k + 1}/${n}`); });

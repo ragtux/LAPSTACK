@@ -94,8 +94,8 @@ self.onmessage = (ev) => {
 
 // ---------- remote calls (Save step) ----------
 // The page composes export frames itself and only needs the engine for what it cannot
-// do: full-resolution aligned frames (plain or In focus), the stereo / rocking views, GIF
-// quantisation + LZW, image encoding, and content credentials.
+// do: full-resolution aligned frames (plain or In focus), the stereo / rocking views, the
+// 3D model, GIF quantisation + LZW, image encoding, and content credentials.
 async function handleCall(m) {
   if (m.type === 'save') {
     const bytes = engine.encode(m.kind, m.format || 'png', m.quality || 90, !!m.meta, !!m.crop);
@@ -138,6 +138,12 @@ async function handleCall(m) {
       const bytes = engine.view_stereo(m.shift, m.near !== false, m.layout || 'sbs', m.format || 'png', m.quality || 90, !!m.meta);
       post({ type: 'png', rid: m.rid, kind: 'stereo', format: m.format || 'png', bytes: bytes.buffer }, [bytes.buffer]);
     }
+  } else if (m.type === 'mesh') {
+    // the 3D model (mesh.rs): the LAP or DFR master as a relief of the depth map, textured;
+    // one file (glb, stl) or three (obj + mtl + texture), each {name, bytes}
+    const files = engine.mesh(m.stem, m.format || 'glb', m.source || 'fused', !!m.crop, m.grid || 1000, m.relief || 0.25, m.near !== false, m.texture_edge || 0, m.texture || 'jpeg', m.quality || 92)
+      .map((f) => ({ name: f.name, bytes: f.bytes.buffer }));
+    post({ type: 'mesh', rid: m.rid, files }, files.map((f) => f.bytes));
   } else if (m.type === 'refold') {
     // Zerene-style synthetic stereo: the stack folded again (m.files, in frame order), each
     // frame shifted by its index, into one accumulator per view in m.shifts, at about m.w×m.h

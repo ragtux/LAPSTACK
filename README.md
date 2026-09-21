@@ -17,7 +17,7 @@ stacking on the Laplacian pyramid, written from two papers kept in `docs/`:
 ## Layout
 
 ```
-crates/lapstack-core   library: pyramid, fusion, depth from focus, aligner, I/O, CUDA path
+crates/lapstack-core   library: pyramid, fusion, depth from focus, aligner, stereo views, 3D model, I/O, CUDA path
 crates/lapstack-cli    `lapstack` command-line tool
 crates/lapstack-web    wasm32 + WebGPU engine for the browser app
 web/                   the browser app (static files) and its headless test
@@ -137,6 +137,27 @@ cross-eyed (`cross`) or as a red–cyan anaglyph; `--rocking` writes N views
 end is near decides who wins where surfaces overlap: frame 0 is taken as the
 near end (the focus went front to back); `--far-first` says otherwise — the
 symptom of the wrong choice is a relief that looks inside out.
+
+**3D model** (`mesh.rs`; `--mesh glb,obj,stl`): Helicon Focus's 3D model —
+the depth map makes the result a relief, and the model is that relief as a
+mesh, a grid of vertices over the image (`--mesh-grid N` along the long
+edge, default 1000; each vertex takes the mean depth of the cell of pixels
+around it, so the mesh is smooth at its own scale; each cell is cut along the
+diagonal with the smaller depth step) raised by the depth and textured with
+the stacked image. Coordinates are right-handed with the width as the unit:
+x along the width, y up, z towards the viewer, the far end of the stack on
+z = 0 and the near end at `--mesh-relief PCT` % of the width (default 25 —
+the depth of the stack is the one thing the depth map cannot know, so
+measure the subject or set it by eye; `--far-first` applies). `glb` writes
+`<stem>.glb`, a self-contained glTF 2.0 binary with the texture embedded
+(Windows 3D Viewer, macOS Quick Look, Blender, every web viewer); `obj`
+writes `<stem>.obj` + `<stem>.mtl` + `<stem>_texture.jpg`, what Helicon
+writes; `stl` writes the geometry alone as binary STL for printing. The
+texture is 8-bit, JPEG (quality 92) or PNG, capped at `--mesh-texture
+EDGE[:jpeg[:Q] | png]` px on the long edge (default 8192, the largest most
+viewers accept). A depth discontinuity becomes a wall between the near
+surface and the far one — a heightfield has no way to show what is behind
+an edge, as in Helicon's viewer.
 
 `--save-depth` writes the depth map produced by the depth-from-focus pass
 below (`--depth winner` instead reports the raw winning frame index read
@@ -335,11 +356,23 @@ halo: beside a near object the far frames win (the background is sharp in
 them) and carry the object's defocused copy displaced by the shift, so a
 soft ghost stands next to it, wider with a larger shift and a deeper scene;
 the shear has no halo but only one surface.
+**3D model**: the CLI's `--mesh` in the browser, a row of the file list
+(`3d`): the card's section has the format (GLB, one file with the texture
+inside; OBJ + MTL + texture image, three files, which the browser may ask to
+allow; STL, the relief alone), the relief as a percentage of the width, the
+mesh's vertices along the long edge and the texture's long edge, with the
+vertex and triangle counts and a size estimate; the image (LAP or DFR) and
+the near end are the stereo section's, the texture is 8-bit in the card's
+image format (JPEG at its quality, or PNG), and the model is cropped like
+the other files. The row's thumbnail is the stacked image lit as the relief
+would be. The engine builds it from the full-resolution depth map and the
+master (`mesh` in `lapstack-web/src/lib.rs`, core `mesh.rs`); no content
+credentials are attached to 3D files.
 File names are built from tokens joined with `_`, lower case: `lapstack`,
 the EXIF date/time of the first frame (read from the JPEG APP1 / TIFF /
 PNG eXIf structure), a date/time found in the first frame's name, the
 current date/time, a custom text, and the layer name (`lap`, `dfr`, `stereo`,
-`depth`, `depth16`, `winner`, `depth-slice`, `infocus`, `peaking`, `rocking`). The EXIF date
+`3d`, `depth`, `depth16`, `winner`, `depth-slice`, `infocus`, `peaking`, `rocking`). The EXIF date
 falls back to the XMP packet's CreateDate, which is all a raw converter's
 TIFF may have.
 **Content credentials** ([C2PA](https://contentcredentials.org/)) can be

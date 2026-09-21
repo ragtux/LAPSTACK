@@ -3,7 +3,8 @@
 
 //! lapstack — Laplacian-pyramid focus stacking CLI.
 
-use lapstack_core::{DepthParams, FocusMeasure, Layout, Params, TopRule, Upsample, View, run_with};
+use lapstack_core::{DepthParams, FocusMeasure, Layout, MeshParams, Params, TexFormat, TopRule, Upsample, View, run_with};
+use lapstack_core::mesh;
 use lapstack_core::io;
 use lapstack_core::pyramid::Img3;
 use lapstack_core::view;
@@ -31,6 +32,9 @@ fn main() {
     let mut stereo: Option<(f32, Layout)> = None;
     let mut rocking: Option<(f32, usize)> = None;
     let mut near_first = true;
+    let mut mesh_formats: Vec<String> = Vec::new();
+    let mut mp = MeshParams::default();
+    let mut mesh_tex = (8192usize, TexFormat::Jpeg(92));
 
     let mut i = 0;
     let next = |i: &mut usize| -> String {
@@ -88,6 +92,28 @@ fn main() {
                 rocking = Some((pct / 100.0, n));
             }
             "--far-first" => near_first = false,
+            "--mesh" => {
+                for f in next(&mut i).split(',') {
+                    if !matches!(f, "glb" | "obj" | "stl") {
+                        fail("--mesh: glb | obj | stl, comma-separated");
+                    }
+                    if !mesh_formats.iter().any(|g| g == f) {
+                        mesh_formats.push(f.to_string());
+                    }
+                }
+            }
+            "--mesh-relief" => mp.relief = next(&mut i).parse::<f32>().ok().filter(|v| *v > 0.0).unwrap_or_else(|| fail("--mesh-relief: PCT > 0")) / 100.0,
+            "--mesh-grid" => mp.grid = next(&mut i).parse().ok().filter(|&v| v >= 2).unwrap_or_else(|| fail("--mesh-grid: N >= 2")),
+            "--mesh-texture" => {
+                let s = next(&mut i);
+                let mut it = s.split(':');
+                mesh_tex.0 = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| fail("--mesh-texture: EDGE[:jpeg[:Q] | png]"));
+                mesh_tex.1 = match it.next() {
+                    None | Some("jpeg") | Some("jpg") => TexFormat::Jpeg(match it.next() { Some(q) => q.parse().ok().filter(|q| (1..=100).contains(q)).unwrap_or_else(|| fail("--mesh-texture: Q 1..100")), None => 92 }),
+                    Some("png") => TexFormat::Png,
+                    _ => fail("--mesh-texture: EDGE[:jpeg[:Q] | png]"),
+                };
+            }
             "--depth-raw" => depth_raw = Some(next(&mut i)),
             "--depth" => {
                 depth_mode = next(&mut i);
@@ -217,6 +243,37 @@ fn main() {
         }
         eprintln!("[lapstack] rocking: {n} views of ±{:.1} % -> {dir}/view_NN{ext}", amp * 100.0);
     }
+    if !mesh_formats.is_empty() {
+        // the 3D model (mesh.rs): the depth map as a relief textured with the result
+        mp.near_first = near_first;
+        let m = mesh::heightfield(&out.depth, iw, &lapstack_core::align::Rect::full(iw, ih), 1.0 / n_last, &mp);
+        let (tex, tw, th) = mesh::texture_planes([&out.image.p[0], &out.image.p[1], &out.image.p[2]], iw, ih, mesh_tex.0);
+        let write = |path: &str, bytes: &[u8]| std::fs::write(path, bytes).unwrap_or_else(|e| fail(&format!("cannot write {path}: {e}")));
+        eprintln!("[lapstack] 3D model: {}x{} vertices, {} triangles, relief {:.0} % of the width, texture {tw}x{th}", m.nx, m.ny, m.triangles(), mp.relief * 100.0);
+        let image = if mesh_formats.iter().any(|f| f != "stl") { mesh::encode_texture(&tex, tw, th, mesh_tex.1).unwrap_or_else(|e| fail(&e)) } else { Vec::new() };
+        for f in &mesh_formats {
+            match f.as_str() {
+                "glb" => {
+                    let path = format!("{stem}.glb");
+                    write(&path, &mesh::glb(&m, &image, mesh_tex.1.mime()));
+                    eprintln!("[lapstack] glTF binary -> {path}");
+                }
+                "obj" => {
+                    let base = stem.rsplit('/').next().unwrap_or(stem);
+                    let (mtl_name, tex_name) = (format!("{base}.mtl"), format!("{base}_texture.{}", mesh_tex.1.ext()));
+                    write(&format!("{stem}.obj"), &mesh::obj(&m, &mtl_name));
+                    write(&format!("{stem}.mtl"), &mesh::mtl(&tex_name));
+                    write(&format!("{stem}_texture.{}", mesh_tex.1.ext()), &image);
+                    eprintln!("[lapstack] Wavefront OBJ -> {stem}.obj + {mtl_name} + {tex_name}");
+                }
+                _ => {
+                    let path = format!("{stem}.stl");
+                    write(&path, &mesh::stl(&m));
+                    eprintln!("[lapstack] binary STL -> {path}");
+                }
+            }
+        }
+    }
     if let Some(path) = &depth_raw {
         if let Err(e) = io::save_gray16(&out.depth, out.image.w, out.image.h, n_last, path) {
             fail(&e);
@@ -273,6 +330,12 @@ fn help() {
            --rocking PCT[:N]      rocking animation: N [24] views, the shift sweeping +-PCT % in one sine cycle,\n\
                                   -> <stem>_rocking/view_NN.<ext> (join them with ffmpeg / ImageMagick)\n\
            --far-first            frame 0 is the far end of the stack (the focus went back to front) [near]\n\
+           --mesh FORMATS         3D model (Helicon's): the depth map as a relief textured with the result, as\n\
+                                  glb (glTF binary, one file) | obj (+ .mtl + texture file) | stl (geometry only),\n\
+                                  comma-separated -> <stem>.glb / .obj / .stl; --far-first applies\n\
+           --mesh-relief PCT      the depth of the stack as a percentage of the image width [25]\n\
+           --mesh-grid N          vertices along the long edge [1000]\n\
+           --mesh-texture EDGE[:jpeg[:Q] | png]   the texture's long edge, 0 = full [8192], and format [jpeg:92]\n\
            --depth MODE           dff = depth from focus (default) | winner = pyramid winner map\n\
            --depth-level L        (winner) pyramid level the map is read from [2 = 1/4 res]\n\
          Depth from focus (Jeon et al. 2019 focus measure, guided-filter aggregation,\n\

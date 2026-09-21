@@ -22,6 +22,7 @@ use lapstack_core::fuse::{FuseParams, TopRule, binomial, fuse_residuals, upsampl
 use lapstack_core::align::{Rect, common_area};
 use lapstack_core::pyramid::{Img3, auto_levels, half};
 use lapstack_core::view::{self, Layout, View};
+use lapstack_core::mesh::{self, MeshParams, TexFormat};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
@@ -367,6 +368,19 @@ pub async fn create_engine() -> Result<Engine, JsValue> {
     console_error_panic_hook::set_once();
     let gpu = Gpu::new().await.map_err(|e| JsValue::from_str(&e))?;
     Ok(Engine { gpu, run: None })
+}
+
+/// The full-resolution depth map (u16, 65535 = last frame): the DFF map, or
+/// the pyramid winner map upsampled.
+fn depth_full_u16(run: &Run) -> Result<std::borrow::Cow<'_, [u16]>, JsValue> {
+    match &run.depth_full {
+        Some(f) => Ok(std::borrow::Cow::Borrowed(f)),
+        None => {
+            let (d, dw, dh) = run.depth_small.as_ref().ok_or_else(|| JsValue::from_str("not finished"))?;
+            let k = 65535.0 / (run.count.max(2) - 1) as f32;
+            Ok(std::borrow::Cow::Owned(upsample_index(d, *dw, *dh, run.w, run.h, run.depth_level).iter().map(|&v| (v * k + 0.5) as u16).collect()))
+        }
+    }
 }
 
 fn set(obj: &js_sys::Object, k: &str, v: impl Into<JsValue>) {
@@ -1351,14 +1365,7 @@ impl Engine {
             }
             "depth" | "depth16" => {
                 // full-resolution frame index, 65535 = last frame
-                let full: std::borrow::Cow<'_, [u16]> = match &run.depth_full {
-                    Some(f) => std::borrow::Cow::Borrowed(f),
-                    None => {
-                        let (d, dw, dh) = run.depth_small.as_ref().ok_or_else(|| JsValue::from_str("not finished"))?;
-                        let k = 65535.0 / (run.count.max(2) - 1) as f32;
-                        std::borrow::Cow::Owned(upsample_index(d, *dw, *dh, run.w, run.h, run.depth_level).iter().map(|&v| (v * k + 0.5) as u16).collect())
-                    }
-                };
+                let full = depth_full_u16(run)?;
                 let full: std::borrow::Cow<'_, [u16]> = match &area { Some(r) => std::borrow::Cow::Owned(cut(&full, 1, r)), None => full };
                 if kind == "depth16" {
                     let bytes: Vec<u8> = full.iter().flat_map(|v| v.to_be_bytes()).collect();
@@ -1412,14 +1419,7 @@ impl Engine {
                 _ => run.fused_rgb16.as_deref().ok_or_else(|| JsValue::from_str("not finished"))?,
             };
             // full-resolution depth, 65535 = last frame: the DFF map, or the winner map upsampled
-            let full: std::borrow::Cow<'_, [u16]> = match &run.depth_full {
-                Some(f) => std::borrow::Cow::Borrowed(f),
-                None => {
-                    let (d, dw, dh) = run.depth_small.as_ref().ok_or_else(|| JsValue::from_str("not finished"))?;
-                    let k = 65535.0 / (run.count.max(2) - 1) as f32;
-                    std::borrow::Cow::Owned(upsample_index(d, *dw, *dh, run.w, run.h, run.depth_level).iter().map(|&v| (v * k + 0.5) as u16).collect())
-                }
-            };
+            let full = depth_full_u16(run)?;
             let rgb = (!same).then(|| view::shrink(src, run.w, &area, 3, ow, oh));
             let z = if same && run.depth_full.is_some() { None } else { Some(view::shrink(&full, run.w, &area, 1, ow, oh)) };
             run.view_base = Some(ViewBase { key, w: ow, h: oh, rgb, z });
@@ -1469,6 +1469,55 @@ impl Engine {
             out = lapstack_core::meta::embed(out, &run.meta);
         }
         Ok(js_sys::Uint8Array::from(&out[..]))
+    }
+
+    /// The 3D model (core `mesh`): the `source` (fused | dmap) master, cut to
+    /// the crop with `crop`, as a relief of its depth map with the image as
+    /// its texture. `format` glb | obj | stl; `grid` vertices along the long
+    /// edge; `relief` the stack's depth as a fraction of the width;
+    /// `near_first` as in `view_rgba`; `texture_edge` caps the texture's
+    /// long edge (0 = as it is); `texture` jpeg (at `quality`) | png.
+    /// Returns [{name, bytes}], the names built on `stem`: one file for glb
+    /// and stl, three (obj, mtl, texture) for obj.
+    pub fn mesh(&self, stem: &str, format: &str, source: &str, crop: bool, grid: u32, relief: f32, near_first: bool, texture_edge: u32, texture: &str, quality: u8) -> Result<JsValue, JsValue> {
+        let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no result"))?;
+        let area = if crop { run.crop } else { None }.unwrap_or(Rect::full(run.w, run.h));
+        let src = match source {
+            "dmap" => run.dmap_rgb16.as_deref().ok_or_else(|| JsValue::from_str("no depth-map rendering"))?,
+            _ => run.fused_rgb16.as_deref().ok_or_else(|| JsValue::from_str("not finished"))?,
+        };
+        let t0 = now();
+        let full = depth_full_u16(run)?;
+        let mp = MeshParams { grid: grid as usize, relief, near_first };
+        let m = mesh::heightfield(&full, run.w, &area, 1.0 / 65535.0, &mp);
+        let tf = if texture == "png" { TexFormat::Png } else { TexFormat::Jpeg(quality.clamp(1, 100)) };
+        let files = js_sys::Array::new();
+        let push = |name: String, bytes: &[u8]| {
+            let o = js_sys::Object::new();
+            set(&o, "name", name);
+            set(&o, "bytes", js_sys::Uint8Array::from(bytes));
+            files.push(&o);
+        };
+        let mut tex_note = String::new();
+        match format {
+            "stl" => push(format!("{stem}.stl"), &mesh::stl(&m)),
+            "glb" | "obj" => {
+                let (tex, tw, th) = mesh::texture(src, run.w, &area, 1.0 / 65535.0, texture_edge as usize);
+                let image = mesh::encode_texture(&tex, tw, th, tf).map_err(|e| JsValue::from_str(&e))?;
+                tex_note = format!(", texture {tw}x{th} {}", tf.ext());
+                if format == "glb" {
+                    push(format!("{stem}.glb"), &mesh::glb(&m, &image, tf.mime()));
+                } else {
+                    let (mtl, texn) = (format!("{stem}.mtl"), format!("{stem}_texture.{}", tf.ext()));
+                    push(format!("{stem}.obj"), &mesh::obj(&m, &mtl));
+                    push(mtl.clone(), &mesh::mtl(&texn));
+                    push(texn, &image);
+                }
+            }
+            _ => return Err(JsValue::from_str("format must be glb | obj | stl")),
+        }
+        log(&format!("[lapstack] 3D model ({format}): {}x{} vertices, {} triangles, relief {:.0} % of the width{tex_note} ({:.1}s)", m.nx, m.ny, m.triangles(), relief * 100.0, (now() - t0) / 1000.0));
+        Ok(files.into())
     }
 
     /// Start a refold (see `Refold`): views at `shifts` (each the far end's

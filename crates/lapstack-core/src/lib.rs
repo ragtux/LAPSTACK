@@ -17,8 +17,9 @@
 //! `pyramid` is the transform, `fuse` the rules and the N-frame accumulator,
 //! `depth` the depth-from-focus pass (ring difference filter, guided-filter
 //! aggregation, sub-frame peaks, edge-aware WLS), `align` the 4-DOF similarity
-//! registration, `io` bit-depth-preserving TIFF/PNG/JPEG I/O, and `stack::run`
-//! the decode → align → fuse → depth pipeline.
+//! registration, `io` bit-depth-preserving TIFF/PNG/JPEG I/O, `view` synthetic
+//! stereo, `mesh` the textured 3D model, and `stack::run` the decode → align →
+//! fuse → depth pipeline.
 
 pub mod align;
 pub mod brightness;
@@ -27,6 +28,7 @@ pub mod fuse;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod io;
+pub mod mesh;
 pub mod meta;
 pub mod pyramid;
 pub mod stack;
@@ -36,6 +38,7 @@ pub use align::{AlignParams, CancelToken, Cancelled, Sim};
 pub use depth::{DepthMap, DepthParams, FocusMeasure, Upsample};
 pub use fuse::{FuseParams, Fuser, TopRule};
 pub use io::Depth;
+pub use mesh::{Mesh, MeshParams, TexFormat};
 pub use pyramid::Img3;
 pub use stack::{FrameSource, Output, Params, Slab, run, run_with, slab_ranges};
 pub use view::{Layout, View};
