@@ -47,7 +47,8 @@ try {
   });
   const done = wait('done');
   const done2 = render ? wait('done2') : null;
-  worker.postMessage({ type: 'run', files, params: { align, coarsen, proxy_edge: 400, depth: depthMode, depth_scale: depthScale, render_dmap: render } });
+  // brightness off: the native reference was fused from the frames as they are
+  worker.postMessage({ type: 'run', files, params: { align, coarsen, brightness: false, proxy_edge: 400, depth: depthMode, depth_scale: depthScale, render_dmap: render } });
   const res = await done;
   log(`done: ${res.w}x${res.h} ${res.frames} frames, ${res.ms.toFixed(0)} ms`);
   let dmap = null;

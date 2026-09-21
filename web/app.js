@@ -99,7 +99,7 @@ const stepDefaults = { 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2
 function readParams() {
   const n = (id) => Number($(id).textContent === 'auto' ? 0 : $(id).textContent);
   return {
-    align: $('p-align').checked, shift: $('p-shift').checked, scale: $('p-scale').checked, rotation: $('p-rotation').checked,
+    align: $('p-align').checked, shift: $('p-shift').checked, scale: $('p-scale').checked, rotation: $('p-rotation').checked, brightness: $('p-bright').checked,
     coarsen: n('p-coarsen'), levels: n('p-levels') || null, energy_radius: n('p-energy'), top: $('p-top').value,
     top_radius: n('p-topr'), use_chroma: $('p-chroma').checked, proxy_edge: n('p-proxy'),
     depth_scale: n('p-depthscale'), depth_level: n('p-depthlevel'), render_dmap: $('p-dmap').checked,
@@ -114,7 +114,7 @@ function setStep(id, v) {
 }
 function applyParams(p) {
   if (!p) return;
-  $('p-align').checked = p.align ?? true; $('p-shift').checked = p.shift ?? true; $('p-scale').checked = p.scale ?? true; $('p-rotation').checked = p.rotation ?? true;
+  $('p-align').checked = p.align ?? true; $('p-shift').checked = p.shift ?? true; $('p-scale').checked = p.scale ?? true; $('p-rotation').checked = p.rotation ?? true; $('p-bright').checked = p.brightness ?? true;
   setStep('p-coarsen', p.coarsen ?? 2); setStep('p-levels', p.levels ?? 0); setStep('p-energy', p.energy_radius ?? 1);
   $('p-top').value = p.top ?? 'de'; setStep('p-topr', p.top_radius ?? 2); $('p-chroma').checked = p.use_chroma ?? false;
   setStep('p-proxy', p.proxy_edge ?? 1400); st.turbo = p.turbo ?? false;
@@ -250,6 +250,8 @@ function thumbEl(i) {
   } else { const ph = document.createElement('div'); ph.className = 'ph'; ph.textContent = fr ? '…' : String(i); d.appendChild(ph); }
   const n = document.createElement('div'); n.className = 'name'; n.textContent = f.name; d.appendChild(n);
   if (fr && fr.sim) { const s = document.createElement('div'); s.className = 'sim'; s.textContent = `${fr.sim[0].toFixed(1)}, ${fr.sim[1].toFixed(1)} px · ×${fr.sim[2].toFixed(4)} · ${fr.sim[3].toFixed(2)}°`; d.appendChild(s); }
+  // the brightness gain on its own line (the registration line fills the column), only when there is one
+  if (fr && gainText(fr.gain)) { const s = document.createElement('div'); s.className = 'sim'; s.textContent = `brightness ${gainText(fr.gain)}`; s.title = 'gain that brings this frame to frame 0\'s brightness'; d.appendChild(s); }
   if (st.peak.strip && fr && fr.peak) { const s = document.createElement('div'); s.className = 'sim pct'; s.textContent = `${peakPercent(fr).toFixed(1)} % in focus`; d.appendChild(s); }
   d.addEventListener('click', () => { st.selected = i; if (!scrubbable()) st.view = 'source'; updateTabs(); renderFilmstrip(); draw(); });
   return d;
@@ -285,9 +287,9 @@ function endRun(status) {
 function onFrame(m) {
   const peak = { w: m.peak_w, h: m.peak_h, data: new Float32Array(m.peak), bmp: null, bmpThr: -1, pct: null, pctThr: -1 };
   st.peak.pixmax = null;
-  st.frames[m.index] = { name: m.name, w: m.w, h: m.h, bits: m.bits, proxy: m.proxy, strip: m.strip, sim: m.sim, peak };
+  st.frames[m.index] = { name: m.name, w: m.w, h: m.h, bits: m.bits, proxy: m.proxy, strip: m.strip, sim: m.sim, gain: m.gain || null, peak };
   setProgress('fusing', m.done, m.total);
-  log(`[lapstack]   frame ${String(m.index).padStart(3)}: dx=${m.sim[0].toFixed(2)}px dy=${m.sim[1].toFixed(2)}px scale=${m.sim[2].toFixed(5)} rot=${m.sim[3].toFixed(3)}°  (${m.ms.toFixed(0)} ms)`);
+  log(`[lapstack]   frame ${String(m.index).padStart(3)}: dx=${m.sim[0].toFixed(2)}px dy=${m.sim[1].toFixed(2)}px scale=${m.sim[2].toFixed(5)} rot=${m.sim[3].toFixed(3)}°` + (m.gain ? ` gain=${m.gain.map((v) => v.toFixed(3)).join('/')}` : '') + `  (${m.ms.toFixed(0)} ms)`);
   renderThumb(m.index);
   if (st.view === 'source' && st.selected === m.index) draw();
 }
@@ -323,6 +325,12 @@ function finishRun() {
   st.rendering = false;
   setView('fused');
   window.__app_done = JSON.stringify({ ok: true, w: st.result?.w, h: st.result?.h, frames: st.frameCount, dmap: !!(st.result && st.result.dmap), secs: ((performance.now() - st.t0) / 1000).toFixed(1) });
+}
+// the brightness gain of a frame, for the filmstrip: "×0.983", or the three channels when they differ; '' at unity
+function gainText(g) {
+  if (!g || g.every((v) => Math.abs(v - 1) < 0.0005)) return '';
+  const spread = Math.max(...g) - Math.min(...g);
+  return spread > 0.005 ? `×${g.map((v) => v.toFixed(2)).join('/')}` : `×${((g[0] + g[1] + g[2]) / 3).toFixed(3)}`;
 }
 // ---------- worker calls ----------
 // Requests with a reply: the worker echoes `rid` on the answer (or rpc-error), see handleCall there.
@@ -619,7 +627,7 @@ async function signBlob(blob, o, name, mime) {
     title: name,
     assertions: [
       { label: 'c2pa.actions', data: { actions: [{ action: 'c2pa.created', digitalSourceType: 'http://cv.iptc.org/newscodes/digitalsourcetype/compositeCapture', softwareAgent: { name: 'lapstack', version: '0.1.0' } }] } },
-      { label: 'org.lapstack.stack', data: { output: o.token, frames: st.files.map((f) => f.name), align: p.align, levels: p.levels, energy_radius: p.energy_radius, top: p.top, top_radius: p.top_radius, use_chroma: p.use_chroma, retouch_strokes: R.undo, crop: cropArea() ? [cropArea().x, cropArea().y, cropArea().w, cropArea().h] : null } },
+      { label: 'org.lapstack.stack', data: { output: o.token, frames: st.files.map((f) => f.name), align: p.align, levels: p.levels, energy_radius: p.energy_radius, top: p.top, top_radius: p.top_radius, use_chroma: p.use_chroma, brightness: p.brightness, retouch_strokes: R.undo, crop: cropArea() ? [cropArea().x, cropArea().y, cropArea().w, cropArea().h] : null } },
     ],
   };
   const bytes = await blob.arrayBuffer();

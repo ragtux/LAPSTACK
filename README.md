@@ -90,6 +90,20 @@ row into an interval, intersected over frames, and the best rectangle over
 consecutive rows is taken; the warp's 2 px interpolation support is kept
 out); `--no-crop` keeps the full frame.
 
+**Brightness** (`brightness.rs`): flash recycling, mains-powered lights and
+a shutter that is not quite repeatable make frames differ in exposure by a
+percent or two, and the region-energy rule sees it (energy grows with the
+square of the gain, so a brighter frame wins ties it should not and the
+seams between winners show as patches). Every frame is brought to frame 0's
+brightness by one gain per channel — the ratio of the two frames' channel
+*means* over the pixels the frame's warp covers, since a blur leaves a
+mean alone while a pixel-wise fit would slope towards zero with the defocus;
+per channel, so a light that flickers in colour is corrected too. Gains are
+clamped to [1/4, 4] and logged; `--no-brightness` turns it off. The browser
+app does the same on the GPU (block means of frame 0 kept, one small readback
+per frame), *equalise brightness* in the parameter panel, and each filmstrip
+entry shows its gain.
+
 `--save-depth` writes the depth map produced by the depth-from-focus pass
 below (`--depth winner` instead reports the raw winning frame index read
 from pyramid level `--depth-level`, default 2 — the finest level's winner

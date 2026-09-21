@@ -180,7 +180,7 @@ async function handle(m) {
         const peak = r.peak;
         const [proxy, strip] = await proxyBitmaps(r.proxy.buffer, r.proxy_w, r.proxy_h);
         post({ type: 'frame', index: r.index, name: f.name, w: r.w, h: r.h, bits: r.bits, proxy, strip,
-               peak_w: r.peak_w, peak_h: r.peak_h, peak: peak.buffer, sim: r.sim, ms: r.ms,
+               peak_w: r.peak_w, peak_h: r.peak_h, peak: peak.buffer, sim: r.sim, gain: r.gain, ms: r.ms,
                done: i + 1, total: m.files.length }, [proxy, strip, peak.buffer]);
       }
       if (cancelled) { engine.reset(); post({ type: 'cancelled' }); running = false; return; }

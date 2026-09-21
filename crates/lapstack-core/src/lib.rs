@@ -21,6 +21,7 @@
 //! the decode → align → fuse → depth pipeline.
 
 pub mod align;
+pub mod brightness;
 pub mod depth;
 pub mod fuse;
 #[cfg(feature = "gpu")]

@@ -42,6 +42,8 @@ pub struct Params {
     pub use_chroma: bool,
     pub depth_level: usize,
     pub align: bool,
+    /// Bring every frame to frame 0's brightness (one gain per channel, see lapstack_core::brightness).
+    pub brightness: bool,
     pub shift: bool,
     pub scale: bool,
     pub rotation: bool,
@@ -94,6 +96,7 @@ impl Default for Params {
             entropy_bins: 256,
             use_chroma: false,
             depth_level: 2,
+            brightness: true,
             align: true,
             shift: true,
             scale: true,
@@ -142,6 +145,12 @@ struct Run {
     /// Focus-peaking map: region energy of the level `peak.4` band, area-averaged
     /// to (peak.1 x peak.2) by factor peak.3.
     peak: (wgpu::Buffer, usize, usize, usize, usize),
+    /// Brightness normalisation: frame 0's channel means per 64x64 block
+    /// (blocks across, blocks down), the per-block partial sums of a frame, and
+    /// the gains found for each frame (applied again when a frame is re-warped).
+    ref_blk: (wgpu::Buffer, usize, usize),
+    bright: wgpu::Buffer,
+    gains: Vec<[f32; 3]>,
     ref_pyr: Option<LumaPyr>,
     tgt_pyr: Option<LumaPyr>,
     aligner: Option<Aligner>,
@@ -344,6 +353,36 @@ impl Engine {
             p.f3 = inv[1][1] as f32;
         }
         rec.dispatch("warp", [None, None, Some(&run.cur[0]), None, Some(&run.aff), Some(&run.up)], p, grid2(w, h));
+        // ---- brightness: frame 0 leaves its block means; every other frame's channel
+        // means over the pixels its warp covers are compared with frame 0's over the
+        // same pixels, and the gains (one per channel) are applied before anything
+        // reads the frame (see lapstack_core::brightness for why means)
+        let mut gain = [1f32; 3];
+        if run.params.brightness {
+            let (bx, by) = (run.ref_blk.1, run.ref_blk.2);
+            let pb = P { w: w as u32, h: h as u32, ow: bx as u32, oh: by as u32, ..p };
+            if run.count == 0 {
+                rec.dispatch("blk_mean", [Some(&run.cur[0]), None, Some(&run.ref_blk.0), None, None, None], pb, grid2(bx, by));
+            } else {
+                rec.dispatch("bright", [Some(&run.cur[0]), Some(&run.ref_blk.0), None, Some(&run.bright), Some(&run.aff), None], pb, (bx as u32, by as u32));
+                rec.submit();
+                let part = g.read_f32(&run.bright, bx * by * 8).await.map_err(|e| JsValue::from_str(&e))?;
+                let mut s = [0f64; 8];
+                for r in part.chunks_exact(8) {
+                    for k in 0..7 {
+                        s[k] += r[k] as f64;
+                    }
+                }
+                if s[3] >= 64.0 {
+                    gain = [0, 1, 2].map(|c| if s[c] > 1e-9 { (s[4 + c] / s[c]) as f32 } else { 1.0 }.clamp(lapstack_core::brightness::GAIN_MIN, lapstack_core::brightness::GAIN_MAX));
+                }
+                rec = g.rec();
+                if !lapstack_core::brightness::is_unity(gain) {
+                    rec.dispatch("gain3", [None, None, Some(&run.cur[0]), None, None, None], P { w: n as u32, f0: gain[0], f1: gain[1], f2: gain[2], ..Default::default() }, grid1(3 * n));
+                }
+            }
+        }
+        run.gains.push(gain);
         let (pw, ph, pf) = (run.proxy.1, run.proxy.2, run.proxy.3);
         rec.dispatch(
             "proxy",
@@ -434,6 +473,7 @@ impl Engine {
             sv.push(&JsValue::from_f64(v));
         }
         set(&o, "sim", sv);
+        set(&o, "gain", js_sys::Array::from_iter(gain.iter().map(|&v| JsValue::from_f64(v as f64))));
         set(&o, "ms", t1 - t0);
         Ok(o.into())
     }
@@ -562,6 +602,9 @@ impl Engine {
             p.f3 = inv[1][1] as f32;
         }
         rec.dispatch("warp", [None, None, Some(&run.cur[0]), None, Some(&run.aff), Some(&run.up)], p, grid2(w, h));
+        if let Some(gn) = run.gains.get(index).copied().filter(|gn| !lapstack_core::brightness::is_unity(*gn)) {   // the run's brightness gain for this frame
+            rec.dispatch("gain3", [None, None, Some(&run.cur[0]), None, None, None], P { w: (w * h) as u32, f0: gn[0], f1: gn[1], f2: gn[2], ..Default::default() }, grid1(3 * w * h));
+        }
         run.src_gpu = None;
         rec.dispatch(
             "dmap_acc",
@@ -641,6 +684,9 @@ impl Engine {
         }
         let mut rec = g.rec();
         rec.dispatch("warp", [None, None, Some(&run.cur[0]), None, Some(&run.aff), Some(&run.up)], p, grid2(w, h));
+        if let Some(gn) = run.gains.get(index).copied().filter(|gn| !lapstack_core::brightness::is_unity(*gn)) {   // the run's brightness gain for this frame
+            rec.dispatch("gain3", [None, None, Some(&run.cur[0]), None, None, None], P { w: (w * h) as u32, f0: gn[0], f1: gn[1], f2: gn[2], ..Default::default() }, grid1(3 * w * h));
+        }
         rec.submit();
         run.src_gpu = Some(index);
         if !readback {
@@ -1034,6 +1080,9 @@ impl Engine {
             aff: g.buffer_init("affine", bytemuck::cast_slice(&[0f32; 4])),
             proxy: (g.buffer("proxy", (pw * ph * 4) as u64), pw, ph, pf),
             peak: (g.buffer_f32("peak", kw * kh), kw, kh, kf, pl),
+            ref_blk: (g.buffer_f32("brightness reference", w.div_ceil(64) * h.div_ceil(64) * 3), w.div_ceil(64), h.div_ceil(64)),
+            bright: g.buffer_f32("brightness partials", w.div_ceil(64) * h.div_ceil(64) * 8),
+            gains: Vec::new(),
             ref_pyr,
             tgt_pyr,
             aligner,

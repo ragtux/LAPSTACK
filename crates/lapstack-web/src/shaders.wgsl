@@ -247,6 +247,71 @@ fn cost(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
     }
 }
 
+// ---- brightness normalisation (lapstack_core::brightness) ----
+// frame 0's channel means per 64x64 block: `a` = 3 planes (p.w x p.h) -> o[(by*p.ow+bx)*3 + c]
+@compute @workgroup_size(16, 16)
+fn blk_mean(@builtin(global_invocation_id) g: vec3<u32>) {
+    let bx = g.x; let by = g.y;
+    if (bx >= p.ow || by >= p.oh) { return; }
+    let n = p.w * p.h;
+    let x1 = min(bx * 64u + 64u, p.w); let y1 = min(by * 64u + 64u, p.h);
+    var s = vec3<f32>(0.0); var cnt = 0.0;
+    for (var y = by * 64u; y < y1; y++) {
+        for (var x = bx * 64u; x < x1; x++) {
+            let i = y * p.w + x;
+            s += vec3<f32>(a[i], a[n + i], a[2u * n + i]); cnt += 1.0;
+        }
+    }
+    let k = (by * p.ow + bx) * 3u;
+    o[k] = s.x / max(cnt, 1.0); o[k + 1u] = s.y / max(cnt, 1.0); o[k + 2u] = s.z / max(cnt, 1.0);
+}
+// one workgroup per 64x64 block, one thread per 4x4 patch: the frame `a`'s channel sums
+// over the block's pixels the warp covers (p.flag = 1: all of them; else the source point
+// p.f0..f3 / wt lies inside the frame), the count, and frame 0's block mean `b` times
+// the count — so both means are over the same pixels. e[block*8 ..] = [sr, sg, sb, n, ref_r*n, ref_g*n, ref_b*n, 0].
+var<workgroup> br: array<f32, 256>;
+var<workgroup> bg: array<f32, 256>;
+var<workgroup> bb: array<f32, 256>;
+var<workgroup> bn: array<f32, 256>;
+@compute @workgroup_size(16, 16)
+fn bright(@builtin(local_invocation_id) l: vec3<u32>, @builtin(local_invocation_index) t: u32, @builtin(workgroup_id) wg: vec3<u32>) {
+    let n = p.w * p.h;
+    var s = vec3<f32>(0.0); var cnt = 0.0;
+    let wm1 = f32(p.w - 1u); let hm1 = f32(p.h - 1u);
+    for (var dy = 0u; dy < 4u; dy++) {
+        for (var dx = 0u; dx < 4u; dx++) {
+            let x = wg.x * 64u + l.x * 4u + dx; let y = wg.y * 64u + l.y * 4u + dy;
+            if (x >= p.w || y >= p.h) { continue; }
+            if (p.flag == 0u) {
+                let sx = p.f0 * f32(x) + p.f1 * f32(y) + wt[0];
+                let sy = p.f2 * f32(x) + p.f3 * f32(y) + wt[1];
+                if (sx < 0.0 || sx > wm1 || sy < 0.0 || sy > hm1) { continue; }
+            }
+            let i = y * p.w + x;
+            s += vec3<f32>(a[i], a[n + i], a[2u * n + i]); cnt += 1.0;
+        }
+    }
+    br[t] = s.x; bg[t] = s.y; bb[t] = s.z; bn[t] = cnt;
+    workgroupBarrier();
+    for (var h = 128u; h > 0u; h = h >> 1u) {
+        if (t < h) { br[t] += br[t + h]; bg[t] += bg[t + h]; bb[t] += bb[t + h]; bn[t] += bn[t + h]; }
+        workgroupBarrier();
+    }
+    if (t == 0u) {
+        let blk = wg.y * p.ow + wg.x;
+        let k = blk * 8u;
+        e[k] = br[0]; e[k + 1u] = bg[0]; e[k + 2u] = bb[0]; e[k + 3u] = bn[0];
+        e[k + 4u] = b[blk * 3u] * bn[0]; e[k + 5u] = b[blk * 3u + 1u] * bn[0]; e[k + 6u] = b[blk * 3u + 2u] * bn[0]; e[k + 7u] = 0.0;
+    }
+}
+// multiply the three planes of `o` (p.w elements each) by p.f0, p.f1, p.f2
+@compute @workgroup_size(256)
+fn gain3(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = gid1(g, nwg); if (i >= 3u * p.w) { return; }
+    let c = i / p.w;
+    o[i] = o[i] * select(select(p.f2, p.f1, c == 1u), p.f0, c == 0u);
+}
+
 // ---- readbacks ----
 // rgba8 (packed u32 per pixel) from 3 planes in `a` (p.w x p.h) -> o (as u32 bit pattern via bitcast)
 @compute @workgroup_size(256)

@@ -31,9 +31,9 @@ const SLOT: u64 = 256;
 const XFER_SLICE: usize = 16 << 20;
 const UPLOAD_SLOTS: usize = 4;
 const SLOTS: usize = 2048;
-const KERNELS: [&str; 48] = [
+const KERNELS: [&str; 51] = [
     "red_h", "red_v", "exp_h", "exp_v", "energy", "win_h", "win_v", "sel", "clamp01", "copy_plane",
-    "warp", "cost", "to_rgba8", "to_rgb16", "proxy", "luma_u16", "luma_f32", "down1",
+    "warp", "cost", "to_rgba8", "to_rgb16", "proxy", "luma_u16", "luma_f32", "down1", "blk_mean", "bright", "gain3",
     // depth from focus (depth.rs)
     "conv_taps", "box_h", "box_v", "mul", "gf_ab", "gf_apply", "gf_var", "unpack_u16", "pack_u16",
     "peak_init", "peak_push", "peak_finish", "median3", "scale_clamp", "edge_w", "fgs_rows", "fgs_cols",

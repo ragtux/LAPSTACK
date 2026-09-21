@@ -8,7 +8,8 @@
 
 use crate::depth::{self, DepthParams};
 use crate::fuse::{FuseParams, Fuser};
-use crate::align::{self, AlignParams, CancelToken, Sim, Rect, common_area};
+use crate::align::{self, AlignParams, CancelToken, Rect, Sim, common_area};
+use crate::brightness;
 use crate::io::{self, Depth};
 use crate::pyramid::{crop_plane, Img3};
 use rayon::prelude::*;
@@ -31,6 +32,9 @@ pub struct Params {
     /// Crop the result (image, depth, confidence) to the area every aligned
     /// frame covers with real pixels (`align::common_area`).
     pub crop: bool,
+    /// Bring every frame to frame 0's brightness, one gain per channel over
+    /// the area the frame covers (`brightness`): exposure flicker.
+    pub brightness: bool,
 }
 
 impl Default for Params {
@@ -42,6 +46,7 @@ impl Default for Params {
             gpu: false,
             depth: Some(DepthParams::default()),
             crop: true,
+            brightness: true,
         }
     }
 }
@@ -132,14 +137,28 @@ struct LazyFrames {
     cur: Option<(usize, Img3)>,
     pending: VecDeque<(usize, JoinHandle<Result<(Img3, Depth), String>>)>,
     notes: Vec<String>,
+    /// Brightness normalisation: frame 0's channel means, and each frame's
+    /// gains once found (the depth pass decodes the frames a second time).
+    ref_means: Option<[f64; 3]>,
+    gains: Vec<Option<[f32; 3]>>,
 }
 
 impl LazyFrames {
-    fn open(paths: Vec<String>) -> Result<LazyFrames, String> {
+    fn open(paths: Vec<String>, brightness: bool) -> Result<LazyFrames, String> {
         let (f0, depth) = io::load_rgb(&paths[0])?;
-        let mut lf = LazyFrames { w: f0.w, h: f0.h, depth, paths, cur: Some((0, f0)), pending: VecDeque::new(), notes: Vec::new() };
+        let ref_means = brightness.then(|| brightness::means(&f0));
+        let n = paths.len();
+        let mut lf = LazyFrames { w: f0.w, h: f0.h, depth, paths, cur: Some((0, f0)), pending: VecDeque::new(), notes: Vec::new(), ref_means, gains: vec![None; n] };
+        lf.gains[0] = Some([1.0; 3]);
         lf.prefetch(1);
         Ok(lf)
+    }
+    /// One line on the gains found, for the log (after the run).
+    fn brightness_note(&self) -> Option<String> {
+        self.ref_means?;
+        let gs: Vec<f32> = self.gains.iter().flatten().flat_map(|g| g.iter().copied()).collect();
+        let (lo, hi) = gs.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+        Some(format!("brightness equalised to frame 0: gains {lo:.3} … {hi:.3}"))
     }
     /// Keep decoders running for frames `from..from+READ_AHEAD`.
     fn prefetch(&mut self, from: usize) {
@@ -174,6 +193,11 @@ impl LazyFrames {
                 "{}: {}x{} differs from frame 0 ({}x{}); frames must share one size",
                 self.paths[i], img.w, img.h, self.w, self.h
             ));
+        }
+        let mut img = img;
+        if let Some(r) = self.ref_means {
+            let g = *self.gains[i].get_or_insert_with(|| brightness::gains_to(r, &img));
+            brightness::apply(&mut img, g);
         }
         Ok(img)
     }
@@ -308,9 +332,17 @@ pub fn run(inputs: &[String], params: &Params, log: &mut dyn FnMut(String)) -> R
             };
             #[cfg(not(feature = "gpu"))]
             let res = align::align_stack(&frames, a.shift, a.scale, a.rotation, a.coarsen, &CancelToken::new(), &mut on_frame);
-            let (aligned, sims) = res.map_err(|_| "cancelled".to_string())?;
+            let (mut aligned, sims) = res.map_err(|_| "cancelled".to_string())?;
             drop(frames);
             log(format!("aligned  ({:.1}s)", t.elapsed().as_secs_f64()));
+            if params.brightness {
+                // one gain per channel brings each frame to frame 0's brightness over the area it covers
+                let (f0, rest) = aligned.split_at_mut(1);
+                let gains: Vec<[f32; 3]> = rest.par_iter().zip(&sims[1..]).map(|(f, s)| brightness::gains(&f0[0], f, s)).collect();
+                rest.par_iter_mut().zip(&gains).for_each(|(f, g)| brightness::apply(f, *g));
+                let shown: Vec<String> = gains.iter().enumerate().map(|(i, g)| format!("{}:{}", i + 1, brightness::describe(*g))).collect();
+                log(format!("brightness equalised to frame 0: {}", shown.join(" ")));
+            }
             if let Some(dir) = &params.save_aligned {
                 std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
                 for (i, f) in aligned.iter().enumerate() {
@@ -331,7 +363,7 @@ pub fn run(inputs: &[String], params: &Params, log: &mut dyn FnMut(String)) -> R
             Ok(Output { image, depth, conf, bit_depth, align: sims, levels, crop })
         }
         _ => {
-            let mut src = LazyFrames::open(inputs.clone())?;
+            let mut src = LazyFrames::open(inputs.clone(), params.brightness)?;
             log(format!(
                 "{} frames @ {}x{}, {}-bit ({} threads); alignment skipped, streaming from disk",
                 src.len(), src.w, src.h, src.depth.bits(), rayon::current_num_threads()
@@ -340,6 +372,9 @@ pub fn run(inputs: &[String], params: &Params, log: &mut dyn FnMut(String)) -> R
             let (image, depth, conf, levels) = fuse_and_depth(&mut src, params, log)?;
             for n in &src.notes {
                 log(format!("note: {n}"));
+            }
+            if let Some(n) = src.brightness_note() {
+                log(n);
             }
             Ok(Output { image, depth, conf, bit_depth, align: vec![Sim::id(); inputs.len()], levels, crop: None })
         }
