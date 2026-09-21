@@ -989,7 +989,7 @@ function setBrush(size, hard) {
   R.size = Math.min(2000, Math.max(2, Math.round(size))); R.hard = Math.min(0.95, Math.max(0, Math.round(hard * 100) / 100));
   $('br-size').textContent = `${R.size} px`; $('br-hard').textContent = R.hard.toFixed(2);
   $('br-size-in').value = String(sliderFromSize(R.size)); $('br-hard-in').value = String(Math.round(R.hard * 100));
-  saveParams(); draw();
+  saveParams(); drawSoon();   // the wheel and the sliders both run ahead of the frame rate: one redraw a frame
 }
 $('br-size-in').addEventListener('input', (e) => setBrush(sizeFromSlider(Number(e.target.value)), R.hard));
 $('br-hard-in').addEventListener('input', (e) => setBrush(R.size, Number(e.target.value) / 100));
@@ -1157,9 +1157,21 @@ function drawSoon() { if (drawReq) return; drawReq = requestAnimationFrame(() =>
 new ResizeObserver(() => { layoutScrub(); draw(); }).observe($('vwrap'));
 // One wheel rule for both panes: plain wheel scrubs whenever any visible layer
 // depends on a frame (shift = 10 frames); ctrl/cmd+wheel always zooms at the
-// cursor; plain wheel zooms only when nothing on screen is scrubbable.
+// cursor; plain wheel zooms only when nothing on screen is scrubbable. In
+// retouch mode alt takes the wheel first, for the brush.
 function onWheel(cv, e) {
   e.preventDefault();
+  // alt+wheel resizes the brush under the cursor (alt+shift: its hardness), so the size is set
+  // where it is about to be used, against the image, without the hand leaving the mouse. Alt is
+  // the one modifier the wheel had left, and the ring redraws with every notch. Size scales
+  // geometrically, like the zoom and like [ / ], but never by less than a pixel: 20 % of a small
+  // brush rounds back to the size it started at, and the wheel would do nothing.
+  if (R.on && e.altKey) {
+    const f = Math.pow(1.0015, -e.deltaY);
+    if (e.shiftKey) setBrush(R.size, R.hard - e.deltaY * 0.0004);
+    else setBrush(f > 1 ? Math.max(R.size + 1, R.size * f) : Math.min(R.size - 1, R.size * f), R.hard);
+    return;
+  }
   // retouch is no exception — the Source pane is scrubbable, so the wheel picks the
   // frame to paint from — except mid-stroke, where changing the source under the brush
   // would be nobody's intent: there the wheel keeps zooming.

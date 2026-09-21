@@ -54,6 +54,8 @@
             <div data-when="canretouch"><span><kbd>R</kbd></span><span>retouch on / off</span></div>
             <div data-when="retouch"><span><kbd>Esc</kbd></span><span>leave retouch</span></div>
             <div data-when="retouch"><span><kbd>[</kbd><kbd>]</kbd></span><span>brush size</span></div>
+            <div data-when="retouch"><span><kbd>Alt</kbd><kbd>wheel</kbd></span><span>brush size</span></div>
+            <div data-when="retouch"><span><kbd>Alt</kbd><kbd>⇧</kbd><kbd>wheel</kbd></span><span>brush hardness</span></div>
             <div data-when="retouch"><span><kbd>Ctrl</kbd><kbd>wheel</kbd></span><span>zoom (wheel scrubs)</span></div>
             <div data-when="retouch"><span><kbd>Ctrl</kbd><kbd>Z</kbd></span><span>undo</span></div>
             <div data-when="retouch"><span><kbd>Ctrl</kbd><kbd>⇧</kbd><kbd>Z</kbd></span><span>redo</span></div>
@@ -117,9 +119,9 @@
       <button class="section" type="button" data-sec="brush">Brush</button>
       <div class="sec-body">
         <label>size <span class="val" id="br-size">100</span></label>
-        <input type="range" id="br-size-in" min="0" max="100" value="50" title="[ / ]">
+        <input type="range" id="br-size-in" min="0" max="100" value="50" title="[ / ] or alt+wheel over the image">
         <label>hardness <span class="val" id="br-hard">0.50</span></label>
-        <input type="range" id="br-hard-in" min="0" max="95" value="50">
+        <input type="range" id="br-hard-in" min="0" max="95" value="50" title="alt+shift+wheel over the image">
       </div>
       <button class="section" type="button" data-sec="brush-source">Source</button>
       <div class="sec-body">
