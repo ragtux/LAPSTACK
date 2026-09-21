@@ -1,10 +1,10 @@
 // Copyright (c) 2026 RAGTUX LLC
 // INTERNAL USE ONLY
 
-//! Orchestration: decode → (align) → fuse → (depth). Frames are consumed one
-//! at a time, so without alignment the stack is streamed from disk with a
-//! bounded read-ahead and memory stays at a few frames regardless of stack
-//! size (the depth pass streams the frames a second time).
+//! Orchestration: decode → (align) → fuse → (depth) → (slabs). Frames are
+//! consumed one at a time, so without alignment the stack is streamed from
+//! disk with a bounded read-ahead and memory stays at a few frames regardless
+//! of stack size (the depth pass, and each slab, stream the frames again).
 
 use crate::depth::{self, DepthParams};
 use crate::fuse::{FuseParams, Fuser};
@@ -35,6 +35,42 @@ pub struct Params {
     /// Bring every frame to frame 0's brightness, one gain per channel over
     /// the area the frame covers (`brightness`): exposure flicker.
     pub brightness: bool,
+    /// Slabs (Zerene's slabbing): after the result, fuse every run of `size`
+    /// consecutive frames overlapping by `overlap` on its own, with the same
+    /// settings, and hand each to `run_with`'s callback — thick planes of
+    /// focus to retouch from elsewhere. `None` = no slabs.
+    pub slabs: Option<(usize, usize)>,
+}
+
+/// The slab ranges of a `count`-frame stack: `size` frames each, consecutive
+/// slabs overlapping by `overlap` (clamped below `size`, so every slab
+/// advances), the last one cut short at the last frame.
+pub fn slab_ranges(count: usize, size: usize, overlap: usize) -> Vec<(usize, usize)> {
+    let mut slabs = Vec::new();
+    if count == 0 {
+        return slabs;
+    }
+    let size = size.clamp(1, count);
+    let overlap = overlap.min(size - 1);
+    let mut lo = 0;
+    loop {
+        let hi = (lo + size - 1).min(count - 1);
+        slabs.push((lo, hi));
+        if hi + 1 >= count {
+            return slabs;
+        }
+        lo = hi + 1 - overlap;
+    }
+}
+
+/// One fused slab, as `run_with` hands it out: cropped like the result.
+pub struct Slab<'a> {
+    pub index: usize,
+    pub count: usize,
+    pub lo: usize,
+    pub hi: usize,
+    pub image: &'a Img3,
+    pub bit_depth: Depth,
 }
 
 impl Default for Params {
@@ -47,6 +83,7 @@ impl Default for Params {
             depth: Some(DepthParams::default()),
             crop: true,
             brightness: true,
+            slabs: None,
         }
     }
 }
@@ -226,6 +263,19 @@ fn fuse_all(
     gpu: bool,
     log: &mut dyn FnMut(String),
 ) -> Result<(Img3, Vec<f32>, usize), String> {
+    let last = src.len() - 1;
+    fuse_range(src, 0, last, params, gpu, log)
+}
+
+/// Fuse frames `lo..=hi` of the source.
+fn fuse_range(
+    src: &mut dyn FrameSource,
+    lo: usize,
+    hi: usize,
+    params: &FuseParams,
+    gpu: bool,
+    log: &mut dyn FnMut(String),
+) -> Result<(Img3, Vec<f32>, usize), String> {
     let (w, h) = src.dims();
     #[cfg(feature = "gpu")]
     let mut fuser = if gpu {
@@ -242,8 +292,9 @@ fn fuse_all(
     };
     let levels = fuser.levels();
     log(format!(
-        "fusing {} frames on the {}: {} band-pass levels + residual ({}x{}), energy window {}x{}, top rule {:?}",
-        src.len(),
+        "fusing {} frames{} on the {}: {} band-pass levels + residual ({}x{}), energy window {}x{}, top rule {:?}",
+        hi + 1 - lo,
+        if lo == 0 && hi + 1 == src.len() { String::new() } else { format!(" ({lo}..{hi})") },
         match fuser { AnyFuser::Cpu(_) => "CPU", #[cfg(feature = "gpu")] AnyFuser::Gpu(_) => "GPU" },
         levels,
         {
@@ -261,10 +312,10 @@ fn fuse_all(
         params.top_rule
     ));
     let t = Instant::now();
-    for i in 0..src.len() {
+    for i in lo..=hi {
         let f = src.get(i)?;
         fuser.push(&f)?;
-        log(format!("  frame {:>3}/{} folded  ({:.1}s)", i + 1, src.len(), t.elapsed().as_secs_f64()));
+        log(format!("  frame {:>3}/{} folded  ({:.1}s)", i + 1 - lo, hi + 1 - lo, t.elapsed().as_secs_f64()));
     }
     let (img, depth) = fuser.finish()?;
     log(format!("collapsed  ({:.1}s)", t.elapsed().as_secs_f64()));
@@ -287,8 +338,41 @@ fn fuse_and_depth(
     }
 }
 
+/// After the result: the slabs of `Params::slabs`, each fused on its own
+/// over the same (aligned, equalised) frames, cropped like the result, and
+/// handed to `on_slab` one at a time — none is kept.
+fn fuse_slabs(
+    src: &mut dyn FrameSource,
+    params: &Params,
+    bit_depth: Depth,
+    crop: Option<&Rect>,
+    log: &mut dyn FnMut(String),
+    on_slab: &mut dyn FnMut(Slab<'_>) -> Result<(), String>,
+) -> Result<(), String> {
+    let Some((size, overlap)) = params.slabs else { return Ok(()) };
+    let ranges = slab_ranges(src.len(), size, overlap);
+    log(format!("{} slabs of {size} frames, overlap {overlap}", ranges.len()));
+    for (k, &(lo, hi)) in ranges.iter().enumerate() {
+        log(format!("slab {}/{}: frames {lo}..{hi}", k + 1, ranges.len()));
+        let (image, _, _) = fuse_range(src, lo, hi, &params.fuse, params.gpu, log)?;
+        let image = match crop { Some(r) => image.crop(r), None => image };
+        on_slab(Slab { index: k, count: ranges.len(), lo, hi, image: &image, bit_depth })?;
+    }
+    Ok(())
+}
+
 /// Run the whole pipeline. `log` receives human-readable progress lines.
 pub fn run(inputs: &[String], params: &Params, log: &mut dyn FnMut(String)) -> Result<Output, String> {
+    run_with(inputs, params, log, &mut |_| Ok(()))
+}
+
+/// `run`, with every slab of `Params::slabs` handed to `on_slab` as it is fused.
+pub fn run_with(
+    inputs: &[String],
+    params: &Params,
+    log: &mut dyn FnMut(String),
+    on_slab: &mut dyn FnMut(Slab<'_>) -> Result<(), String>,
+) -> Result<Output, String> {
     if inputs.is_empty() {
         return Err("no input images; use --help".into());
     }
@@ -360,6 +444,7 @@ pub fn run(inputs: &[String], params: &Params, log: &mut dyn FnMut(String)) -> R
             } else {
                 (image, depth, conf, None)
             };
+            fuse_slabs(&mut src, params, bit_depth, crop.as_ref(), log, on_slab)?;
             Ok(Output { image, depth, conf, bit_depth, align: sims, levels, crop })
         }
         _ => {
@@ -370,6 +455,7 @@ pub fn run(inputs: &[String], params: &Params, log: &mut dyn FnMut(String)) -> R
             ));
             let bit_depth = src.depth;
             let (image, depth, conf, levels) = fuse_and_depth(&mut src, params, log)?;
+            fuse_slabs(&mut src, params, bit_depth, None, log, on_slab)?;
             for n in &src.notes {
                 log(format!("note: {n}"));
             }
@@ -377,6 +463,29 @@ pub fn run(inputs: &[String], params: &Params, log: &mut dyn FnMut(String)) -> R
                 log(n);
             }
             Ok(Output { image, depth, conf, bit_depth, align: vec![Sim::id(); inputs.len()], levels, crop: None })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slab_ranges;
+
+    #[test]
+    fn slabs_cover_the_stack_and_overlap_as_asked() {
+        assert_eq!(slab_ranges(8, 3, 1), vec![(0, 2), (2, 4), (4, 6), (6, 7)]);
+        assert_eq!(slab_ranges(20, 10, 2), vec![(0, 9), (8, 17), (16, 19)]);
+        assert_eq!(slab_ranges(8, 8, 0), vec![(0, 7)]);
+        assert_eq!(slab_ranges(8, 20, 5), vec![(0, 7)]);        // a slab larger than the stack is the stack
+        assert_eq!(slab_ranges(5, 2, 7), vec![(0, 1), (1, 2), (2, 3), (3, 4)]);   // overlap clamped below the size
+        assert_eq!(slab_ranges(0, 3, 1), vec![]);
+        for (count, size, overlap) in [(100, 10, 2), (7, 3, 2), (9, 4, 0), (1, 5, 3)] {
+            let r = slab_ranges(count, size, overlap);
+            assert_eq!(r[0].0, 0);
+            assert_eq!(r.last().unwrap().1, count - 1);
+            for w in r.windows(2) {
+                assert!(w[1].0 > w[0].0 && w[1].0 <= w[0].1 + 1, "{r:?}");   // advances, leaves no gap
+            }
         }
     }
 }

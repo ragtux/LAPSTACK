@@ -3,7 +3,7 @@
 
 //! lapstack — Laplacian-pyramid focus stacking CLI.
 
-use lapstack_core::{DepthParams, FocusMeasure, Params, TopRule, Upsample, run};
+use lapstack_core::{DepthParams, FocusMeasure, Params, TopRule, Upsample, run_with};
 use lapstack_core::io;
 use std::time::Instant;
 
@@ -25,6 +25,7 @@ fn main() {
     let mut a = p.align.unwrap();
     let mut dp = DepthParams::default();
     let mut depth_mode = "dff".to_string();
+    let mut slab_dir: Option<String> = None;
 
     let mut i = 0;
     let next = |i: &mut usize| -> String {
@@ -59,6 +60,14 @@ fn main() {
             "--no-metadata" => metadata = false,
             "--no-crop" => p.crop = false,
             "--no-brightness" => p.brightness = false,
+            "--slabs" => {
+                let s = next(&mut i);
+                let mut it = s.split(':');
+                let size = it.next().and_then(|v| v.parse().ok()).filter(|&v| v >= 1).unwrap_or_else(|| fail("--slabs: SIZE[:OVERLAP], SIZE >= 1"));
+                let overlap = match it.next() { Some(o) => o.parse().unwrap_or_else(|_| fail("--slabs: SIZE[:OVERLAP]")), None => 2 };
+                p.slabs = Some((size, overlap));
+            }
+            "--slab-dir" => slab_dir = Some(next(&mut i)),
             "--depth-raw" => depth_raw = Some(next(&mut i)),
             "--depth" => {
                 depth_mode = next(&mut i);
@@ -103,11 +112,28 @@ fn main() {
     p.align = do_align.then_some(a);
     p.depth = (depth_mode == "dff").then_some(dp);
 
+    if inputs.is_empty() {
+        fail("no input images; use --help");
+    }
+
     let t0 = Instant::now();
     let mut log = |s: String| eprintln!("[lapstack] {s}");
-    let out = run(&inputs, &p, &mut log).unwrap_or_else(|e| fail(&e));
-    // the first frame's EXIF, ICC profile and XMP go into the fused image
+    // the first frame's EXIF, ICC profile and XMP go into the fused image (and the slabs)
     let meta = if metadata { Some(io::load_meta(&inputs[0]).unwrap_or_else(|e| fail(&e))) } else { None };
+    // slabs: written as they are fused, in the output's format, to --slab-dir [<output stem>_slabs]
+    let stem = match output.rfind('.') { Some(k) => &output[..k], None => &output[..] };
+    let ext = match output.rfind('.') { Some(k) => &output[k..], None => ".png" };
+    let slab_dir = slab_dir.unwrap_or_else(|| format!("{stem}_slabs"));
+    let mut on_slab = |s: lapstack_core::Slab<'_>| -> Result<(), String> {
+        if s.index == 0 {
+            std::fs::create_dir_all(&slab_dir).map_err(|e| format!("cannot create {slab_dir}: {e}"))?;
+        }
+        let path = format!("{slab_dir}/slab_{:02}_{:03}-{:03}{ext}", s.index + 1, s.lo, s.hi);
+        io::save_rgb(s.image, &path, s.bit_depth, meta.as_ref())?;
+        eprintln!("[lapstack] slab {}/{} (frames {}..{}) -> {path}", s.index + 1, s.count, s.lo, s.hi);
+        Ok(())
+    };
+    let out = run_with(&inputs, &p, &mut log, &mut on_slab).unwrap_or_else(|e| fail(&e));
     if let Some(m) = &meta {
         eprintln!("[lapstack] metadata from {}: {}", inputs[0], m.describe());
     }
@@ -176,6 +202,9 @@ fn help() {
            --no-metadata          do not copy the first frame's EXIF / ICC profile / XMP into the output\n\
            --no-crop              keep the full frame instead of cropping to the area every aligned frame covers\n\
            --no-brightness        do not equalise the frames' brightness to frame 0 (exposure flicker)\n\
+           --slabs SIZE[:OVERLAP] also fuse slabs of SIZE consecutive frames, overlapping by OVERLAP [2],\n\
+                                  each on its own (Zerene's slabbing): thick planes of focus to retouch from\n\
+           --slab-dir DIR         where the slabs go, in the output's format [<output stem>_slabs]\n\
            --depth MODE           dff = depth from focus (default) | winner = pyramid winner map\n\
            --depth-level L        (winner) pyramid level the map is read from [2 = 1/4 res]\n\
          Depth from focus (Jeon et al. 2019 focus measure, guided-filter aggregation,\n\

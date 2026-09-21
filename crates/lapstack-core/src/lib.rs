@@ -36,4 +36,4 @@ pub use depth::{DepthMap, DepthParams, FocusMeasure, Upsample};
 pub use fuse::{FuseParams, Fuser, TopRule};
 pub use io::Depth;
 pub use pyramid::Img3;
-pub use stack::{FrameSource, Output, Params, run};
+pub use stack::{FrameSource, Output, Params, Slab, run, run_with, slab_ranges};

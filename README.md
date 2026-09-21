@@ -82,7 +82,17 @@ Nelder-Mead search, chained sequentially to frame 0. `--align-coarsen N`
 stops N levels short of full resolution (the transform is resolution
 independent, so this is a large speed-up at sub-pixel accuracy);
 `--no-shift/--no-scale/--no-rotation` restrict the model; `--save-aligned DIR`
-writes the registered frames. Where a warped frame does not reach, the warp
+writes the registered frames.
+
+**Slabs** (`--slabs SIZE[:OVERLAP]`, `--slab-dir DIR`): Zerene's slabbing
+for the native path — after the result, every run of SIZE consecutive
+frames overlapping by OVERLAP (default 2) is fused on its own with the same
+settings over the same aligned, equalised frames, cropped like the result,
+and written as it is made to DIR (default `<output stem>_slabs`) in the
+output's format with the same metadata, as `slab_01_000-009.tif` and so on
+(0-based frame indices). Slabs are thick planes of focus to retouch from in
+another editor; the browser app makes them on demand instead (below). In the
+streaming path each slab streams its frames from disk again. Where a warped frame does not reach, the warp
 repeats its edge, so the output (image, depth and confidence maps) is
 **cropped to the largest rectangle every frame covers** with real pixels
 (`align::common_area`: each frame's sound area is a convex quad, cut per pixel

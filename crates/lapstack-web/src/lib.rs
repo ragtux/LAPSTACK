@@ -711,25 +711,14 @@ impl Engine {
             return Err(JsValue::from_str("finish the run first"));
         }
         let n = run.w * run.h;
-        let size = size.clamp(1, run.count.max(1));
-        let overlap = overlap.min(size - 1);
-        let mut slabs = Vec::new();
-        let mut lo = 0;
-        loop {
-            let hi = (lo + size - 1).min(run.count - 1);
-            slabs.push((lo, hi));
-            if hi + 1 >= run.count {
-                break;
-            }
-            lo = hi + 1 - overlap;
-        }
+        let slabs = lapstack_core::slab_ranges(run.count, size, overlap);
         let acc = g.buffer_f32("slab render acc", 3 * n);
         let wt = g.buffer_f32("slab render weights", n);
         let mut rec = g.rec();
         rec.clear(&acc);
         rec.clear(&wt);
         rec.submit();
-        log(&format!("[lapstack] depth-map rendering from {} slabs of {size} frames, overlap {overlap}", slabs.len()));
+        log(&format!("[lapstack] depth-map rendering from {} slabs of {size} frames, overlap {overlap}: {slabs:?}", slabs.len()));
         let out = js_sys::Array::new();
         for &(lo, hi) in &slabs {
             out.push(&js_sys::Array::from_iter([JsValue::from(lo as u32), JsValue::from(hi as u32)]));
