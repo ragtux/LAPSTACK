@@ -1140,15 +1140,19 @@ function paintMarks(c, d, paintPane) {
   drawCursor(c, d);
   if (ctrlHeld) drawZoom(c, d);
 }
-// Pane labels: a chip over every visible image. 'a' is the view layer, 'b' the
-// compare partner, plain = neutral (the retouch source). Positions are inline so
-// one element serves the pane centres, the swipe divider and the centred single view.
+// Pane labels: block letters over every visible image. 'a' is the view layer, 'b' the
+// compare partner, plain = neutral (the retouch source). Positions are inline so one
+// element serves the pane centres, the swipe divider and the centred single view; a
+// " — hint" suffix in the text becomes a smaller line under the name.
 function showLabel(el, text, kind, pos) {
   el.hidden = !text;
   if (!text) return;
-  el.textContent = text;
-  el.className = 'plab' + (kind ? ' ' + kind : '');
-  // the chip takes its layer's group colour (kind 'a' = the view, 'b' = the compare partner)
+  const [name, hint] = text.split(' — ');
+  el.textContent = name;
+  if (hint) { const h = document.createElement('span'); h.className = 'hint'; h.textContent = hint; el.append(h); }
+  // letters on the divider line up against it; everything else centres on its anchor
+  el.className = 'plab' + (kind ? ' ' + kind : '') + (pos.right ? ' r' : pos.left && !pos.transform ? ' l' : '');
+  // the box and letters take their layer's group colour (kind 'a' = the view, 'b' = the compare partner)
   const g = kind === 'a' ? groupOf(st.view) : kind === 'b' ? groupOf(st.cmp) : null;
   if (g) el.dataset.group = g; else delete el.dataset.group;
   el.style.left = pos.left || 'auto';
@@ -1174,7 +1178,7 @@ function draw() {
   // but never under the vs toggle / compare row floating at the top of the canvas
   const vs = $('ab').parentElement, vr = $('vh-right');
   const hdr = $('vhead').offsetTop + Math.max(vs.offsetTop + vs.offsetHeight, vr.offsetTop + vr.offsetHeight);
-  $('panelabels').style.top = `${Math.max(hdr, Math.min(st.oy, ch - 40))}px`;
+  $('panelabels').style.top = `${Math.max(hdr, Math.min(st.oy, ch - 64))}px`;
   if (split) {
     // two panes, one transform: view | partner (retouch: paint target | Source, never flipped)
     const A = layerFor(st.view), B = layerFor(st.cmp);

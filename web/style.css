@@ -224,12 +224,16 @@ body.log-collapsed #toasts { bottom: 46px; }
 #keys-list > div > span:last-child { white-space: nowrap; line-height: 20px; }
 #keys kbd { display: inline-block; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 4px; background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.22); box-shadow: 0 1px 0 rgba(0,0,0,.5); color: #fff; font: 600 var(--fs-sm)/18px var(--font); text-align: center; }
 #keys.collapsed #keys-list { display: none; }
-/* pane labels: one chip per visible image (pane centres when split, hugging the
-   divider in swipe, centred when a single image fills the canvas); draw() keeps
-   them below the header row */
+/* pane labels: block letters floating over every visible image (pane centres when split,
+   hugging the divider in swipe, centred when a single image fills the canvas); draw() keeps
+   them below the header row. White letters on a box filled with the layer's group colour
+   (Source orange, Stack blue, Depth green; dark grey for a neutral label), stroked in white
+   and hugging the letters. A hint ("drag to paint", "loading full res") sits under the name in
+   smaller mixed case */
 #panelabels { position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; overflow: hidden; z-index: 2; }
-.plab { position: absolute; top: 8px; padding: 4px 12px; border-radius: 6px; font-size: var(--fs-lg); font-weight: 600; line-height: 1.5; color: #fff; background: rgba(20,20,22,.82); border: 1px solid rgba(255,255,255,.18); white-space: nowrap; box-shadow: 0 1px 6px rgba(0,0,0,.55); }
-.plab.a, .plab.b { background: var(--gc, var(--accent)); border-color: rgba(255,255,255,.3); }
+.plab { position: absolute; top: 8px; display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 5px 10px 7px; border: 3px solid #fff; border-radius: 6px; background: var(--gc, #333); color: #fff; font-size: 34px; font-weight: 700; line-height: 1; text-transform: uppercase; letter-spacing: .1em; white-space: nowrap; }
+.plab.l { align-items: flex-start; } .plab.r { align-items: flex-end; }
+.plab .hint { font-size: var(--fs-lg); font-weight: 600; line-height: 1.2; text-transform: none; letter-spacing: 0; }
 /* frame scrubber: vertical slider overlaid on the canvas, centred on its left edge; frame 1
    at the top like the filmstrip, so wheel-down and slider-down both advance. The frame
    counter (e.g. 49/100) is the more useful readout, so it gets its own large box directly
