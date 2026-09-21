@@ -57,7 +57,13 @@ fn fill<T: Copy + Into<f32> + Sync>(o: &mut Img3, raw: &[T], stride: usize, inv:
 }
 
 /// Decode an image into a normalized f32 `Img3`, returning its native depth.
+/// A camera raw (`raw::is_raw`) is developed (`raw::develop`): 16-bit.
 pub fn load_rgb(path: &str) -> Result<(Img3, Depth), String> {
+    if crate::raw::is_raw(path) {
+        let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        let dynimg = crate::raw::develop(&bytes).map_err(|e| format!("cannot develop {path}: {e}"))?;
+        return Ok(img3_of(dynimg));
+    }
     // Use a reader with limits disabled: the default decode memory cap rejects
     // full-resolution 16-bit frames (a 45 MP RGB16 image is ~270 MB decoded).
     let mut reader = image::ImageReader::open(path)
@@ -66,6 +72,11 @@ pub fn load_rgb(path: &str) -> Result<(Img3, Depth), String> {
         .map_err(|e| format!("cannot read {path}: {e}"))?;
     reader.no_limits();
     let dynimg = reader.decode().map_err(|e| format!("cannot decode {path}: {e}"))?;
+    Ok(img3_of(dynimg))
+}
+
+/// A decoded image as a normalized f32 `Img3` and its native depth.
+fn img3_of(dynimg: DynamicImage) -> (Img3, Depth) {
     let depth = Depth::of(&dynimg);
     let cc = dynimg.color().channel_count() as usize;
     let (w, h) = (dynimg.width() as usize, dynimg.height() as usize);
@@ -81,7 +92,7 @@ pub fn load_rgb(path: &str) -> Result<(Img3, Depth), String> {
         (Depth::Eight, 4) => fill(&mut o, &dynimg.into_rgba8().into_raw(), 4, inv8),
         (Depth::Eight, _) => fill(&mut o, &dynimg.into_rgb8().into_raw(), 3, inv8),
     }
-    Ok((o, depth))
+    (o, depth)
 }
 
 /// Read the metadata (EXIF, ICC profile, XMP) of an input file, see `meta`.
@@ -99,6 +110,11 @@ pub fn load_meta(path: &str) -> Result<Meta, String> {
 /// file read (a PNG with its chunks after the image data).
 pub fn load_capture_time(path: &str) -> Result<Option<f64>, String> {
     use std::io::{Read, Seek, SeekFrom};
+    // a raw: its TIFF structure, where it has one (NEF, CR2, ARW, DNG, …), else its own reader
+    if crate::raw::is_raw(path) {
+        let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        return Ok(meta::extract(&bytes).capture_time().or_else(|| crate::raw::capture_time(&bytes)));
+    }
     const HEAD: u64 = 4 << 20;
     const WINDOW: u64 = 4 << 20;
     let err = |e: std::io::Error| format!("cannot read {path}: {e}");

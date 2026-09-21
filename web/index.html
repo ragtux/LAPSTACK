@@ -11,7 +11,7 @@
   <div id="tb-left">
     <span class="title">lapstack</span>
     <button id="add">Add frames…</button>
-    <input id="file" type="file" multiple accept=".png,.jpg,.jpeg,.tif,.tiff,image/png,image/jpeg,image/tiff" hidden>
+    <input id="file" type="file" multiple accept=".png,.jpg,.jpeg,.tif,.tiff,.ari,.arw,.cr2,.cr3,.crm,.crw,.dcr,.dcs,.dng,.erf,.iiq,.kdc,.mef,.mos,.mrw,.nef,.nrw,.orf,.ori,.pef,.raf,.raw,.rw2,.rwl,.srw,.3fr,.fff,.x3f,.qtk,image/png,image/jpeg,image/tiff" hidden>
     <button id="addf" title="add every image in a folder (and its subfolders): with the batch split by folder, each folder is a stack">Add folder…</button>
     <input id="dir" type="file" webkitdirectory hidden>
     <button id="clear">Clear</button>
@@ -200,7 +200,7 @@
     <div class="sec-body">
       <div class="dim small">When a run starts, the last result's LAP and DFR images stay on as results — to compare with, to brush from and to save — up to the memory below, the oldest going first. A saved result can be loaded as one too.</div>
       <div id="kept-list"></div>
-      <div class="row"><button id="kept-add" title="load a saved result (PNG, JPEG or TIFF) as one more: an earlier session's, or another program's">Load result…</button><input type="file" id="kept-file" accept=".png,.jpg,.jpeg,.tif,.tiff,image/png,image/jpeg,image/tiff" hidden></div>
+      <div class="row"><button id="kept-add" title="load a saved result (PNG, JPEG or TIFF) as one more: an earlier session's, or another program's">Load result…</button><input type="file" id="kept-file" accept=".png,.jpg,.jpeg,.tif,.tiff,.ari,.arw,.cr2,.cr3,.crm,.crw,.dcr,.dcs,.dng,.erf,.iiq,.kdc,.mef,.mos,.mrw,.nef,.nrw,.orf,.ori,.pef,.raf,.raw,.rw2,.rwl,.srw,.3fr,.fff,.x3f,.qtk,image/png,image/jpeg,image/tiff" hidden></div>
       <label class="stepper" title="the memory the kept results may take in the engine (a 45 MP image is 270 MB); over it, the oldest are let go">results kept MB <span><button data-step="p-kept" data-d="-256">−</button><span id="p-kept" data-min="0" data-max="8192">1536</span><button data-step="p-kept" data-d="256">+</button></span></label>
     </div>
     <button class="section" type="button" data-sec="view">View</button>

@@ -73,7 +73,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 
 /// `YYYY:MM:DD HH:MM:SS` (EXIF) or `YYYY-MM-DDTHH:MM:SS[.fff]` (XMP), the rest
 /// of the string ignored; `sub` an EXIF SubSecTime string ("123" = .123 s).
-fn parse_datetime(s: &str, sub: Option<&str>) -> Option<f64> {
+pub(crate) fn parse_datetime(s: &str, sub: Option<&str>) -> Option<f64> {
     let b = s.as_bytes();
     if b.len() < 19 {
         return None;

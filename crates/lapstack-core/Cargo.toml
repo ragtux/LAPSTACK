@@ -10,8 +10,12 @@ rayon.workspace = true
 # metadata pass-through (meta.rs): PNG iCCP / iTXt are zlib streams
 flate2 = "1"
 cudarc = { workspace = true, optional = true }
+rawler = { workspace = true, optional = true }
 
 [features]
+default = ["raw"]
+# camera raw input (raw.rs): NEF, CR2/CR3, ARW, DNG, RAF, … developed with rawler
+raw = ["dep:rawler"]
 # CUDA fusion + CUDA aligner cost search (`gpu.rs`). Runtime-loaded: no CUDA
 # toolkit needed at build time.
 gpu = ["dep:cudarc"]

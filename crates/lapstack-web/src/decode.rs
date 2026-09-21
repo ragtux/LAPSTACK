@@ -1,5 +1,6 @@
-//! Decode PNG/JPEG/TIFF bytes to interleaved RGB u16 (8-bit inputs widened by
-//! ×257), the form the `warp` kernel samples directly.
+//! Decode PNG/JPEG/TIFF bytes — or develop a camera raw's (`lapstack_core::raw`) —
+//! to interleaved RGB u16 (8-bit inputs widened by ×257), the form the `warp`
+//! kernel samples directly.
 
 use image::ColorType;
 use std::io::Cursor;
@@ -12,12 +13,25 @@ pub struct Frame {
     pub rgb: Vec<u16>,
 }
 
+/// `raw`: the bytes are a camera raw's (by the file's extension: a NEF or a DNG
+/// is a TIFF container the image crate would take for its thumbnail).
+pub fn decode_any(bytes: &[u8], raw: bool) -> Result<Frame, String> {
+    if raw {
+        return Ok(frame_of(lapstack_core::raw::develop(bytes)?));
+    }
+    decode(bytes)
+}
+
 pub fn decode(bytes: &[u8]) -> Result<Frame, String> {
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| format!("unrecognised image: {e}"))?;
     reader.no_limits();
     let img = reader.decode().map_err(|e| format!("decode: {e}"))?;
+    Ok(frame_of(img))
+}
+
+pub fn frame_of(img: image::DynamicImage) -> Frame {
     let (w, h) = (img.width() as usize, img.height() as usize);
     let bits = match img.color() {
         ColorType::L16 | ColorType::La16 | ColorType::Rgb16 | ColorType::Rgba16 => 16,
@@ -32,5 +46,5 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, String> {
     if n % 2 == 1 {
         rgb.push(0);
     }
-    Ok(Frame { w, h, bits, rgb })
+    Frame { w, h, bits, rgb }
 }

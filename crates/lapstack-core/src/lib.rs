@@ -32,6 +32,7 @@ pub mod gpu;
 pub mod io;
 pub mod mesh;
 pub mod meta;
+pub mod raw;
 pub mod pyramid;
 pub mod stack;
 pub mod view;

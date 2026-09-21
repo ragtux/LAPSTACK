@@ -37,7 +37,7 @@ cargo build --release --features gpu -p lapstack-cli               # CUDA fusion
 target/release/lapstack --gpu --gpu-align --align-coarsen 2 -o out.png frames/*.tif
 ```
 
-Input is PNG, JPEG or TIFF, 8- or 16-bit; the output keeps the input bit
+Input is PNG, JPEG or TIFF, 8- or 16-bit, or a camera raw; the output keeps the input bit
 depth (16-bit needs PNG or TIFF) and carries the **first frame's metadata**:
 its EXIF (camera, lens, exposure, date, orientation, resolution — rebuilt
 without the MakerNote and thumbnail, Software set to lapstack, the pixel
@@ -125,6 +125,30 @@ the pause before each — and stops: worth a look before hours of stacking,
 and the way to see whether the split is what you meant. Reading the times
 costs little: only the head of each file is read, or, for a TIFF whose IFD
 follows the pixels, a window around that IFD (100 frames of 274 MB in 0.2 s).
+
+**Camera raw input** (`raw.rs`): NEF, CR2 and CR3, ARW, DNG, RAF, ORF, RW2,
+PEF, IIQ, 3FR and the rest of what [rawler](https://github.com/dnglab/dnglab)
+(dnglab's library) decodes are taken as frames, natively and in the browser,
+by their extension. Each is developed as shot — black and white levels,
+demosaic, the white balance the camera recorded, the camera's colour matrix
+to sRGB, the sRGB curve — into the 16-bit RGB every other input becomes,
+turned the way the EXIF orientation says; a monochrome sensor gives gray.
+There is no exposure or tone adjustment: the frames of a stack are shot
+alike, and what the stack needs is that they are developed alike. When the
+look matters, develop the stack in a raw converter first and give lapstack
+its TIFFs. Developing costs more than decoding — about a second per 24 MP
+frame natively on all cores, several in the browser on one thread — and a
+raw's capture time for the batch split is read from its TIFF structure
+where it has one (NEF, CR2, ARW, DNG, …) and else by rawler's own reader
+(CR3, RAF, …), the whole file in either case. In the browser the filmstrip
+shows the JPEG preview the camera wrote into the file, and the run develops
+the frame. The core crate's `raw` feature (on by default) carries rawler,
+which is vendored in `vendor/rawler` (the workspace's `[patch.crates-io]`)
+with one change, so that it runs in the browser: `std::time::Instant`, which
+the demosaic and the CR3 decoder use for a timing log line, has no
+implementation on wasm32 and panics there, so a shim reads zero on wasm
+(`vendor/rawler/LAPSTACK-PATCH.md` says how to move to a newer rawler);
+without the feature a raw file is refused.
 
 **Frame list** (`--skip LIST`, `--reverse`): `--skip` leaves frames out of the
 list — 1-based positions and ranges, comma-separated (`--skip 3,7-9,12`),
@@ -277,6 +301,7 @@ between frames, so the residual rule is nearly moot on a deep stack.
 
 `crates/lapstack-web` + `web/` run the whole lapstack pipeline in a browser
 tab: frames are decoded in WASM (PNG/JPEG/TIFF, 8- and 16-bit, via the `image`
+crate; camera raws developed via rawler, see above,
 crate), aligned and fused on **WebGPU** (`shaders.wgsl`, the same kernels as
 the CUDA path transcribed to WGSL), one frame at a time in a Web Worker, so
 browser memory stays at a couple of frames regardless of stack size. Only the
@@ -683,7 +708,9 @@ it and reports its mean difference to the pyramid image). `FILES="dir/*.tif"
 PRE_EXPR="..." node web/test/headless.mjs` feeds real files to the page's
 file input over CDP (no in-memory copies, so 100 × 45 MP stacks work) and
 runs an expression, e.g. ticking *also render from the depth map* and
-clicking Run. `web/serve.sh` sends `Cache-Control: no-store`; after a
+clicking Run. `index.html?debug=1` sends the worker's console errors (a wasm panic, a
+WebGPU validation error) to the page's log, where the harness sees them.
+`web/serve.sh` sends `Cache-Control: no-store`; after a
 rebuild a plain reload is enough (a hard reload alone can keep a cached
 worker / WASM and the page then waits for messages the old worker never
 sends).

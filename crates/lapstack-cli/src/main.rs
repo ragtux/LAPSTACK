@@ -424,7 +424,8 @@ fn help() {
     eprintln!(
         "lapstack — Laplacian-pyramid focus stacking (Burt & Adelson; Wang & Chang 2011)\n\
          Usage: lapstack [options] frame1 frame2 ...   (a directory stands for the image files in it)\n\
-         Output keeps the input bit depth (16-bit needs PNG/TIFF).\n\
+         Input: PNG, JPEG, TIFF, or a camera raw (NEF, CR2/CR3, ARW, DNG, RAF, ORF, RW2, PEF, …: developed as shot, no exposure adjustment).\n\
+         Output keeps the input bit depth (16-bit needs PNG/TIFF; a raw counts as 16-bit).\n\
            -o, --output PATH      fused image [stacked.png]\n\
            --levels N             band-pass levels [auto: residual short side >= 32 px]\n\
            --energy-radius R      region-energy window radius, binomial weights [1 = 3x3];\n\

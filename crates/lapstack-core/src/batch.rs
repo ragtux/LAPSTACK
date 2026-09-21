@@ -68,7 +68,7 @@ pub fn dir_name(path: &str) -> String {
 /// Is this a file lapstack can read, by extension?
 pub fn is_image(name: &str) -> bool {
     let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "tif" | "tiff")
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "tif" | "tiff") || crate::raw::is_raw(name)
 }
 
 /// Natural order: runs of digits compare as numbers (`f2 < f10`), the rest as bytes.

@@ -342,8 +342,13 @@ pub struct Engine {
 /// {w, h, bits, proxy_w, proxy_h, proxy: Uint8Array (RGBA8)}. Used for the
 /// filmstrip / Source view before a run (the browser cannot decode TIFF).
 #[wasm_bindgen]
-pub fn thumbnail(bytes: &[u8], edge: usize) -> Result<JsValue, JsValue> {
-    let f = decode::decode(bytes).map_err(|e| JsValue::from_str(&e))?;
+/// `raw`: a camera raw — its embedded JPEG preview stands in, developing the
+/// frame being the run's job (seconds per frame here).
+pub fn thumbnail(bytes: &[u8], edge: usize, raw: bool) -> Result<JsValue, JsValue> {
+    let f = match if raw { lapstack_core::raw::preview(bytes) } else { None } {
+        Some(img) => decode::frame_of(img),
+        None => decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?,
+    };
     let (w, h) = (f.w, f.h);
     let pf = (w.max(h)).div_ceil(edge.max(64)).max(1);
     let (pw, ph) = (w.div_ceil(pf), h.div_ceil(pf));
@@ -668,8 +673,8 @@ impl Engine {
     /// a saved result of an earlier session, or another program's — to compare
     /// with and to brush from. Its EXIF / ICC / XMP go with it, and it has no crop.
     /// Returns {w, h, bits, rgba: Uint8Array (RGBA8)} for the page's display copy.
-    pub fn keep_file(&mut self, id: u32, bytes: &[u8]) -> Result<JsValue, JsValue> {
-        let frame = decode::decode(bytes).map_err(|e| JsValue::from_str(&e))?;
+    pub fn keep_file(&mut self, id: u32, bytes: &[u8], raw: bool) -> Result<JsValue, JsValue> {
+        let frame = decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let (w, h) = (frame.w, frame.h);
         let rgba = rgba8_of(&frame.rgb, w * h);
         self.kept.retain(|k| k.id != id);
@@ -700,9 +705,10 @@ impl Engine {
     /// proxy_w, proxy_h, proxy: Uint8Array (RGBA8), sim: [dx_px, dy_px, scale, rot_deg], ms}.
     /// `given`: the frame's registration in that same form, from a project file,
     /// used in place of the search (empty = search).
-    pub async fn push(&mut self, bytes: &[u8], params_json: &str, given: &[f64]) -> Result<JsValue, JsValue> {
+    /// `raw`: the bytes are a camera raw's, developed rather than decoded (so everywhere below).
+    pub async fn push(&mut self, bytes: &[u8], params_json: &str, given: &[f64], raw: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
-        let frame = decode::decode(bytes).map_err(|e| JsValue::from_str(&e))?;
+        let frame = decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let t_dec = now();
         if self.run.is_none() {
             let params: Params = serde_json::from_str(params_json).map_err(|e| JsValue::from_str(&format!("params: {e}")))?;
@@ -910,9 +916,9 @@ impl Engine {
     /// decoded again and warped with the run's registration, into the
     /// accumulator with weight `1 − |index − depth|` per pixel. The first call
     /// starts the pass. Returns {index, ms}.
-    pub async fn render_push(&mut self, index: usize, bytes: &[u8]) -> Result<JsValue, JsValue> {
+    pub async fn render_push(&mut self, index: usize, bytes: &[u8], raw: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
-        let frame = decode::decode(bytes).map_err(|e| JsValue::from_str(&e))?;
+        let frame = decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         if run.fused_rgb16.is_none() {
@@ -1069,9 +1075,9 @@ impl Engine {
     /// CPU as the retouch brush source and returned for display, {index, w, h,
     /// rgba: Uint8Array} (full-resolution RGBA8); without, the reply is just
     /// {index, w, h} and the two full-frame readbacks are skipped.
-    pub async fn load_source(&mut self, index: usize, bytes: &[u8], readback: bool) -> Result<JsValue, JsValue> {
+    pub async fn load_source(&mut self, index: usize, bytes: &[u8], readback: bool, raw: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
-        let frame = decode::decode(bytes).map_err(|e| JsValue::from_str(&e))?;
+        let frame = decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         if run.fused_rgb16.is_none() {
@@ -1165,9 +1171,9 @@ impl Engine {
     }
 
     /// Fold frame `index` (decoded again from `bytes`) into the slab. Returns {index, ms}.
-    pub async fn slab_push(&mut self, index: usize, bytes: &[u8]) -> Result<JsValue, JsValue> {
+    pub async fn slab_push(&mut self, index: usize, bytes: &[u8], raw: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
-        let frame = decode::decode(bytes).map_err(|e| JsValue::from_str(&e))?;
+        let frame = decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         let (lo, hi) = run.slab.as_ref().map(|s| (s.lo, s.hi)).ok_or_else(|| JsValue::from_str("no slab begun"))?;
@@ -1725,9 +1731,9 @@ impl Engine {
 
     /// Fold frame `index` (decoded again from `bytes`) into every view of the
     /// pass, shifted by its index. Returns {index, ms}.
-    pub async fn refold_push(&mut self, index: usize, bytes: &[u8]) -> Result<JsValue, JsValue> {
+    pub async fn refold_push(&mut self, index: usize, bytes: &[u8], raw: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
-        let frame = decode::decode(bytes).map_err(|e| JsValue::from_str(&e))?;
+        let frame = decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         if frame.w != run.w || frame.h != run.h {

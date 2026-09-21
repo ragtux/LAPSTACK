@@ -235,7 +235,7 @@ worker.onmessage = (ev) => {
     case 'debug': log('[worker] ' + m.text); break;
   }
 };
-worker.postMessage({ type: 'init' });
+worker.postMessage({ type: 'init', debug: new URLSearchParams(location.search).has('debug') });   // ?debug=1: the worker's console errors and WebGPU errors come to the log
 
 // ---------- toasts ----------
 function toast(text, ms = 8000) {
@@ -254,11 +254,13 @@ function gpuHint() {
 // A file's path as it was added: folder/name from a folder pick or a dropped folder, else the
 // name; files sort by it (natural order, f2 before f10), so a folder's frames stay together.
 let fileUid = 0;
+// the frames lapstack takes: PNG, JPEG, TIFF, and the camera raws rawler develops (lapstack-core's raw.rs)
+const FRAME_RE = /\.(png|jpe?g|tiff?|ari|arw|cr2|cr3|crm|crw|dcr|dcs|dng|erf|iiq|kdc|mef|mos|mrw|nef|nrw|orf|ori|pef|raf|raw|rw2|rwl|srw|3fr|fff|x3f|qtk)$/i;
 const fileKey = (f) => f.relPath || f.webkitRelativePath || f.name;
 const folderOf = (f) => { const k = fileKey(f), i = k.lastIndexOf('/'); return i < 0 ? '' : k.slice(0, i); };
 const stemOf = (name) => name.replace(/\.[^.]+$/, '');
 function addFiles(list) {
-  const files = [...list].filter((f) => /\.(png|jpe?g|tiff?)$/i.test(f.name)).sort((a, b) => fileKey(a).localeCompare(fileKey(b), undefined, { numeric: true }));
+  const files = [...list].filter((f) => FRAME_RE.test(f.name)).sort((a, b) => fileKey(a).localeCompare(fileKey(b), undefined, { numeric: true }));
   if (!files.length) return;
   if (st.running || SV.exporting) { toast('Frames can be added once the run or save in progress is done.'); return; }
   if (PJ.missing) return fillProject(files);   // a project is open: the files stand in for its frames

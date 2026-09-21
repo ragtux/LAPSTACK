@@ -42,7 +42,7 @@ async function thumbLoop() {
     try {
       const bytes = new Uint8Array(await f.arrayBuffer());
       if (job.gen !== thumbGen) return;
-      const t = thumbnail(bytes, job.edge);
+      const t = thumbnail(bytes, job.edge, isRaw(f.name));
       const [proxy, strip] = await proxyBitmaps(t.proxy.buffer, t.proxy_w, t.proxy_h);
       post({ type: 'thumb', index: i, uid, name: f.name, w: t.w, h: t.h, bits: t.bits, proxy, strip }, [proxy, strip]);
     } catch (e) {
@@ -69,6 +69,8 @@ async function proxyBitmaps(rgba, w, h) {
 // it is needed (the fold spent a third of its time reading otherwise). The early
 // catch keeps an abandoned read (cancel) from surfacing as an unhandled rejection;
 // awaiting the promise still throws.
+// a camera raw, by its name: the engine develops it instead of decoding it (lapstack-core's raw.rs)
+const isRaw = (name) => /\.(ari|arw|cr2|cr3|crm|crw|dcr|dcs|dng|erf|iiq|kdc|mef|mos|mrw|nef|nrw|orf|ori|pef|raf|raw|rw2|rwl|srw|3fr|fff|x3f|qtk)$/i.test(name || '');
 function readAhead(f) { const p = f.arrayBuffer(); p.catch(() => {}); return p; }
 
 // Engine calls must not overlap (wasm-bindgen rejects re-entrant use of the
@@ -106,7 +108,7 @@ async function handleCall(m) {
     if (running) throw new Error('a run is in progress');
     const held = engine.source_gpu_index() === m.index;
     let r = null;
-    if (!held) r = await engine.load_source(m.index, new Uint8Array(m.bytes || await m.file.arrayBuffer()), !m.focus);
+    if (!held) r = await engine.load_source(m.index, new Uint8Array(m.bytes || await m.file.arrayBuffer()), !m.focus, isRaw(m.file && m.file.name));
     if (m.focus) r = await engine.source_focus(m.focus.dim, m.focus.w0, m.focus.w1, m.focus.tex);
     else if (held) r = await engine.source_readback();
     post({ type: 'export_source', rid: m.rid, index: r.index, w: r.w, h: r.h, rgba: r.rgba.buffer }, [r.rgba.buffer]);
@@ -163,7 +165,7 @@ async function handleCall(m) {
           post({ type: 'refold-progress', text: `refold${plan.passes > 1 ? ` ${p + 1}/${plan.passes}` : ''}: ${m.files[i].name}`, done, total });
           const bytes = new Uint8Array(await next);
           next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
-          await engine.refold_push(i, bytes); done++;
+          await engine.refold_push(i, bytes, isRaw(m.files[i].name)); done++;
         }
         await engine.refold_pass_finish();
       }
@@ -180,7 +182,7 @@ async function handleCall(m) {
     post({ type: 'refold', rid: m.rid });
   } else if (m.type === 'keep_file') {
     // an image file kept as a result (see 'keep' below): decoded here, its RGBA8 back for the page's copy
-    const r = engine.keep_file(m.id, new Uint8Array(await m.file.arrayBuffer()));
+    const r = engine.keep_file(m.id, new Uint8Array(await m.file.arrayBuffer()), isRaw(m.file.name));
     post({ type: 'kept_file', rid: m.rid, id: m.id, w: r.w, h: r.h, bits: r.bits, rgba: r.rgba.buffer }, [r.rgba.buffer]);
   } else if (m.type === 'make_cert') {
     const [cert, key] = (await loadCc()).make_cert(m.name, Date.now() / 1000);
@@ -236,7 +238,7 @@ async function handle(m) {
         post({ type: 'stage', text: `decoding ${f.name}`, done: i, total: m.files.length });
         const bytes = new Uint8Array(await next);
         next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
-        const r = await engine.push(bytes, params, m.sims && m.sims[i] ? new Float64Array(m.sims[i]) : new Float64Array(0));   // a project's registration, or the search
+        const r = await engine.push(bytes, params, m.sims && m.sims[i] ? new Float64Array(m.sims[i]) : new Float64Array(0), isRaw(f.name));   // a project's registration, or the search
         const peak = r.peak;
         const [proxy, strip] = await proxyBitmaps(r.proxy.buffer, r.proxy_w, r.proxy_h);
         post({ type: 'frame', index: r.index, name: f.name, w: r.w, h: r.h, bits: r.bits, proxy, strip,
@@ -269,7 +271,7 @@ async function handle(m) {
               post({ type: 'stage', text: `slab ${k + 1}/${slabs.length}: ${m.files[i].name}`, done, total });
               const bytes = new Uint8Array(await next);
               next = i < hi ? readAhead(m.files[i + 1]) : null;
-              await engine.slab_push(i, bytes); done++;
+              await engine.slab_push(i, bytes, isRaw(m.files[i].name)); done++;
             }
             if (!cancelled) await engine.render_slab_finish();
           }
@@ -280,7 +282,7 @@ async function handle(m) {
             post({ type: 'stage', text: `rendering from depth map: ${m.files[i].name}`, done: i, total: m.files.length });
             const bytes = new Uint8Array(await next);
             next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
-            await engine.render_push(i, bytes);
+            await engine.render_push(i, bytes, isRaw(m.files[i].name));
           }
         }
         if (cancelled) { engine.render_cancel(); post({ type: 'render-cancelled' }); running = false; return; }
@@ -300,12 +302,12 @@ async function handle(m) {
         post({ type: 'stage', text: `retouch ${done + skipped + 1}/${m.strokes.length}`, done: done + skipped, total: m.strokes.length });
         try {
           if (s.from === 'source') {
-            if (engine.source_index() !== s.index) await engine.load_source(s.index, new Uint8Array(await m.files[s.index].arrayBuffer()), true);
+            if (engine.source_index() !== s.index) await engine.load_source(s.index, new Uint8Array(await m.files[s.index].arrayBuffer()), true, isRaw(m.files[s.index].name));
           } else if (s.from === 'slab') {
             const r = engine.slab_range();
             if (!(r[0] === s.lo && r[1] === s.hi)) {
               engine.slab_begin(s.lo, s.hi);
-              for (let i = s.lo; i <= s.hi; i++) await engine.slab_push(i, new Uint8Array(await m.files[i].arrayBuffer()));
+              for (let i = s.lo; i <= s.hi; i++) await engine.slab_push(i, new Uint8Array(await m.files[i].arrayBuffer()), isRaw(m.files[i].name));
               await engine.slab_finish();
             }
           }
@@ -343,7 +345,7 @@ async function handle(m) {
       let r = null;
       if (!held) {
         const bytes = new Uint8Array(m.bytes || await m.file.arrayBuffer());
-        r = await engine.load_source(m.index, bytes, !m.focus);
+        r = await engine.load_source(m.index, bytes, !m.focus, isRaw(m.file && m.file.name));
       }
       if (m.focus) r = await engine.source_focus(m.focus.dim, m.focus.w0, m.focus.w1, m.focus.tex);
       else if (held) r = await engine.source_readback();
@@ -363,7 +365,7 @@ async function handle(m) {
         post({ type: 'slab-progress', lo: m.lo, hi: m.hi, done: i, total, gen: m.gen });
         const bytes = new Uint8Array(await next);
         next = i + 1 < total ? readAhead(m.files[i + 1]) : null;
-        await engine.slab_push(m.lo + i, bytes);
+        await engine.slab_push(m.lo + i, bytes, isRaw(m.files[i].name));
         if (m.gen < slabGen) { engine.slab_cancel(); skip(); return; }
       }
       const r = await engine.slab_finish();
