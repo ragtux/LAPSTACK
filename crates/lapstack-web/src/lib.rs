@@ -15,7 +15,7 @@ mod gif;
 mod gpu;
 
 use align::{Aligner, LumaPyr, Sim, affine_inv};
-use gpu::{Gpu, P, grid1, grid2};
+use gpu::{Gpu, P, Rec, grid1, grid2};
 use depth::DepthGpu;
 use lapstack_core::depth::{DepthParams, FocusMeasure, Upsample};
 use lapstack_core::fuse::{FuseParams, TopRule, binomial, fuse_residuals, upsample_index};
@@ -172,6 +172,12 @@ struct Run {
     dmap_rgb16: Option<Vec<u16>>,
     /// Retouch: the currently loaded aligned source frame (index, RGB u16).
     src_rgb16: Option<(usize, Vec<u16>)>,
+    /// Retouch: the on-demand slab, the other brush source — the frames
+    /// `lo..=hi` fused on their own (`slab_begin` / `slab_push` / `slab_finish`).
+    /// `slab` is the fold in progress with its residuals, `slab_rgb16` the last
+    /// one finished, held on the CPU as (lo, hi, RGB u16).
+    slab: Option<Slab>,
+    slab_rgb16: Option<(usize, usize, Vec<u16>)>,
     /// The first frame's EXIF / ICC profile / XMP, for the saved files.
     meta: lapstack_core::meta::Meta,
     /// The area every aligned frame covers with real pixels (`finish`); the
@@ -182,6 +188,13 @@ struct Run {
     undo: Vec<Patch>,
     redo: Vec<Patch>,
     undo_bytes: usize,
+}
+
+/// A slab being fused: its frame range and the residuals folded so far.
+struct Slab {
+    lo: usize,
+    hi: usize,
+    tops: Vec<Img3>,
 }
 
 /// One retouch stroke's effect on the fused image: the bbox and its pixels
@@ -279,6 +292,111 @@ fn patch_obj(img: &[u16], iw: usize, dmap: bool, x: usize, y: usize, w: usize, h
     set(&o, "h", h as u32);
     set(&o, "rgba", js_sys::Uint8Array::from(&rgba[..]));
     o.into()
+}
+
+/// Record the warp of the uploaded frame (`up`) into `cur[0]` with the
+/// registration the run found for frame `index`, then the run's brightness
+/// gain for it: how a frame is brought back after the run (the depth-map
+/// render, the source frame, a slab).
+fn record_rewarp(g: &Gpu, run: &Run, rec: &mut Rec<'_>, index: usize) -> Result<(), String> {
+    let sim = *run.sims.get(index).ok_or("unknown frame index")?;
+    let (w, h) = (run.w, run.h);
+    let identity = !run.params.align || index == 0;
+    let mut p = P { w: w as u32, h: h as u32, flag: identity as u32, ..Default::default() };
+    if !identity {
+        let inv = affine_inv(sim.matrix(w, h));
+        g.queue.write_buffer(&run.aff, 0, bytemuck::cast_slice(&[inv[0][2] as f32, inv[1][2] as f32, 0.0, 0.0]));
+        p.f0 = inv[0][0] as f32;
+        p.f1 = inv[0][1] as f32;
+        p.f2 = inv[1][0] as f32;
+        p.f3 = inv[1][1] as f32;
+    }
+    rec.dispatch("warp", [None, None, Some(&run.cur[0]), None, Some(&run.aff), Some(&run.up)], p, grid2(w, h));
+    if let Some(gn) = run.gains.get(index).copied().filter(|gn| !lapstack_core::brightness::is_unity(*gn)) {
+        rec.dispatch("gain3", [None, None, Some(&run.cur[0]), None, None, None], P { w: (w * h) as u32, f0: gn[0], f1: gn[1], f2: gn[2], ..Default::default() }, grid1(3 * w * h));
+    }
+    Ok(())
+}
+
+/// Record the fold of the frame in `cur[0]`: its Laplacian pyramid (band-pass
+/// levels in `cur[l]`, the residual left in `cur[levels]`), the region energy
+/// of every band-pass level and the winner-take-all select into `acc` / `best`.
+/// `scratch` is a w×h f32 buffer for the window sums. With `winner` =
+/// Some(index) the level `depth_level` records the frame index (the winner
+/// map); with `peak` the focus-peaking map is taken from level `peak.4`. The
+/// run does both; a slab neither.
+fn record_fold(run: &Run, rec: &mut Rec<'_>, scratch: &wgpu::Buffer, winner: Option<usize>, peak: bool) {
+    // build: L_l = G_l - EXPAND(REDUCE(G_l)), per plane
+    for l in 0..run.levels {
+        let (fw, fh) = run.dims[l];
+        let (cw, ch) = run.dims[l + 1];
+        for c in 0..3 {
+            let pr = P { w: fw as u32, h: fh as u32, ow: cw as u32, oh: ch as u32, off_in: (c * fw * fh) as u32, off_out: (c * cw * ch) as u32, ..Default::default() };
+            rec.dispatch("red_h", [Some(&run.cur[l]), Some(&run.tmp_half), None, None, None, None], pr, grid2(cw, fh));
+            rec.dispatch("red_v", [None, Some(&run.tmp_half), Some(&run.cur[l + 1]), None, None, None], pr, grid2(cw, ch));
+            let pe = P { w: fw as u32, h: fh as u32, ow: cw as u32, oh: ch as u32, off_in: (c * cw * ch) as u32, off_out: (c * fw * fh) as u32, flag: 1, ..Default::default() };
+            rec.dispatch("exp_h", [Some(&run.cur[l + 1]), Some(&run.tmp_half), None, None, None, None], pe, grid2(fw, ch));
+            rec.dispatch("exp_v", [None, Some(&run.tmp_half), Some(&run.cur[l]), None, None, None], pe, grid2(fw, fh));
+        }
+    }
+    // region energy + winner-take-all per band-pass level
+    for l in 0..run.levels {
+        let (lw, lh) = run.dims[l];
+        let ln = lw * lh;
+        let pl = P { w: lw as u32, h: lh as u32, klen: run.klen, flag: run.fp.use_chroma as u32, ..Default::default() };
+        rec.dispatch("energy", [Some(&run.cur[l]), None, None, Some(&run.en), None, None], pl, grid1(ln));
+        if run.klen > 1 {
+            rec.dispatch("win_h", [None, Some(scratch), None, Some(&run.en), Some(&run.wt), None], pl, grid2(lw, lh));
+            rec.dispatch("win_v", [None, Some(scratch), None, Some(&run.en), Some(&run.wt), None], pl, grid2(lw, lh));
+        }
+        if peak && l == run.peak.4 {
+            let (kw, kh, kf) = (run.peak.1, run.peak.2, run.peak.3);
+            rec.dispatch(
+                "down1",
+                [Some(&run.en), None, Some(&run.peak.0), None, None, None],
+                P { w: lw as u32, h: lh as u32, ow: kw as u32, oh: kh as u32, klen: kf as u32, ..Default::default() },
+                grid2(kw, kh),
+            );
+        }
+        let ps = P { w: lw as u32, h: lh as u32, flag: (winner.is_some() && l == run.depth_level) as u32, f0: winner.unwrap_or(0) as f32, ..Default::default() };
+        rec.dispatch("sel", [Some(&run.cur[l]), Some(&run.best[l]), Some(&run.acc[l]), Some(&run.en), None, None], ps, grid1(ln));
+    }
+}
+
+/// Fuse the residuals `tops`, collapse the accumulator pyramid into `acc[0]`
+/// (which keeps the float image) and read the result back: (RGBA8 for
+/// display, RGB u16 master).
+async fn collapse(g: &Gpu, run: &Run, tops: &[Img3]) -> Result<(Vec<u8>, Vec<u16>), String> {
+    let (w, h, n) = (run.w, run.h, run.w * run.h);
+    let top = fuse_residuals(tops, &run.fp);
+    let (tw, th) = run.dims[run.levels];
+    let mut flat = Vec::with_capacity(3 * tw * th);
+    for c in 0..3 {
+        flat.extend_from_slice(&top.p[c]);
+    }
+    g.queue.write_buffer(&run.acc[run.levels], 0, bytemuck::cast_slice(&flat));
+    let mut rec = g.rec();
+    for l in (0..run.levels).rev() {
+        let (fw, fh) = run.dims[l];
+        let (cw, ch) = run.dims[l + 1];
+        for c in 0..3 {
+            let pe = P { w: fw as u32, h: fh as u32, ow: cw as u32, oh: ch as u32, off_in: (c * cw * ch) as u32, off_out: (c * fw * fh) as u32, flag: 2, ..Default::default() };
+            rec.dispatch("exp_h", [Some(&run.acc[l + 1]), Some(&run.tmp_half), None, None, None, None], pe, grid2(fw, ch));
+            rec.dispatch("exp_v", [None, Some(&run.tmp_half), Some(&run.acc[l]), None, None, None], pe, grid2(fw, fh));
+        }
+    }
+    let pw = P { w: w as u32, h: h as u32, ..Default::default() };
+    rec.dispatch("clamp01", [None, None, Some(&run.acc[0]), None, None, None], pw, grid1(3 * n));
+    rec.dispatch("to_rgba8", [Some(&run.acc[0]), None, Some(&run.tmp_full), None, None, None], pw, grid1(n));
+    let rgb16 = g.buffer("rgb16 out", ((3 * n).div_ceil(2) * 4) as u64);
+    rec.dispatch("to_rgb16", [Some(&run.acc[0]), None, Some(&rgb16), None, None, None], pw, grid1((3 * n).div_ceil(2)));
+    rec.submit();
+    let rgba = g.read(&run.tmp_full, (n * 4) as u64).await?;
+    let r16 = g.read(&rgb16, ((3 * n).div_ceil(2) * 4) as u64).await?;
+    drop(rgb16);
+    let mut v16: Vec<u16> = bytemuck::cast_slice(&r16).to_vec();
+    v16.truncate(3 * n);
+    Ok((rgba, v16))
 }
 
 #[wasm_bindgen]
@@ -400,41 +518,8 @@ impl Engine {
             rec.dispatch("luma_f32", [Some(&run.cur[0]), None, Some(&run.tmp_full), None, None, None], P { w: w as u32, h: h as u32, ..Default::default() }, grid1(n));
             dff.record_measure(&mut rec, &run.tmp_full, &run.en, w, h);
         }
-        // build: L_l = G_l - EXPAND(REDUCE(G_l)), per plane
-        for l in 0..run.levels {
-            let (fw, fh) = run.dims[l];
-            let (cw, ch) = run.dims[l + 1];
-            for c in 0..3 {
-                let pr = P { w: fw as u32, h: fh as u32, ow: cw as u32, oh: ch as u32, off_in: (c * fw * fh) as u32, off_out: (c * cw * ch) as u32, ..Default::default() };
-                rec.dispatch("red_h", [Some(&run.cur[l]), Some(&run.tmp_half), None, None, None, None], pr, grid2(cw, fh));
-                rec.dispatch("red_v", [None, Some(&run.tmp_half), Some(&run.cur[l + 1]), None, None, None], pr, grid2(cw, ch));
-                let pe = P { w: fw as u32, h: fh as u32, ow: cw as u32, oh: ch as u32, off_in: (c * cw * ch) as u32, off_out: (c * fw * fh) as u32, flag: 1, ..Default::default() };
-                rec.dispatch("exp_h", [Some(&run.cur[l + 1]), Some(&run.tmp_half), None, None, None, None], pe, grid2(fw, ch));
-                rec.dispatch("exp_v", [None, Some(&run.tmp_half), Some(&run.cur[l]), None, None, None], pe, grid2(fw, fh));
-            }
-        }
-        // region energy + winner-take-all per band-pass level
-        for l in 0..run.levels {
-            let (lw, lh) = run.dims[l];
-            let ln = lw * lh;
-            let pl = P { w: lw as u32, h: lh as u32, klen: run.klen, flag: run.fp.use_chroma as u32, ..Default::default() };
-            rec.dispatch("energy", [Some(&run.cur[l]), None, None, Some(&run.en), None, None], pl, grid1(ln));
-            if run.klen > 1 {
-                rec.dispatch("win_h", [None, Some(&run.en2), None, Some(&run.en), Some(&run.wt), None], pl, grid2(lw, lh));
-                rec.dispatch("win_v", [None, Some(&run.en2), None, Some(&run.en), Some(&run.wt), None], pl, grid2(lw, lh));
-            }
-            if l == run.peak.4 {
-                let (kw, kh, kf) = (run.peak.1, run.peak.2, run.peak.3);
-                rec.dispatch(
-                    "down1",
-                    [Some(&run.en), None, Some(&run.peak.0), None, None, None],
-                    P { w: lw as u32, h: lh as u32, ow: kw as u32, oh: kh as u32, klen: kf as u32, ..Default::default() },
-                    grid2(kw, kh),
-                );
-            }
-            let ps = P { w: lw as u32, h: lh as u32, flag: (l == run.depth_level) as u32, f0: run.count as f32, ..Default::default() };
-            rec.dispatch("sel", [Some(&run.cur[l]), Some(&run.best[l]), Some(&run.acc[l]), Some(&run.en), None, None], ps, grid1(ln));
-        }
+        // Laplacian pyramid, region energy, winner-take-all (en2 is free scratch during the run)
+        record_fold(run, &mut rec, &run.en2, Some(run.count), true);
         rec.submit();
         // residual (tiny) to the host; proxy to the caller
         let (tw, th) = run.dims[run.levels];
@@ -487,35 +572,9 @@ impl Engine {
         let g = &self.gpu;
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no frames pushed"))?;
         let (w, h, n) = (run.w, run.h, run.w * run.h);
-        let top = fuse_residuals(&run.tops, &run.fp);
-        let (tw, th) = run.dims[run.levels];
-        let mut flat = Vec::with_capacity(3 * tw * th);
-        for c in 0..3 {
-            flat.extend_from_slice(&top.p[c]);
-        }
-        g.queue.write_buffer(&run.acc[run.levels], 0, bytemuck::cast_slice(&flat));
-        let mut rec = g.rec();
-        for l in (0..run.levels).rev() {
-            let (fw, fh) = run.dims[l];
-            let (cw, ch) = run.dims[l + 1];
-            for c in 0..3 {
-                let pe = P { w: fw as u32, h: fh as u32, ow: cw as u32, oh: ch as u32, off_in: (c * cw * ch) as u32, off_out: (c * fw * fh) as u32, flag: 2, ..Default::default() };
-                rec.dispatch("exp_h", [Some(&run.acc[l + 1]), Some(&run.tmp_half), None, None, None, None], pe, grid2(fw, ch));
-                rec.dispatch("exp_v", [None, Some(&run.tmp_half), Some(&run.acc[l]), None, None, None], pe, grid2(fw, fh));
-            }
-        }
-        let pw = P { w: w as u32, h: h as u32, ..Default::default() };
-        rec.dispatch("clamp01", [None, None, Some(&run.acc[0]), None, None, None], pw, grid1(3 * n));
-        rec.dispatch("to_rgba8", [Some(&run.acc[0]), None, Some(&run.tmp_full), None, None, None], pw, grid1(n));
-        let rgb16 = g.buffer("rgb16 out", ((3 * n).div_ceil(2) * 4) as u64);
-        rec.dispatch("to_rgb16", [Some(&run.acc[0]), None, Some(&rgb16), None, None, None], pw, grid1((3 * n).div_ceil(2)));
-        rec.submit();
-        let rgba = g.read(&run.tmp_full, (n * 4) as u64).await.map_err(|e| JsValue::from_str(&e))?;
-        let r16 = g.read(&rgb16, ((3 * n).div_ceil(2) * 4) as u64).await.map_err(|e| JsValue::from_str(&e))?;
-        drop(rgb16);
-        let mut v16: Vec<u16> = bytemuck::cast_slice(&r16).to_vec();
-        v16.truncate(3 * n);
+        let (rgba, v16) = collapse(g, run, &run.tops).await.map_err(|e| JsValue::from_str(&e))?;
         run.fused_rgb16 = Some(v16);
+        let pw = P { w: w as u32, h: h as u32, ..Default::default() };
         let t_fuse = now();
         // the pyramid winner map (plane 3 of the depth level's accumulator) is always there
         let (ww, wh) = run.dims[run.depth_level];
@@ -581,7 +640,6 @@ impl Engine {
         if frame.w != run.w || frame.h != run.h {
             return Err(JsValue::from_str("frame size differs from the run"));
         }
-        let sim = *run.sims.get(index).ok_or_else(|| JsValue::from_str("unknown frame index"))?;
         let (w, h, n) = (run.w, run.h, run.w * run.h);
         g.queue.write_buffer(&run.up, 0, bytemuck::cast_slice(&frame.rgb));
         drop(frame);
@@ -591,20 +649,7 @@ impl Engine {
             rec.clear(&run.acc[0]);
             rec.clear(&run.best[0]);
         }
-        let identity = !run.params.align || index == 0;
-        let mut p = P { w: w as u32, h: h as u32, flag: identity as u32, ..Default::default() };
-        if !identity {
-            let inv = affine_inv(sim.matrix(w, h));
-            g.queue.write_buffer(&run.aff, 0, bytemuck::cast_slice(&[inv[0][2] as f32, inv[1][2] as f32, 0.0, 0.0]));
-            p.f0 = inv[0][0] as f32;
-            p.f1 = inv[0][1] as f32;
-            p.f2 = inv[1][0] as f32;
-            p.f3 = inv[1][1] as f32;
-        }
-        rec.dispatch("warp", [None, None, Some(&run.cur[0]), None, Some(&run.aff), Some(&run.up)], p, grid2(w, h));
-        if let Some(gn) = run.gains.get(index).copied().filter(|gn| !lapstack_core::brightness::is_unity(*gn)) {   // the run's brightness gain for this frame
-            rec.dispatch("gain3", [None, None, Some(&run.cur[0]), None, None, None], P { w: (w * h) as u32, f0: gn[0], f1: gn[1], f2: gn[2], ..Default::default() }, grid1(3 * w * h));
-        }
+        record_rewarp(g, run, &mut rec, index).map_err(|e| JsValue::from_str(&e))?;
         run.src_gpu = None;
         rec.dispatch(
             "dmap_acc",
@@ -668,25 +713,11 @@ impl Engine {
         if frame.w != run.w || frame.h != run.h {
             return Err(JsValue::from_str("frame size differs from the run"));
         }
-        let sim = *run.sims.get(index).ok_or_else(|| JsValue::from_str("unknown frame index"))?;
         let (w, h) = (run.w, run.h);
         g.queue.write_buffer(&run.up, 0, bytemuck::cast_slice(&frame.rgb));
         drop(frame);
-        let identity = !run.params.align || index == 0;
-        let mut p = P { w: w as u32, h: h as u32, flag: identity as u32, ..Default::default() };
-        if !identity {
-            let inv = affine_inv(sim.matrix(w, h));
-            g.queue.write_buffer(&run.aff, 0, bytemuck::cast_slice(&[inv[0][2] as f32, inv[1][2] as f32, 0.0, 0.0]));
-            p.f0 = inv[0][0] as f32;
-            p.f1 = inv[0][1] as f32;
-            p.f2 = inv[1][0] as f32;
-            p.f3 = inv[1][1] as f32;
-        }
         let mut rec = g.rec();
-        rec.dispatch("warp", [None, None, Some(&run.cur[0]), None, Some(&run.aff), Some(&run.up)], p, grid2(w, h));
-        if let Some(gn) = run.gains.get(index).copied().filter(|gn| !lapstack_core::brightness::is_unity(*gn)) {   // the run's brightness gain for this frame
-            rec.dispatch("gain3", [None, None, Some(&run.cur[0]), None, None, None], P { w: (w * h) as u32, f0: gn[0], f1: gn[1], f2: gn[2], ..Default::default() }, grid1(3 * w * h));
-        }
+        record_rewarp(g, run, &mut rec, index).map_err(|e| JsValue::from_str(&e))?;
         rec.submit();
         run.src_gpu = Some(index);
         if !readback {
@@ -738,6 +769,100 @@ impl Engine {
         self.run.as_ref().and_then(|r| r.src_gpu).map_or(-1, |i| i as i32)
     }
 
+    /// Retouch: start a slab — the frames `lo..=hi` fused on their own, with
+    /// the run's registration, brightness gains and fusion parameters — the
+    /// brush source with a thick plane of focus (Zerene's slabs, made on
+    /// demand: one at a time, around the scrubbed frame, instead of a batch
+    /// of files). It reuses the run's accumulator, which is free once the
+    /// result is read back: the best-energy planes are reset here,
+    /// `slab_push` folds the frames one by one and `slab_finish` collapses
+    /// the result. The GPU-resident source frame is lost (`cur` is the
+    /// slab's pyramid); the depth map (`en2`) is kept.
+    pub fn slab_begin(&mut self, lo: usize, hi: usize) -> Result<(), JsValue> {
+        let g = &self.gpu;
+        let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
+        if run.fused_rgb16.is_none() {
+            return Err(JsValue::from_str("finish the run first"));
+        }
+        if lo > hi || hi >= run.count {
+            return Err(JsValue::from_str(&format!("slab {lo}..={hi} is not within the run's {} frames", run.count)));
+        }
+        let mut rec = g.rec();
+        for (l, b) in run.best.iter().enumerate() {
+            let (lw, lh) = run.dims[l];
+            rec.dispatch("fill", [None, None, Some(b), None, None, None], P { w: (lw * lh) as u32, f0: -1.0, ..Default::default() }, grid1(lw * lh));
+        }
+        rec.submit();
+        run.slab = Some(Slab { lo, hi, tops: Vec::new() });
+        Ok(())
+    }
+
+    /// Fold frame `index` (decoded again from `bytes`) into the slab. Returns {index, ms}.
+    pub async fn slab_push(&mut self, index: usize, bytes: &[u8]) -> Result<JsValue, JsValue> {
+        let t0 = now();
+        let frame = decode::decode(bytes).map_err(|e| JsValue::from_str(&e))?;
+        let g = &self.gpu;
+        let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
+        let (lo, hi) = run.slab.as_ref().map(|s| (s.lo, s.hi)).ok_or_else(|| JsValue::from_str("no slab begun"))?;
+        if index < lo || index > hi {
+            return Err(JsValue::from_str(&format!("frame {index} is outside the slab {lo}..={hi}")));
+        }
+        if frame.w != run.w || frame.h != run.h {
+            return Err(JsValue::from_str("frame size differs from the run"));
+        }
+        g.upload(&run.up, bytemuck::cast_slice(&frame.rgb)).await.map_err(|e| JsValue::from_str(&e))?;
+        drop(frame);
+        let mut rec = g.rec();
+        record_rewarp(g, run, &mut rec, index).map_err(|e| JsValue::from_str(&e))?;
+        run.src_gpu = None;
+        // tmp_full stands in for en2 as the window-sum scratch: en2 holds the depth map
+        record_fold(run, &mut rec, &run.tmp_full, None, false);
+        rec.submit();
+        let (tw, th) = run.dims[run.levels];
+        let top = g.read_f32(&run.cur[run.levels], 3 * tw * th).await.map_err(|e| JsValue::from_str(&e))?;
+        run.slab.as_mut().unwrap().tops.push(Img3 { w: tw, h: th, p: [top[..tw * th].to_vec(), top[tw * th..2 * tw * th].to_vec(), top[2 * tw * th..].to_vec()] });
+        let ms = now() - t0;
+        log(&format!("[lapstack] slab {lo}..{hi}: frame {index} folded ({ms:.0} ms)"));
+        let o = js_sys::Object::new();
+        set(&o, "index", index as u32);
+        set(&o, "ms", ms);
+        Ok(o.into())
+    }
+
+    /// Collapse the slab, hold it on the CPU as the brush source and return
+    /// it for display: {lo, hi, w, h, rgba: Uint8Array}.
+    pub async fn slab_finish(&mut self) -> Result<JsValue, JsValue> {
+        let t0 = now();
+        let g = &self.gpu;
+        let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
+        let slab = run.slab.take().ok_or_else(|| JsValue::from_str("no slab begun"))?;
+        if slab.tops.is_empty() {
+            return Err(JsValue::from_str("no frames folded into the slab"));
+        }
+        let (rgba, v16) = collapse(g, run, &slab.tops).await.map_err(|e| JsValue::from_str(&e))?;
+        run.slab_rgb16 = Some((slab.lo, slab.hi, v16));
+        log(&format!("[lapstack] slab {}..{} collapsed from {} frames ({:.0} ms)", slab.lo, slab.hi, slab.tops.len(), now() - t0));
+        let o = js_sys::Object::new();
+        set(&o, "lo", slab.lo as u32);
+        set(&o, "hi", slab.hi as u32);
+        set(&o, "w", run.w as u32);
+        set(&o, "h", run.h as u32);
+        set(&o, "rgba", js_sys::Uint8Array::from(&rgba[..]));
+        Ok(o.into())
+    }
+
+    /// Drop a slab in progress (its request was superseded); the finished one is kept.
+    pub fn slab_cancel(&mut self) {
+        if let Some(run) = self.run.as_mut() {
+            run.slab = None;
+        }
+    }
+
+    /// The slab held on the CPU as a brush source, [lo, hi], or [-1, -1].
+    pub fn slab_range(&self) -> Vec<i32> {
+        self.run.as_ref().and_then(|r| r.slab_rgb16.as_ref()).map_or(vec![-1, -1], |(lo, hi, _)| vec![*lo as i32, *hi as i32])
+    }
+
     /// The GPU-resident source frame rendered as the "In focus" layer: every
     /// pixel is darkened by how far, in frames, the full-resolution depth map
     /// (`en2`, a frame index per pixel) puts it from that frame — weight
@@ -782,8 +907,9 @@ impl Engine {
     /// Retouch: apply a stroke of soft dabs `[x, y, radius, hardness, ...]`
     /// (image px) copying `from` into the `target` image (16-bit). `target` is
     /// "fused" (the pyramid result) or "dmap" (the depth-map rendering); `from`
-    /// is "source" (the loaded aligned frame) or the other result — the
-    /// pyramid image can be painted into the depth-map rendering and back.
+    /// is "source" (the loaded aligned frame), "slab" (the on-demand slab) or
+    /// the other result — the pyramid image can be painted into the depth-map
+    /// rendering and back.
     /// Returns the updated bbox as {x, y, w, h, rgba}.
     pub fn stroke(&mut self, dabs: &[f32], target: &str, from: &str) -> Result<JsValue, JsValue> {
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
@@ -797,10 +923,13 @@ impl Engine {
         const NO_FUSED: &str = "not finished";
         const NO_DMAP: &str = "no depth-map rendering";
         const NO_SRC: &str = "no source loaded";
+        const NO_SLAB: &str = "no slab";
         let err = |m: &str| JsValue::from_str(m);
         let (fused, src): (&mut Vec<u16>, &[u16]) = match (dmap, from) {
             (false, "dmap") => (run.fused_rgb16.as_mut().ok_or_else(|| err(NO_FUSED))?, run.dmap_rgb16.as_deref().ok_or_else(|| err(NO_DMAP))?),
             (true, "fused") => (run.dmap_rgb16.as_mut().ok_or_else(|| err(NO_DMAP))?, run.fused_rgb16.as_deref().ok_or_else(|| err(NO_FUSED))?),
+            (false, "slab") => (run.fused_rgb16.as_mut().ok_or_else(|| err(NO_FUSED))?, &run.slab_rgb16.as_ref().ok_or_else(|| err(NO_SLAB))?.2),
+            (true, "slab") => (run.dmap_rgb16.as_mut().ok_or_else(|| err(NO_DMAP))?, &run.slab_rgb16.as_ref().ok_or_else(|| err(NO_SLAB))?.2),
             (false, _) => (run.fused_rgb16.as_mut().ok_or_else(|| err(NO_FUSED))?, &run.src_rgb16.as_ref().ok_or_else(|| err(NO_SRC))?.1),
             (true, _) => (run.dmap_rgb16.as_mut().ok_or_else(|| err(NO_DMAP))?, &run.src_rgb16.as_ref().ok_or_else(|| err(NO_SRC))?.1),
         };
@@ -1098,6 +1227,8 @@ impl Engine {
             render_count: 0,
             dmap_rgb16: None,
             src_rgb16: None,
+            slab: None,
+            slab_rgb16: None,
             src_gpu: None,
             undo: Vec::new(),
             redo: Vec::new(),

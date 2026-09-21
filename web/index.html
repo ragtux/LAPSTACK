@@ -53,7 +53,7 @@
             <div data-when="compare"><span><kbd>Space</kbd></span><span>hold to flip</span></div>
             <div data-when="canretouch"><span><kbd>R</kbd></span><span>retouch on / off</span></div>
             <div data-when="retouch"><span><kbd>Esc</kbd></span><span>leave retouch</span></div>
-            <div data-when="retouch"><span><kbd>S</kbd></span><span>brush source: frame / other result</span></div>
+            <div data-when="retouch"><span><kbd>S</kbd></span><span>brush source: frame / other result / slab</span></div>
             <div data-when="retouch"><span><kbd>[</kbd><kbd>]</kbd></span><span>brush size</span></div>
             <div data-when="retouch"><span><kbd>Alt</kbd><kbd>wheel</kbd></span><span>brush size</span></div>
             <div data-when="retouch"><span><kbd>Alt</kbd><kbd>⇧</kbd><kbd>wheel</kbd></span><span>brush hardness</span></div>
@@ -107,7 +107,7 @@
           </span>
           <!-- retouch mode: shown whenever LAP or DFR is on screen; on = paint the scrubbed source
                frame (right pane) into the stacked image (left pane) -->
-          <span class="seg" id="rtseg" hidden><button id="retouch" title="paint from a source frame or the other stacked result into the stacked image (R; Esc leaves)">Retouch</button></span>
+          <span class="seg" id="rtseg" hidden><button id="retouch" title="paint from a source frame, a slab or the other stacked result into the stacked image (R; Esc leaves)">Retouch</button></span>
         </div>
       </div>
     </div>
@@ -126,11 +126,16 @@
       </div>
       <button class="section" type="button" data-sec="brush-source">Source</button>
       <div class="sec-body">
-        <!-- what the brush copies from (right pane): the scrubbed frame, or the other stacked
-             result — LAP into DFR or DFR into LAP (needs a Run LAP + DFR) -->
-        <div class="row"><div class="seg" id="bs-seg"><button id="bs-frame" title="paint the scrubbed source frame into the stacked image (S)">Frame</button><button id="bs-stack" hidden>DFR</button></div></div>
+        <!-- what the brush copies from (right pane): the scrubbed frame, the other stacked
+             result — LAP into DFR or DFR into LAP (needs a Run LAP + DFR) — or a slab: the
+             frames around the scrubbed one fused on their own, on demand -->
+        <div class="row"><div class="seg" id="bs-seg"><button id="bs-frame" title="paint the scrubbed source frame into the stacked image (S cycles)">Frame</button><button id="bs-stack" hidden>DFR</button><button id="bs-slab" title="paint from a slab: the frames around the scrubbed one, stacked on their own (S cycles)">Slab</button></div></div>
         <div class="dim small" id="bs-frame-hint">Pick the frame to paint from in the filmstrip, with ←/→ or the slider. It is decoded and re-aligned on demand (~1 s at 45 MP).</div>
         <div class="dim small" id="bs-stack-hint" hidden>The other stacked image: brush the pyramid's fine detail into the depth-map rendering, or its smooth areas back into the pyramid image.</div>
+        <div id="bs-slab-ctl" hidden>
+          <label class="stepper">slab ± frames <span><button data-step="p-slab" data-d="-1">−</button><span id="p-slab" data-min="1" data-max="50">5</span><button data-step="p-slab" data-d="1">+</button></span></label>
+        </div>
+        <div class="dim small" id="bs-slab-hint" hidden>A slab is the scrubbed frame and its neighbours (± this many) stacked on their own with the run's settings — a thick plane of focus to paint from, the way Zerene retouches from slabs. It is fused on demand when the scrub settles (well under a second per frame at 45 MP); the filmstrip marks its frames.</div>
       </div>
       <button class="section" type="button" data-sec="brush-history">History</button>
       <div class="sec-body">
@@ -138,7 +143,7 @@
       </div>
       <button class="section" type="button" data-sec="brush-howto">How to</button>
       <div class="sec-body">
-        <div class="dim small">Left pane: the stacked image (LAP or DFR, whichever is selected) · right pane: the brush source — a source frame, or the other stacked image. The brush previews itself in the left pane: what is inside the circle is what a click would paint there. Drag on either pane to paint the source into the stacked image; shift+drag pans; the wheel picks the source frame and ctrl+wheel zooms; double-click fits / 100 %. Esc or the Retouch button leaves.</div>
+        <div class="dim small">Left pane: the stacked image (LAP or DFR, whichever is selected) · right pane: the brush source — a source frame, a slab of frames around it, or the other stacked image. The brush previews itself in the left pane: what is inside the circle is what a click would paint there. Drag on either pane to paint the source into the stacked image; shift+drag pans; the wheel picks the source frame and ctrl+wheel zooms; double-click fits / 100 %. Esc or the Retouch button leaves.</div>
       </div>
     </div>
     <button class="section" type="button" data-sec="alignment">Alignment</button>

@@ -61,6 +61,16 @@ try {
     log(`depth-map render: ${r2.ms.toFixed(0)} ms, mean |diff| vs pyramid ${dmap.mean_abs_vs_pyramid.toFixed(2)}`);
   }
   const got = new Uint8Array(res.rgba);
+  // the on-demand slab (retouch brush source): over every frame it is the run's own fusion
+  // (same warps, gains and ties), so it must match the LAP result exactly; a partial one
+  // differs from it
+  let slabGen = 0;   // a newer request supersedes an older one: generations must rise
+  const slabOf = async (lo, hi) => { const p = wait('slab'); worker.postMessage({ type: 'slab', lo, hi, files: files.slice(lo, hi + 1), gen: ++slabGen }); return new Uint8Array((await p).rgba); };
+  const slabDiff = (s) => { let mx = 0, nd = 0; for (let i = 0; i < got.length; i += 4) { const d = Math.max(Math.abs(s[i] - got[i]), Math.abs(s[i + 1] - got[i + 1]), Math.abs(s[i + 2] - got[i + 2])); mx = Math.max(mx, d); if (d) nd++; } return { maxdiff: mx, ndiff_frac: nd / (res.w * res.h) }; };
+  const slab = { full: slabDiff(await slabOf(0, res.frames - 1)), part: slabDiff(await slabOf(0, Math.max(0, res.frames >> 1))) };
+  log(`slab: all frames vs LAP maxdiff ${slab.full.maxdiff}; first half vs LAP ${(100 * slab.part.ndiff_frac).toFixed(1)} % of pixels differ`);
+  if (slab.full.maxdiff !== 0) throw new Error(`a slab of every frame differs from the LAP result (maxdiff ${slab.full.maxdiff})`);
+  if (res.frames > 1 && slab.part.ndiff_frac === 0) throw new Error('a slab of half the frames equals the LAP result');
   let maxd = 0, ndiff = 0, sum = 0;
   if (expectedUrl) {
     const exp = await decodeExpected();
@@ -92,7 +102,7 @@ try {
     }
   }
   const result = { ok: true, align, frames: res.frames, w: res.w, h: res.h, maxdiff: maxd, ndiff, ndiff_frac: ndiff / (res.w * res.h),
-    mean_abs: sum / (3 * res.w * res.h), depth_range: [dmin, dmax], depth_dims: [res.depth_w, res.depth_h], dff, dmap, png_bytes: png.bytes.byteLength, ms: res.ms,
+    mean_abs: sum / (3 * res.w * res.h), depth_range: [dmin, dmax], depth_dims: [res.depth_w, res.depth_h], dff, dmap, slab, png_bytes: png.bytes.byteLength, ms: res.ms,
     sims: frames.map(f => f.sim), info };
   log('RESULT ' + JSON.stringify(result));
   window.__result = JSON.stringify(result);

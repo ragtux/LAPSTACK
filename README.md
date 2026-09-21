@@ -342,11 +342,21 @@ whenever LAP or DFR is on screen. It turns the view into a side-by-side
 compare with one zoom/pan — the stacked image on the left (LAP or DFR,
 whichever is selected: that is the paint target), the brush source on the
 right — and shows the brush controls above the run parameters in the
-panel. The source is the scrubbed source frame, or, after a *Run LAP + DFR*,
-the **other stacked result** (the panel's *Source* section, or `S`): DFR
-while LAP is painted, LAP while DFR is, so the pyramid's fine detail can be
-brushed into the depth-map rendering and its smooth areas back into the
-pyramid image, the way Zerene retouches PMax into DMap. A soft brush copies
+panel. The source is the scrubbed source frame; a **slab**; or, after a
+*Run LAP + DFR*, the **other stacked result** (the panel's *Source* section,
+or `S` to cycle): DFR while LAP is painted, LAP while DFR is, so the
+pyramid's fine detail can be brushed into the depth-map rendering and its
+smooth areas back into the pyramid image, the way Zerene retouches PMax into
+DMap. A slab is Zerene's slab made on demand: the scrubbed frame and its
+neighbours (*slab ± frames*, default 5) fused on their own, with the run's
+registration, brightness gains and fusion settings, so the brush copies a
+thick plane of focus instead of one frame's sliver of it — on a deep stack
+that is what most retouching paints from. The engine fuses it when the scrub
+settles (each frame is decoded again, ~0.6 s per 45 MP frame), reusing the
+run's accumulator on the GPU, keeps one slab at a time, and drops a build the
+scrub has moved away from between frames; the filmstrip tints the slab's
+frames, the right pane's label says how far the build is, and once a slab
+exists it is also offered as a compare layer. A soft brush copies
 the *aligned* source into the stacked image, and it shows its work before
 the button goes down: wherever the cursor is, the
 dab a click would lay down is composited into the paint pane, under the

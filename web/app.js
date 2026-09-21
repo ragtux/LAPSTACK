@@ -86,16 +86,17 @@ const st = {
   zoom: 1, ox: 0, oy: 0, fitted: true,
   pick: false,          // ctrl+G: the next canvas click jumps to the frame that won that pixel
   running: false,
-  retouch: { on: false, prev: null, size: 100, hard: 0.5, from: 'source', painting: false, dabs: [], last: null, cursor: null, hold: false,   // on: retouch mode (a compare split, stack layer | brush source); from: 'source' = the scrubbed frame, 'stack' = the other stacked result (see brushFrom); prev: the compare state to restore on exit; hold: the hover preview waits for the next pointer move (see onPatch)
+  retouch: { on: false, prev: null, size: 100, hard: 0.5, from: 'source', painting: false, dabs: [], last: null, cursor: null, hold: false,   // on: retouch mode (a compare split, stack layer | brush source); from: 'source' = the scrubbed frame, 'stack' = the other stacked result, 'slab' = the on-demand slab (see brushFrom); prev: the compare state to restore on exit; hold: the hover preview waits for the next pointer move (see onPatch)
              wasmIndex: -1, loading: -1, gen: 0, genMin: 0, undo: 0, redo: 0,
-             gpuIndex: -1, prefetch: -1, ahead: null, dir: 1, lastSel: -1 },   // see ensureSource(): the frame the worker holds on the GPU, the one being prefetched, the read-ahead slot, the scrub direction
+             gpuIndex: -1, prefetch: -1, ahead: null, dir: 1, lastSel: -1,     // see ensureSource(): the frame the worker holds on the GPU, the one being prefetched, the read-ahead slot, the scrub direction
+             slab: null, slabLoading: null, slabProgress: null, slabGen: 0, slabGenMin: 0 },   // see ensureSlab(): the slab held ({lo, hi, canvas}), the one being built ({lo, hi, gen}), its progress
 };
 window.__st = st; window.__draw = () => draw();
 const dpr = () => window.devicePixelRatio || 1;
 
 // ---------- settings (persisted) ----------
 const PK = 'lapstack.settings';
-const stepDefaults = { 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400 };
+const stepDefaults = { 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5 };
 function readParams() {
   const n = (id) => Number($(id).textContent === 'auto' ? 0 : $(id).textContent);
   return {
@@ -104,7 +105,7 @@ function readParams() {
     top_radius: n('p-topr'), use_chroma: $('p-chroma').checked, proxy_edge: n('p-proxy'),
     depth_scale: n('p-depthscale'), depth_level: n('p-depthlevel'), render_dmap: $('p-dmap').checked,
     turbo: st.turbo, slice: st.slice, peak_on: st.peak.on, peak_strip: st.peak.strip, peak_thr: st.peak.thr, cmp_mode: st.retouch.on && st.retouch.prev ? st.retouch.prev.cmpMode : st.cmpMode,
-    brush_size: st.retouch.size, brush_hard: st.retouch.hard, brush_from: st.retouch.from,
+    brush_size: st.retouch.size, brush_hard: st.retouch.hard, brush_from: st.retouch.from, brush_slab: n('p-slab'),
   };
 }
 function setStep(id, v) {
@@ -120,7 +121,8 @@ function applyParams(p) {
   setStep('p-proxy', p.proxy_edge ?? 1400); st.turbo = p.turbo ?? false;
   setStep('p-depthscale', p.depth_scale ?? 2); setStep('p-depthlevel', p.depth_level ?? 2); $('p-dmap').checked = p.render_dmap ?? false; st.cmpMode = p.cmp_mode ?? 'swipe';
   st.peak.on = p.peak_on ?? false; st.peak.strip = p.peak_strip ?? false; st.peak.thr = p.peak_thr ?? 0.5; st.slice = p.slice ?? true;
-  st.retouch.size = p.brush_size ?? 100; st.retouch.hard = p.brush_hard ?? 0.5; st.retouch.from = p.brush_from === 'stack' ? 'stack' : 'source';
+  st.retouch.size = p.brush_size ?? 100; st.retouch.hard = p.brush_hard ?? 0.5; st.retouch.from = ['stack', 'slab'].includes(p.brush_from) ? p.brush_from : 'source';
+  setStep('p-slab', p.brush_slab ?? 5);
 }
 function saveParams() { try { localStorage.setItem(PK, JSON.stringify(readParams())); } catch {} }
 try { applyParams(JSON.parse(localStorage.getItem(PK))); } catch {}
@@ -130,6 +132,8 @@ document.querySelectorAll('#params [data-step]').forEach((b) => b.addEventListen
   setStep(id, cur + Number(b.dataset.d)); saveParams();
 }));
 document.querySelectorAll('#params input, #params select').forEach((el) => el.addEventListener('change', saveParams));
+// the slab half-width is a brush setting: a change moves the slab's range (ensureSlab, via updateTabs)
+document.querySelectorAll('[data-step="p-slab"]').forEach((b) => b.addEventListener('click', () => { updateTabs(); renderFilmstrip(); draw(); }));
 // Run menu (DFR lives here, not in the parameter panel): the Run label shows the state
 const runLabel = () => { $('run').textContent = $('p-dmap').checked ? 'Run LAP + DFR' : 'Run LAP'; };
 $('p-dmap').addEventListener('change', () => { saveParams(); runLabel(); });
@@ -161,6 +165,9 @@ worker.onmessage = (ev) => {
     case 'thumb': onThumb(m); break;
     case 'source': onSource(m); break;
     case 'source-skipped': onSourceSkipped(m); break;
+    case 'slab': onSlab(m); break;
+    case 'slab-skipped': onSlabSkipped(m); break;
+    case 'slab-progress': onSlabProgress(m); break;
     case 'patch': onPatch(m); break;
     case 'thumb-error': log(`[lapstack] cannot decode ${m.name}: ${m.text}`); break;
     case 'done': onDone(m); break;
@@ -236,6 +243,7 @@ function renderThumb(i) {
 function thumbEl(i) {
   const f = st.files[i];
   const d = document.createElement('div'); d.className = 'thumb' + (i === st.selected && scrubbable() ? ' sel' : '');
+  if (R.on && brushFrom() === 'slab') { const [lo, hi] = slabWanted(); if (i >= lo && i <= hi) d.classList.add('slab'); }   // the frames the brush source is fused from
   const fr = st.frames[i];
   const bmp = fr && (fr.strip || fr.thumb);
   if (bmp) {
@@ -875,7 +883,7 @@ function srcPut(i, cv) {
 }
 function srcClear() { for (const cv of srcCache.values()) cv.width = 1; srcCache.clear(); }
 window.__srcCache = srcCache; window.__srcBudget = (b) => { SRC_BUDGET = b; };
-function resetRetouch() { srcClear(); R.on = false; R.prev = null; R.cursor = null; R.hold = false; R.wasmIndex = -1; R.gpuIndex = -1; R.loading = -1; R.prefetch = -1; R.ahead = null; R.gen++; R.genMin = R.gen; R.undo = 0; R.redo = 0; R.painting = false; R.dabs = []; }
+function resetRetouch() { srcClear(); slabDrop(); R.slabLoading = null; R.slabProgress = null; R.slabGen++; R.slabGenMin = R.slabGen; R.on = false; R.prev = null; R.cursor = null; R.hold = false; R.wasmIndex = -1; R.gpuIndex = -1; R.loading = -1; R.prefetch = -1; R.ahead = null; R.gen++; R.genMin = R.gen; R.undo = 0; R.redo = 0; R.painting = false; R.dabs = []; }
 let srcTimer = null;
 // The Source and In focus layers are drawn from the proxy (proxy_edge px long
 // side) until the full-res aligned frame arrives, so a run's result is never
@@ -951,23 +959,79 @@ async function onSource(m) {
 }
 // the worker dropped a request that a newer one had superseded; ask again for what is on screen now
 function onSourceSkipped(m) { if (R.loading === m.index) R.loading = -1; if (R.prefetch === m.index) R.prefetch = -1; ensureSource(); updateTabs(); }
+// ---------- the slab brush source ----------
+// Zerene's slabs, made on demand: the frames within ±(slab ± frames) of the scrubbed
+// one, fused on their own by the worker with the run's registration, gains and fusion
+// settings, so the brush copies a thick plane of focus rather than one frame's sliver.
+// One slab is held at a time (a full-res canvas here, the 16-bit master in the worker);
+// scrubbing moves the range, and the rebuild waits until the scrub settles, since each
+// costs a decode per frame. A build the range has moved away from is dropped between
+// frames (the worker compares generations).
+const slabHalf = () => Number($('p-slab').textContent);
+const slabWanted = () => { const h = slabHalf(); return [Math.max(0, st.selected - h), Math.min(st.files.length - 1, st.selected + h)]; };
+const slabIs = (s, lo, hi) => !!s && s.lo === lo && s.hi === hi;
+const slabReady = () => { const [lo, hi] = slabWanted(); return slabIs(R.slab, lo, hi); };
+function slabDrop() { if (R.slab) R.slab.canvas.width = 1; R.slab = null; }
+let slabTimer = null;
+const slabNeeded = () => R.on && brushFrom() === 'slab' && !!st.result && st.files.length > 0 && !st.running;
+function ensureSlab() {
+  if (!slabNeeded()) return;
+  const [lo, hi] = slabWanted();
+  if (slabIs(R.slab, lo, hi) || slabIs(R.slabLoading, lo, hi)) return;
+  clearTimeout(slabTimer);
+  slabTimer = setTimeout(() => {
+    if (!slabNeeded()) return;
+    const [lo, hi] = slabWanted();
+    if (slabIs(R.slab, lo, hi) || slabIs(R.slabLoading, lo, hi)) return;
+    const gen = ++R.slabGen;
+    R.slabLoading = { lo, hi, gen }; R.slabProgress = null;
+    R.gpuIndex = -1;   // the fold takes the worker's GPU-resident source frame with it
+    worker.postMessage({ type: 'slab', lo, hi, files: st.files.slice(lo, hi + 1), gen });
+    log(`[lapstack] slab ${lo}..${hi}: fusing ${hi - lo + 1} frames`);
+    updateTabs(); draw();
+  }, 300);
+}
+function onSlab(m) {
+  if (R.slabLoading && R.slabLoading.gen === m.gen) R.slabLoading = null;
+  R.slabProgress = null;
+  if (!st.result || m.gen < R.slabGenMin) return;   // from a run that is gone
+  slabDrop();
+  const cv = new OffscreenCanvas(m.w, m.h);
+  cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(m.rgba), m.w, m.h), 0, 0);
+  R.slab = { lo: m.lo, hi: m.hi, canvas: cv };
+  log(`[lapstack] slab ${m.lo}..${m.hi} ready`);
+  ensureSlab();   // the range scrubbed to meanwhile
+  updateTabs(); renderFilmstrip(); draw();
+}
+function onSlabSkipped(m) { if (R.slabLoading && R.slabLoading.gen === m.gen) R.slabLoading = null; R.slabProgress = null; ensureSlab(); updateTabs(); draw(); }
+function onSlabProgress(m) { if (R.slabLoading && R.slabLoading.gen === m.gen) { R.slabProgress = { done: m.done, total: m.total }; draw(); } }
+// the right pane's label for the slab: the range wanted, and how far its build is
+function slabLabel() {
+  if (!R.on) return R.slab ? `Slab ${R.slab.lo + 1}–${R.slab.hi + 1}` : 'Slab';
+  const [lo, hi] = slabWanted(), name = `Slab ${lo + 1}–${hi + 1}`;
+  if (slabIs(R.slab, lo, hi)) return name;
+  const p = R.slabProgress;
+  return `${name} — ${slabIs(R.slabLoading, lo, hi) ? (p ? `fusing ${p.done}/${p.total}…` : 'fusing…') : 'waiting…'}`;
+}
 // the paint target is the stacked image on screen: DFR when it is the view, else LAP
 const target = () => (st.view === 'dmap' && haveDmap()) ? 'dmap' : 'fused';
 const targetCanvas = () => st.result && st.result[target()];
-// The brush source: the scrubbed frame ('source'), or the other stacked result — DFR
-// while LAP is painted, LAP while DFR is — the way Zerene brushes PMax detail into a
-// DMap. It needs both results, so without a depth-map rendering the choice falls back
-// to the frame. The source is what the right pane shows (updateTabs pins st.cmp to it).
+// The brush source: the scrubbed frame ('source'), the slab around it ('slab'), or the
+// other stacked result — DFR while LAP is painted, LAP while DFR is — the way Zerene
+// brushes PMax detail into a DMap. That one needs both results, so without a depth-map
+// rendering the choice falls back to the frame. The source is what the right pane shows
+// (updateTabs pins st.cmp to it).
 const otherResult = () => (target() === 'dmap' ? 'fused' : 'dmap');
-const brushFrom = () => (R.from === 'stack' && haveDmap() ? otherResult() : 'source');
-const brushCanvas = () => (brushFrom() === 'source' ? srcGet(st.selected) : st.result && st.result[brushFrom()]);
+const brushFrom = () => (R.from === 'slab' ? 'slab' : R.from === 'stack' && haveDmap() ? otherResult() : 'source');
+const brushCanvas = () => (brushFrom() === 'source' ? srcGet(st.selected) : brushFrom() === 'slab' ? (slabReady() ? R.slab.canvas : null) : st.result && st.result[brushFrom()]);
 const brushReady = () => (brushFrom() === 'source' ? R.wasmIndex === st.selected && !!srcGet(st.selected) : !!brushCanvas());
 function setBrushFrom(from) {
-  R.from = from === 'stack' ? 'stack' : 'source';
+  R.from = ['stack', 'slab'].includes(from) ? from : 'source';
   saveParams(); updateTabs(); renderFilmstrip(); draw();
 }
 $('bs-frame').addEventListener('click', () => setBrushFrom('source'));
 $('bs-stack').addEventListener('click', () => setBrushFrom('stack'));
+$('bs-slab').addEventListener('click', () => setBrushFrom('slab'));
 function onPatch(m) {
   R.undo = m.undo; R.redo = m.redo; updateTabs();
   if (!m.rgba || !st.result) return;
@@ -1105,6 +1169,13 @@ function layerFor(tab) {
     let overlay = null;
     if (st.slice && st.files.length) { overlay = st.sliceBmps.get(`slice:${st.selected}`) || null; if (!overlay) sliceBitmap(st.selected).then(draw); }
     return { bmp, w: st.result.w, h: st.result.h, pixelated: true, overlay, overlayPixelated: true };
+  }
+  if (tab === 'slab') {
+    // the slab held (its range may lag the scrub: the label says so), else the scrubbed frame's proxy
+    if (!st.result) return null;
+    if (R.slab) return { bmp: R.slab.canvas, w: st.result.w, h: st.result.h };
+    const f = st.frames[st.selected]; const bmp = f && (f.proxy || f.thumb);
+    return bmp ? { bmp, w: st.result.w, h: st.result.h } : null;
   }
   const f = st.frames[st.selected]; const bmp = f && (f.proxy || f.thumb); if (!bmp) return null;
   const [w, h] = f.w ? [f.w, f.h] : [bmp.width, bmp.height];
@@ -1255,7 +1326,7 @@ function draw() {
     const A = layerFor(st.view), B = layerFor(st.cmp);
     const [L, Rt] = st.flipped ? [B, A] : [A, B];
     const labels = st.flipped ? [layerLabel(st.cmp), layerLabel(st.view)] : [layerLabel(st.view), layerLabel(st.cmp)];
-    if (retouch) { labels[0] += ' — drag to paint, shift+drag pans'; if (!labels[1].includes(' — ')) labels[1] += brushFrom() === 'source' ? ' — brush source, wheel scrubs' : ' — brush source'; }   // a loading hint keeps its line
+    if (retouch) { labels[0] += ' — drag to paint, shift+drag pans'; if (!labels[1].includes(' — ')) labels[1] += usesFrame(st.cmp) ? ' — brush source, wheel scrubs' : ' — brush source'; }   // a loading hint keeps its line
     drawLayer(L); drawCrop(ctx); if (retouch) paintMarks(ctx, d, true);   // the paint pane: the hover preview lands here
     ctx2.setTransform(1, 0, 0, 1, 0, 0); ctx2.fillStyle = '#141416'; ctx2.fillRect(0, 0, canvas2.width, canvas2.height);
     ctx2.setTransform(st.zoom * d, 0, 0, st.zoom * d, st.ox * d, st.oy * d);
@@ -1395,7 +1466,7 @@ for (const cv of [canvas, canvas2]) {
     const paint = R.on && st.result && e.button === 0 && !e.shiftKey && !(e.buttons & 4);
     try { cv.setPointerCapture(e.pointerId); } catch {}
     if (paint) {
-      if (!brushReady()) { toast('Source frame still loading — wait for "loaded" before painting.', 3000); return; }
+      if (!brushReady()) { toast(brushFrom() === 'slab' ? 'The slab is still being fused — wait for it before painting.' : 'Source frame still loading — wait for "loaded" before painting.', 3000); return; }
       R.painting = true; R.dabs = []; R.last = null; const [x, y] = imgXY(cv, e); addDab(x, y); draw(); return;
     }
     drag = { x: e.clientX, y: e.clientY, ox: st.ox, oy: st.oy }; cv.classList.add('drag');
@@ -1419,7 +1490,7 @@ $('divider').addEventListener('pointerup', () => { ddrag = false; });
 $('fit').addEventListener('click', fit); $('z100').addEventListener('click', zoom100);
 
 // ---------- header: view / context / compare / scrub ----------
-const LAYERS = [['fused', 'LAP'], ['dmap', 'DFR'], ['depth', 'Focus depth'], ['focus', 'In focus'], ['source', 'Source']];
+const LAYERS = [['fused', 'LAP'], ['dmap', 'DFR'], ['depth', 'Focus depth'], ['focus', 'In focus'], ['source', 'Source'], ['slab', 'Slab']];   // slab: the retouch brush source, once one has been fused
 // Header groups: Source | Stack (LAP, DFR) | Depth (Focus depth, In focus). The sub-control
 // lists the group's layers and is hidden when the group has only one.
 const GROUPS = { source: ['source'], stack: ['fused', 'dmap'], depth: ['depth', 'focus'] };
@@ -1427,11 +1498,11 @@ const groupOf = (v) => Object.keys(GROUPS).find((g) => GROUPS[g].includes(v)) ||
 const lastIn = { stack: 'fused', depth: 'depth' };   // last layer picked in each group
 const layerName = (id) => (LAYERS.find((l) => l[0] === id) || [id, id])[1];
 // while the full-res frame decodes, say so: the pane is showing the proxy
-const layerLabel = (id) => (usesSource(id) && st.result && (!srcCache.has(id === 'focus' ? `focus:${st.selected}` : st.selected) || (R.on && id === 'source' && R.wasmIndex !== st.selected)))
+const layerLabel = (id) => id === 'slab' ? slabLabel() : (usesSource(id) && st.result && (!srcCache.has(id === 'focus' ? `focus:${st.selected}` : st.selected) || (R.on && id === 'source' && R.wasmIndex !== st.selected)))
   ? `${layerName(id)} — loading full res…` : layerName(id);
 const haveDmap = () => !!(st.result && st.result.dmap);
 // layers that depend on the scrubbed frame
-const usesFrame = (t) => usesSource(t) || (isDepthLayer(t) && st.slice);
+const usesFrame = (t) => usesSource(t) || (t === 'slab' && R.on) || (isDepthLayer(t) && st.slice);   // the slab follows the scrub while it is the brush source
 function scrubbable() { return usesFrame(st.view) || (st.compare && usesFrame(st.cmp)); }
 function updateTabs() {
   const have = !!st.result;
@@ -1450,21 +1521,22 @@ function updateTabs() {
   // the brush source picker: the frame, or the other result (only once there are two)
   $('bs-stack').hidden = !haveDmap(); $('bs-stack').textContent = layerName(otherResult());
   $('bs-stack').title = `paint the ${layerName(otherResult())} image into ${layerName(target())} (S)`;
-  $('bs-frame').classList.toggle('on', brushFrom() === 'source'); $('bs-stack').classList.toggle('on', brushFrom() !== 'source');
-  $('bs-frame-hint').hidden = brushFrom() !== 'source'; $('bs-stack-hint').hidden = brushFrom() === 'source';
+  const from = brushFrom(), fromStack = from === 'fused' || from === 'dmap';
+  $('bs-frame').classList.toggle('on', from === 'source'); $('bs-stack').classList.toggle('on', fromStack); $('bs-slab').classList.toggle('on', from === 'slab');
+  $('bs-frame-hint').hidden = from !== 'source'; $('bs-stack-hint').hidden = !fromStack; $('bs-slab-hint').hidden = from !== 'slab'; $('bs-slab-ctl').hidden = from !== 'slab';
   $('undo').disabled = !R.undo; $('redo').disabled = !R.redo; $('hist').textContent = R.undo || R.redo ? `${R.undo} undo · ${R.redo} redo` : '';
   $('ab').parentElement.hidden = st.step !== 'stack';
   // the Retouch button: whenever a stacked image is on screen (as the view or the compare partner)
   const canRetouch = have && st.step === 'stack' && (group === 'stack' || (st.compare && groupOf(st.cmp) === 'stack'));
   $('rtseg').hidden = !canRetouch; $('retouch').classList.toggle('on', retouch);
-  ensureSource();
+  ensureSource(); ensureSlab();
   document.querySelectorAll('#viewseg button').forEach((b) => b.classList.toggle('on', b.dataset.group === group));
   const subs = (GROUPS[group] || []).filter((t) => t !== 'dmap' || haveDmap());
   $('subseg').hidden = st.step !== 'stack' || subs.length < 2;
   document.querySelectorAll('#subseg button').forEach((b) => { b.hidden = !subs.includes(b.dataset.tab); b.classList.toggle('on', b.dataset.tab === st.view); });
   if (group) $('subseg').dataset.group = group; else delete $('subseg').dataset.group;
   // compare partner: any layer but the current view
-  const choices = LAYERS.filter(([id]) => id !== st.view && (id !== 'source' || st.files.length) && (id !== 'dmap' || haveDmap()));
+  const choices = LAYERS.filter(([id]) => id !== st.view && (id !== 'source' || st.files.length) && (id !== 'dmap' || haveDmap()) && (id !== 'slab' || !!R.slab || (retouch && brushFrom() === 'slab')));   // the slab: once one exists, and while it is being made for the brush
   if (!choices.some(([id]) => id === st.cmp)) st.cmp = choices[0] ? choices[0][0] : 'depth';
   const menu = $('cmp-menu'); menu.innerHTML = '';
   for (const [id, name] of choices) { const b = document.createElement('button'); b.textContent = name; b.dataset.value = id; b.dataset.group = groupOf(id); b.classList.toggle('on', id === st.cmp); menu.appendChild(b); }
@@ -1554,7 +1626,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === '[' && R.on) setBrush(R.size / 1.25, R.hard); else if (e.key === ']' && R.on) setBrush(R.size * 1.25, R.hard);
-  else if (e.key === 's' && R.on && !e.ctrlKey && !e.metaKey) { if (haveDmap()) setBrushFrom(R.from === 'stack' ? 'source' : 'stack'); else toast('Run LAP + DFR to paint from the other result.', 3000); }
+  else if (e.key === 's' && R.on && !e.ctrlKey && !e.metaKey) { const order = haveDmap() ? ['source', 'stack', 'slab'] : ['source', 'slab']; setBrushFrom(order[(order.indexOf(R.from) + 1) % order.length]); }   // frame → other result (once there is one) → slab
   else if (e.key === '1') gotoStep('stack'); else if (e.key === '2') gotoStep('save');
   else if (e.key === 'r' && !e.ctrlKey && !e.metaKey) toggleRetouch();
   else if (e.key === 'ArrowLeft') scrub(e.shiftKey ? -10 : -1); else if (e.key === 'ArrowRight') scrub(e.shiftKey ? 10 : 1);

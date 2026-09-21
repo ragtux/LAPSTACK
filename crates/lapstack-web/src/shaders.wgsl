@@ -139,6 +139,11 @@ fn sel(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg
     }
 }
 @compute @workgroup_size(256)
+fn fill(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = gid1(g, nwg); if (i >= p.w) { return; }
+    o[i] = p.f0;
+}
+@compute @workgroup_size(256)
 fn clamp01(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = gid1(g, nwg); if (i >= p.w * p.h * 3u) { return; }
     o[i] = clamp(o[i], 0.0, 1.0);

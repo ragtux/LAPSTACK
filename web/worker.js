@@ -1,5 +1,5 @@
 // lapstack worker: owns the WASM engine and the WebGPU device. The page sends
-// {type:'init'|'run'|'cancel'|'save'}; the worker answers with progress and
+// {type:'init'|'run'|'cancel'|'load_source'|'slab'|'stroke'|'save'|…}; the worker answers with progress and
 // results (large buffers are transferred, not copied).
 // The WASM glue and binary are imported on 'init' with a per-load query
 // string so a rebuilt pkg/ is never served from the browser cache (a stale
@@ -29,6 +29,7 @@ let running = false;
 let thumbJob = null;      // {files, indices, edge, gen} being decoded in the background
 let thumbGen = 0;
 let sourceGen = -1;       // newest 'load_source' request seen; older ones still queued are skipped
+let slabGen = -1;         // newest 'slab' request seen; an older one still queued, or in progress, is dropped
 
 // Decode + downscale added frames one by one (yielding between frames so a
 // 'run' or 'cancel' message can interleave); a run pauses this until it ends.
@@ -85,6 +86,7 @@ self.onmessage = (ev) => {
   if (m.type === 'cancel') { cancelled = true; return; }
   if (m.type === 'clear') { thumbGen++; thumbJob = null; return; }
   if (m.type === 'load_source') sourceGen = Math.max(sourceGen, m.gen);
+  if (m.type === 'slab') slabGen = Math.max(slabGen, m.gen);
   if (m.rid) rpc(m, () => handleCall(m)); else enqueue(() => handle(m));
 };
 
@@ -227,6 +229,25 @@ async function handle(m) {
       else if (held) r = await engine.source_readback();
       const rgba = r.rgba;
       post({ type: 'source', index: r.index, w: r.w, h: r.h, rgba: rgba.buffer, gen: m.gen, focus: !!m.focus, prefetch: !!m.prefetch }, [rgba.buffer]);
+    } else if (m.type === 'slab') {
+      // The on-demand slab: frames m.lo..m.hi (m.files, in that order) fused on their own
+      // as the retouch brush source. Each frame is decoded again, so a request the page
+      // has since superseded (the user scrubbed on) is dropped, also between frames.
+      if (running) return;
+      const total = m.hi - m.lo + 1;
+      const skip = () => post({ type: 'slab-skipped', lo: m.lo, hi: m.hi, gen: m.gen });
+      if (m.gen < slabGen) { skip(); return; }
+      engine.slab_begin(m.lo, m.hi);
+      let next = readAhead(m.files[0]);
+      for (let i = 0; i < total; i++) {
+        post({ type: 'slab-progress', lo: m.lo, hi: m.hi, done: i, total, gen: m.gen });
+        const bytes = new Uint8Array(await next);
+        next = i + 1 < total ? readAhead(m.files[i + 1]) : null;
+        await engine.slab_push(m.lo + i, bytes);
+        if (m.gen < slabGen) { engine.slab_cancel(); skip(); return; }
+      }
+      const r = await engine.slab_finish();
+      post({ type: 'slab', lo: r.lo, hi: r.hi, w: r.w, h: r.h, rgba: r.rgba.buffer, gen: m.gen }, [r.rgba.buffer]);
     } else if (m.type === 'stroke' || m.type === 'undo' || m.type === 'redo') {
       const r = m.type === 'stroke' ? engine.stroke(m.dabs, m.target || 'fused', m.from || 'source') : m.type === 'undo' ? engine.undo() : engine.redo();
       const hist = engine.history();

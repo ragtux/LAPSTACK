@@ -45,6 +45,7 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #filmstrip .empty { padding: 12px; text-align: center; }
 .thumb { border: 2px solid transparent; border-radius: 4px; padding: 3px; cursor: pointer; background: var(--widget); }
 .thumb.sel { border-color: var(--accent); }
+.thumb.slab { background: color-mix(in srgb, var(--accent) 22%, var(--widget)); }   /* a frame of the slab the brush paints from */
 .thumb canvas, .thumb .ph { width: 100%; height: 100px; object-fit: contain; display: block; background: #111; border-radius: 2px; }
 .thumb .ph { display: flex; align-items: center; justify-content: center; color: var(--dim); }
 .thumb .name { font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 3px; }
