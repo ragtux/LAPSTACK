@@ -245,6 +245,8 @@ body.log-collapsed #toasts { bottom: 46px; }
 #vwrap.shift canvas { cursor: move; }
 /* ctrl+G: pick the frame that won a pixel */
 #vwrap.pick canvas { cursor: crosshair; }
+#vwrap.croptool canvas { cursor: crosshair; }
+#cropseg #cropclear { padding: 0 6px; }
 /* except in retouch mode, where all three are drawn into both panes instead: the pick
    cross, the pan arrows and the zoom lens (paintMarks) */
 #vwrap.marks canvas { cursor: none; }

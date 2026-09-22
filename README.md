@@ -17,11 +17,13 @@ stacking on the Laplacian pyramid, written from two papers kept in `docs/`:
 ## Layout
 
 ```
-crates/lapstack-core   library: pyramid, fusion, depth from focus, aligner, dust map, stereo views, 3D model, batch splitting, I/O, CUDA path, pooling allocator
+crates/lapstack-core   library: pyramid, fusion, depth from focus, aligner, dust map, stereo views, 3D model, batch splitting, I/O, linear DNG, frame preparation, CUDA path, pooling allocator
 crates/lapstack-cli    `lapstack` command-line tool
 crates/lapstack-web    wasm32 + WebGPU engine for the browser app
 web/                   the browser app (static files) and its headless test
 docs/                  the two papers the algorithm is written from
+lightroom/             the Lightroom Classic plugin (the CLI as an export target and a Library menu item)
+desktop/               the browser app as an Electron desktop application
 ```
 
 ## Build & run (native)
@@ -230,13 +232,65 @@ raw's capture time for the batch split is read from its TIFF structure
 where it has one (NEF, CR2, ARW, DNG, …) and else by rawler's own reader
 (CR3, RAF, …), the whole file in either case. In the browser the filmstrip
 shows the JPEG preview the camera wrote into the file, and the run develops
-the frame. The core crate's `raw` feature (on by default) carries rawler,
+the frame. The linear DNG output (below) develops the raws another way. The core crate's `raw` feature (on by default) carries rawler,
 which is vendored in `vendor/rawler` (the workspace's `[patch.crates-io]`)
 with one change, so that it runs in the browser: `std::time::Instant`, which
 the demosaic and the CR3 decoder use for a timing log line, has no
 implementation on wasm32 and panics there, so a shim reads zero on wasm
 (`vendor/rawler/LAPSTACK-PATCH.md` says how to move to a newer rawler);
 without the feature a raw file is refused.
+
+**Linear DNG output** (`dng.rs`; `-o stacked.dng`): Helicon Focus's "RAW in,
+DNG out". With a `.dng` output the raws are not developed to sRGB: each is
+decoded to the camera's own linear space — black and white levels, demosaic,
+the sensor's crop, turned by its orientation, and nothing else
+(`raw::develop_linear`) — and the stack is fused in a *look* space made from
+frame 0's as-shot white balance and the camera's D65 matrix followed by the
+sRGB curve, the ordinary development except that nothing is clipped: the
+curve is extended above 1 and mirrored below 0, so a highlight past white or
+a colour outside sRGB keeps its value and the transform stays invertible
+(`DngInfo::to_look`). The fusion therefore makes the same decisions it makes
+on a normally developed stack (the luma it selects by is the ordinary one),
+every frame is developed alike (frame 0's white balance is applied to all,
+as the raw section says a stack needs), and the result is taken back through
+the inverse curve, the inverse matrix and the inverse white balance to camera
+space (`DngInfo::from_look`) and written as a DNG 1.4 with
+`PhotometricInterpretation` LinearRaw, 16 bits per sample, `WhiteLevel`
+65535, the camera's `ColorMatrix1` / `ColorMatrix2` with their illuminants
+(the cooler light first, as Adobe writes them), `AsShotNeutral` (the
+reciprocal of the white balance, green = 1), `UniqueCameraModel`, Make and
+Model, the first frame's Exif IFD and XMP (no ICC profile: a DNG's colour is
+its matrices) and Orientation 1 (`meta::write_dng`). A raw converter then
+develops the stacked image like one of the raws — exposure, white balance,
+profile and highlight recovery still open, since the camera data above the
+balanced white is kept where an sRGB development would have clipped it.
+Checked on five NEFs of the Z 8: darktable develops the DNG and the first NEF
+to the same colours and brightness. Frames that are not raws are taken as
+sRGB — their linear values are the "camera space", `ColorMatrix1` is XYZ →
+sRGB at D65 and the neutral is 1, 1, 1 — so any stack can come out as a DNG,
+but only a raw's carries more than its file did; a stack must be all raws or
+none. The slabs, the weighted average and the stereo pair are DNGs as well;
+the rocking views are TIFFs (a video is made of them), the depth maps PNGs.
+A raw's EXIF Orientation is reset to 1 in every output now (the frame was
+turned as decoded; a viewer must not turn the result again).
+
+**Frame preparation** (`prep.rs`): what a frame goes through as it is decoded,
+after the dust map (which is in the sensor's orientation and size).
+`--rotate 90 | 180 | 270` turns every frame clockwise, for a camera held
+sideways (a raw is already turned by its EXIF orientation; a TIFF or JPEG is
+not). `--draft N` block-averages every frame by 2^N, so the whole run —
+alignment, fusion, depth pass, every view and file — is a quick check of the
+settings at 1/2^N the size: five 45 MP raws at `--draft 2` align, fuse and
+run the depth pass in 4 s, the raw development included; `--crop` and the
+scale bar's calibration follow the frame's own
+pixels, so a draft's output is the full run's shrunk. A frame of another size
+than frame 0 (a JPEG among the raws, another camera mode) is no longer
+refused: it is resampled to frame 0's size (each axis on its own, with
+spline 4×4) and the run says so; the alignment takes care of what is left,
+and a stretched frame of the wrong aspect is visible in the output. `--crop
+X,Y,W,H` cuts every output to a window of the (turned) frame, in
+full-resolution pixels, inside the automatic crop to the area every frame
+covers; a window outside that area stops the run.
 
 **Weighted average** (`wav.rs`; `--wav`, `--wav-power P`, `--wav-smooth R`):
 Helicon Focus's method A as a second image, `<stem>_wav.<ext>` — every
@@ -388,10 +442,25 @@ cross-eyed (`cross`) or as a red–cyan anaglyph; `--rocking` writes N views
 `<stem>_rocking/view_NN.<ext>` (join them with ffmpeg or ImageMagick), and
 `--video FPS` joins them itself into `<stem>_rocking.mp4` (H.264, crf 18,
 the size made even) when ffmpeg is on the path — the command to run by hand
-is printed when it is not. Which
-end is near decides who wins where surfaces overlap: frame 0 is taken as the
-near end (the focus went front to back); `--far-first` says otherwise — the
-symptom of the wrong choice is a relief that looks inside out.
+is printed when it is not. Which end is near decides who wins where surfaces
+overlap, and `--near-end auto | first | last` says which end frame 0 is
+(`--far-first` = `last`). `auto`, the default, reads the focus distance the
+camera recorded in the first and last frames — the focus went from the
+smaller distance to the larger — and takes frame 0 as the near end when
+there is none. The standard EXIF SubjectDistance is read by lapstack itself
+(`meta::subject_distance`, the TIFF structure or the XMP); most cameras keep
+the distance in their MakerNote instead (Nikon's is even encrypted), so when
+`exiftool` is on the path it is asked for SubjectDistance, FocusDistance,
+Canon's FocusDistanceUpper / Lower and Sony's FocusDistance2
+(`io::exiftool_distance`, two calls of 0.1 s), which covers the Z 8's NEFs
+here (0.78 m in the first frame, 1.44 m in the last: frame 0 near). The
+frames' scale over the stack is logged as a hint but does not decide: on a
+rail, or with a lens that extends to focus closer, the near frames are the
+larger ones and a stack shot near to far is enlarged towards its end to fit
+frame 0; an internal-focus lens that widens as it focuses closer breathes
+the other way, and the sign says nothing without knowing the lens. The
+symptom of the wrong choice is a relief that looks inside out; the run logs
+which cue decided.
 
 **3D model** (`mesh.rs`; `--mesh glb,obj,stl`): Helicon Focus's 3D model —
 the depth map makes the result a relief, and the model is that relief as a
@@ -623,7 +692,9 @@ names, animations, content credentials). Keys 1/2 switch steps.
 
 *Stack* is the workbench: a filmstrip (thumbnails arrive as frames are
 added, with each frame's registration once aligned), a parameter panel (all
-`lapstack` knobs, persisted in localStorage), Run/Cancel with progress and a
+`lapstack` knobs, persisted in localStorage — *rotate frames* and *draft*
+among them: the CLI's `--rotate` and `--draft`, the thumbnails turned with
+the frames, the Run button reading *draft ÷4*), Run/Cancel with progress and a
 log, and a viewer whose header is a segmented **Source / Stack / Depth**
 control with a second-level control for the group's layers — **LAP / DFR**
 under Stack (DFR only when the depth-map render ran), **Focus depth /
@@ -634,7 +705,12 @@ Gray/Turbo LUT and a **slice** toggle; a frame slider whenever the shown
 layers depend on a frame; and on the right a **compare** toggle whose "vs" dropdown lists
 the other layers (the divider is draggable, `flip` or space swaps sides);
 a **Retouch** button in the top-right corner whenever LAP or DFR is on
-screen (see below).
+screen (see below), and beside it **Crop** (`C`), which arms a drag on the
+stacked image: the rectangle drawn becomes the run's crop window — the
+CLI's `--crop`, cut to the area every frame covers by the engine
+(`crop_set`), shown as the bright window, applied to every file the Save
+step writes, kept by a project file and cleared with the ✕ beside the button
+or in the Save step's *Crop* section (which also has *set a window…*).
 Scroll-zoom at the cursor, drag pan, double-click fit/100 %, wheel / ←/→
 scrub (shift = 10; ctrl+wheel zooms on scrubbable views). Drag-and-drop
 works. Added frames are decoded and downscaled in the worker straight away
@@ -684,8 +760,12 @@ gets the GIF alone.
 **Stereo and rocking** are the CLI's synthetic stereo (above) in the
 browser: the card's section has the stereo shift, the pair's layout
 (parallel, cross-eyed, anaglyph), the rocking shift and frames per cycle,
-the image to shear (LAP, or DFR when it was rendered) and the near-end
-switch. The engine cuts the master and the full-resolution depth map to the
+the image to shear (LAP, or DFR when it was rendered) and the *near end*:
+frame 0 the nearest, the farthest, or *what the frames say* — the EXIF
+SubjectDistance of the first and last frames, read by the page's own EXIF
+reader (`subjectDistance`; a MakerNote's distance is beyond it, so a stack
+whose camera keeps it there falls back to frame 0 near, and the section's
+line says which cue, if any, decided). The engine cuts the master and the full-resolution depth map to the
 crop and shrinks them to the view size once (`view_prepare`), then shears a
 view per call (`view_rgba` for the GIF's frames at the animation size,
 `view_stereo` for the pair, saved at the crop's size in the chosen format and
@@ -839,6 +919,21 @@ layer of the Stack group, the retouch's third target — the brush's *Result*
 source lists the run's other images and the kept results together — a row of
 the Save step, an image for the stereo, rocking and 3D model, and a kept
 result like the others.
+
+**Linear DNG** (the same ▾ menu): the CLI's `-o stacked.dng` in the browser.
+With the box ticked the run develops each raw to its camera space and fuses
+in the look of frame 0's white balance and matrix (`Engine::decode`, the
+same `dng.rs` as the CLI; a frame that is not a raw is the look already), the
+Run button reads *→ DNG*, the log says whose space the run is in, and the
+Save step's *format* offers **DNG, linear (camera space)** — disabled, with
+a line saying why, after a run made without the box. The stacked images, the
+kept results of such a run and the stereo pair (sheared or refolded) are
+then written as linear DNGs by `encode` / `view_stereo` / `refold_stereo`
+through the core writer, with the first frame's EXIF and XMP; the maps and
+animations are what they always are. The browser's frames are 16-bit, so a
+highlight past the balanced white is clipped here where the CLI keeps it;
+the colour matrices, neutral and metadata are the same. Checked headless on
+five NEFs: the DNG darktable develops from the browser matches the CLI's.
 
 **Batch** (the same ▾ menu, *split into stacks*): the CLI's `--split` for
 the browser. *Add folder…* takes a whole folder (its subfolders too; a
@@ -1071,6 +1166,68 @@ WebGPU validation error) to the page's log, where the harness sees them.
 rebuild a plain reload is enough (a hard reload alone can keep a cached
 worker / WASM and the page then waits for messages the old worker never
 sends).
+
+## Lightroom Classic plugin (`lightroom/`)
+
+`lightroom/lapstack.lrplugin` is the round trip Helicon Focus and Zerene
+Stacker offer from Lightroom: the frames of a stack go out of the catalogue
+to the `lapstack` CLI and the stacked image comes back into it. Add the
+folder in File › Plug-in Manager and set the path to the lapstack binary and
+the stacking settings in its section (output format tif / png / dng, a name
+template with `{first}` and `{n}`, alignment and its coarsening, halo
+control, `--wav`, `--save-depth`, CUDA, extra options appended verbatim,
+whether the rendered frames are kept). Then either select the frames of one
+stack and choose Library › Plug-in Extras › **Stack with lapstack**, which
+renders them as 16-bit TIFFs (or hands over the original raws, for a DNG
+output) into a temporary folder, runs lapstack over them in the order of
+the selection and imports the result stacked above the first frame,
+selected; or File › Export with **lapstack** as the *Export To* target, which
+keeps Lightroom's own file, size and metadata sections, adds the plug-in's,
+and does the same with what Lightroom rendered — an export preset carries
+the settings, and an export makes them the menu item's too. The result lands
+next to the first frame as `<first>_stacked.<ext>` with the CLI's log
+(`<stem>.lapstack.log`) beside it; a failure shows the log's tail. The CLI
+cannot be interrupted once it runs (LrTasks.execute blocks its task); a
+selection is one stack (`--split` in the extra options cuts it, and the
+templates then number the outputs). The plugin was written against the
+SDK 6.0 reference and its sources parse under Lua 5.1 (Lightroom's), but it
+has not been run inside Lightroom here: the export-settings keys the menu
+item uses (`LR_format`, `LR_export_bitDepth`, `LR_export_colorSpace`,
+`LR_export_destinationPathPrefix`, …) are the ones published plugins use,
+and whether Lightroom takes a lapstack-written linear DNG on `addPhoto` is
+untested — if it refuses, the plugin says the file was written and leaves
+it. `lightroom/README.md` has the details.
+
+## Desktop application (`desktop/`)
+
+`desktop/` wraps the browser app in **Electron**, so it runs as a desktop
+application on Linux, Windows and macOS without the WebGPU launcher script:
+Electron bundles Chromium, which has WebGPU on every platform (Tauri's
+WebKitGTK does not, on Linux). `main.js` serves `web/` from the main process
+over a static server on 127.0.0.1 with an ephemeral port (localhost is the
+secure context WebGPU needs; a `file://` page cannot fetch its wasm), with
+the MIME types and `Cache-Control: no-store` of `serve.sh`, and opens one
+sandboxed window on it (no Node in the page, context isolation on, a CSP).
+The Chromium switches are `chrome.sh`'s: `enable-unsafe-webgpu` everywhere,
+and on Linux the Vulkan trio and the X11 ozone platform — which the browser
+process only honours on its real command line, so on Linux the app
+relaunches itself once with `--ozone-platform=x11` (a Wayland window with an
+X11 Vulkan surface never maps; `LAPSTACK_SWITCHES` replaces the Linux
+switches for troubleshooting). The File System Access pickers the app uses
+for folders and saving are granted through Electron's permission handlers,
+and a download goes to a Save As dialog. `just desktop-install` once, then
+`just desktop` runs it (after `just build-web`), `just desktop-smoke` opens
+a hidden window, prints the adapter, runs the 8-frame test stack and exits
+0 or 1, and `just desktop-dist` packages it into `desktop/dist` (AppImage
+and deb on Linux, dmg on macOS, nsis on Windows; `web/` minus its tests goes
+in as a resource). On this machine (NixOS, KDE on Wayland, RTX 3060) the
+smoke test passes on the nvidia adapter with nixpkgs' Electron, the official
+binary, the unpacked build and the AppImage, and the window maps and
+presents; NixOS needs the FHS environment `desktop/nix-fhs.nix` for the npm
+Electron binary and electron-builder's tools (`desktop/README.md`). The
+pickers, the Save As dialog and the Windows and macOS builds have not been
+exercised here; `package.json`'s `homepage` is a placeholder the deb target
+insists on.
 
 ## GPU acceleration (CUDA, optional)
 

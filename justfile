@@ -103,7 +103,25 @@ test-all: test build-web (test-web "--align")
 test-frames dir:
     ./web/test/make-frames.sh {{dir}}
 
+# ---- desktop app (Electron wrapper of web/, see desktop/README.md) ----
+
+# Install the desktop app's dependencies (once; downloads Electron)
+desktop-install:
+    cd desktop && npm install
+
+# Run the desktop app in development (needs `just build-web` first; on NixOS see desktop/README.md for the FHS env)
+desktop:
+    cd desktop && npm start
+
+# Hidden-window smoke test of the desktop app: adapter, the 8-frame test stack, console errors; exit 0/1
+desktop-smoke:
+    cd desktop && npm run smoke
+
+# Package the desktop app for this platform into desktop/dist (AppImage + deb, dmg, or nsis)
+desktop-dist:
+    cd desktop && npm run dist
+
 # Remove build outputs
 clean:
     cargo clean
-    rm -rf web/pkg web/pkg-cc
+    rm -rf web/pkg web/pkg-cc desktop/dist

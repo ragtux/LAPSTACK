@@ -169,6 +169,36 @@ fn exif_time(tiff: &[u8]) -> Option<f64> {
     parse_datetime(&ascii(&ifd0, 306)?, ascii(&exif, 37520).as_deref())
 }
 
+/// The EXIF SubjectDistance (tag 37382, metres) out of a TIFF structure: the
+/// focus distance some cameras record, the one sure sign of which way a
+/// stack's focus travelled. Also the XMP packet's `exif:SubjectDistance`
+/// (a rational as text, `123/100`) when the EXIF has none.
+pub fn subject_distance(m: &Meta) -> Option<f64> {
+    if let Some(v) = m.exif.as_deref().and_then(exif_subject_distance) {
+        return Some(v);
+    }
+    let text = String::from_utf8_lossy(m.xmp.as_deref()?);
+    let pos = text.find("SubjectDistance")?;
+    let rest = text[pos + "SubjectDistance".len()..].trim_start_matches(|c: char| c == '=' || c == '"' || c == '\'' || c == '>' || c.is_whitespace());
+    let end = rest.find(|c: char| !(c.is_ascii_digit() || c == '/' || c == '.')).unwrap_or(rest.len());
+    let v = &rest[..end];
+    let (n, d) = match v.split_once('/') { Some((n, d)) => (n.parse::<f64>().ok()?, d.parse::<f64>().ok()?), None => (v.parse::<f64>().ok()?, 1.0) };
+    (d > 0.0 && n > 0.0 && n / d < 1e6).then(|| n / d)
+}
+
+fn exif_subject_distance(tiff: &[u8]) -> Option<f64> {
+    let t = Tiff::new(tiff)?;
+    let (ifd0, _) = t.read_ifd(t.u32(4)? as usize)?;
+    let exif = ifd0.iter().find(|e| e.tag == 34665 && matches!(e.typ, 4 | 13))
+        .and_then(|e| t.val32(&e.data, 0))
+        .and_then(|off| t.read_ifd(off as usize))
+        .map(|(entries, _)| entries)?;
+    let e = exif.iter().find(|e| e.tag == 37382 && e.typ == 5)?;
+    let (n, d) = (t.val32(&e.data, 0)? as f64, t.val32(&e.data, 4)? as f64);
+    // 0/0 or 0xFFFFFFFF = unknown / infinity: no cue
+    (d > 0.0 && n > 0.0 && n < u32::MAX as f64 && n / d < 1e6).then(|| n / d)
+}
+
 /// The capture time out of an XMP packet: the first of CreateDate,
 /// DateTimeOriginal, DateTimeDigitized that parses, as an attribute
 /// (`xmp:CreateDate="2026-09-11T17:24:25"`) or an element.
@@ -806,7 +836,48 @@ fn embed_jpeg(b: &[u8], meta: &Meta) -> Vec<u8> {
 /// with the metadata in IFD0: the EXIF tags and sub-IFDs, the ICC profile
 /// (34675), the XMP (700), the white point and primaries (318/319).
 /// `samples` holds w*h*3 values of `bits` bits, as bytes in host order for 16.
-pub fn write_tiff<W: Write>(mut w: W, width: usize, height: usize, bits: u16, samples: &[u8], meta: Option<&Meta>) -> std::io::Result<()> {
+pub fn write_tiff<W: Write>(w: W, width: usize, height: usize, bits: u16, samples: &[u8], meta: Option<&Meta>) -> std::io::Result<()> {
+    write_tiff_with(w, width, height, bits, samples, Vec::new(), 2, true, false, meta)
+}
+
+/// A linear DNG (Adobe DNG 1.4): 16-bit demosaiced camera-space samples,
+/// `PhotometricInterpretation` LinearRaw, the camera's colour matrices and the
+/// neutral it shot from `info` (`dng.rs`), the make and model in IFD0, the
+/// Exif IFD and XMP from `meta` (no ICC profile: a DNG's colour is its
+/// matrices), the orientation 1.
+pub fn write_dng<W: Write>(w: W, width: usize, height: usize, samples: &[u16], info: &crate::dng::DngInfo, meta: Option<&Meta>) -> std::io::Result<()> {
+    let le32 = |v: u32| v.to_le_bytes().to_vec();
+    let ascii = |tag: u16, s: &str| { let mut d = s.as_bytes().to_vec(); d.push(0); Entry { tag, typ: 2, count: d.len() as u32, data: d } };
+    // rationals over a fixed denominator: signed for the matrices, unsigned for the neutral
+    let srational = |v: &[f32]| v.iter().flat_map(|&x| { let d = 10000i32; [((x * d as f32).round() as i32).to_le_bytes(), d.to_le_bytes()] }).flatten().collect::<Vec<u8>>();
+    let rational = |v: &[f32]| v.iter().flat_map(|&x| { let d = 1000000u32; [((x.max(0.0) * d as f32).round() as u32).to_le_bytes(), d.to_le_bytes()] }).flatten().collect::<Vec<u8>>();
+    let mut extra = vec![
+        Entry { tag: 254, typ: 4, count: 1, data: le32(0) },                        // NewSubfileType: the main image
+        Entry { tag: 274, typ: 3, count: 1, data: 1u16.to_le_bytes().to_vec() },     // Orientation: as turned
+        Entry { tag: 50706, typ: 1, count: 4, data: vec![1, 4, 0, 0] },              // DNGVersion 1.4.0.0
+        Entry { tag: 50707, typ: 1, count: 4, data: vec![1, 1, 0, 0] },              // DNGBackwardVersion 1.1.0.0
+        Entry { tag: 50714, typ: 5, count: 3, data: rational(&[0.0, 0.0, 0.0]) },    // BlackLevel
+        Entry { tag: 50717, typ: 4, count: 3, data: [65535u32; 3].iter().flat_map(|v| v.to_le_bytes()).collect() },   // WhiteLevel
+        Entry { tag: 50728, typ: 5, count: 3, data: rational(&info.as_shot_neutral()) },   // AsShotNeutral
+    ];
+    let unique = if info.make.is_empty() && info.model.is_empty() { "lapstack".to_string() } else { format!("{} {}", info.make, info.model).trim().to_string() };
+    extra.push(ascii(50708, &unique));   // UniqueCameraModel
+    if !info.make.is_empty() { extra.push(ascii(271, &info.make)); }
+    if !info.model.is_empty() { extra.push(ascii(272, &info.model)); }
+    for (k, (illuminant, m)) in info.matrices.iter().take(2).enumerate() {
+        extra.push(Entry { tag: 50721 + k as u16, typ: 10, count: 9, data: srational(m) });          // ColorMatrix1 / 2
+        extra.push(Entry { tag: 50778 + k as u16, typ: 3, count: 1, data: illuminant.to_le_bytes().to_vec() });   // CalibrationIlluminant1 / 2
+    }
+    // SAFETY: u16 has no padding and any byte pattern is a valid u8; the slice covers the same memory
+    let bytes = unsafe { std::slice::from_raw_parts(samples.as_ptr() as *const u8, samples.len() * 2) };
+    write_tiff_with(w, width, height, 16, bytes, extra, 34892, false, true, meta)
+}
+
+/// The TIFF writer behind `write_tiff` and `write_dng`: `extra` entries go in
+/// first and win over the same tags from `meta`'s EXIF (`photometric` is the
+/// PhotometricInterpretation, `icc` whether the profile is carried,
+/// `orientation1` whether the source's Orientation is overridden).
+fn write_tiff_with<W: Write>(mut w: W, width: usize, height: usize, bits: u16, samples: &[u8], extra: Vec<Entry>, photometric: u16, icc: bool, orientation1: bool, meta: Option<&Meta>) -> std::io::Result<()> {
     let bps = bits as usize / 8;
     let row = width * 3 * bps;
     assert_eq!(samples.len(), row * height, "sample buffer size");
@@ -829,7 +900,7 @@ pub fn write_tiff<W: Write>(mut w: W, width: usize, height: usize, bits: u16, sa
         Entry { tag: 257, typ: 4, count: 1, data: le(height as u32) },
         Entry { tag: 258, typ: 3, count: 3, data: shorts(&[bits; 3]) },
         Entry { tag: 259, typ: 3, count: 1, data: shorts(&[1]) },
-        Entry { tag: 262, typ: 3, count: 1, data: shorts(&[2]) },
+        Entry { tag: 262, typ: 3, count: 1, data: shorts(&[photometric]) },
         Entry { tag: 273, typ: 4, count: n_strips as u32, data: longs(&offsets) },
         Entry { tag: 277, typ: 3, count: 1, data: shorts(&[3]) },
         Entry { tag: 278, typ: 4, count: 1, data: le(rows_per_strip as u32) },
@@ -837,23 +908,24 @@ pub fn write_tiff<W: Write>(mut w: W, width: usize, height: usize, bits: u16, sa
         Entry { tag: 284, typ: 3, count: 1, data: shorts(&[1]) },
         software_entry(),
     ];
+    entries.extend(extra);
     let mut subs = Vec::new();
     if let Some(m) = meta {
         if let Some(exif) = &m.exif {
             if let Some((mut node, src_le)) = adapt(exif, width as u32, height as u32, Container::Tiff) {
                 if !src_le { swap_node(&mut node); }   // the file is little-endian
                 let taken: Vec<u16> = entries.iter().map(|e| e.tag).collect();
-                entries.extend(node.entries.into_iter().filter(|e| !taken.contains(&e.tag)));
+                entries.extend(node.entries.into_iter().filter(|e| !taken.contains(&e.tag) && !(orientation1 && e.tag == 274)));
                 subs = node.subs;
             }
         }
-        if let Some(icc) = &m.icc {
+        if let (Some(icc), true) = (&m.icc, icc) {
             entries.push(Entry { tag: 34675, typ: 7, count: icc.len() as u32, data: icc.clone() });
         }
         if let Some(xmp) = &m.xmp {
             entries.push(Entry { tag: 700, typ: 1, count: xmp.len() as u32, data: xmp.clone() });
         }
-        if let Some(c) = &m.chrm {
+        if let (Some(c), true) = (&m.chrm, icc) {
             if !entries.iter().any(|e| e.tag == 318) {
                 entries.push(Entry { tag: 318, typ: 5, count: 2, data: c[..2].iter().flat_map(|&v| rational(v)).collect() });
                 entries.push(Entry { tag: 319, typ: 5, count: 6, data: c[2..].iter().flat_map(|&v| rational(v)).collect() });
@@ -868,6 +940,16 @@ pub fn write_tiff<W: Write>(mut w: W, width: usize, height: usize, bits: u16, sa
     w.write_all(samples)?;
     w.write_all(&wr.out)?;
     Ok(())
+}
+
+/// The EXIF structure with its Orientation set to `o` (1 = as stored): for a
+/// frame that was turned as decoded (a camera raw), whose result must not be
+/// turned again by the viewer.
+pub fn with_orientation(exif: &[u8], o: u16) -> Option<Vec<u8>> {
+    let (mut node, le) = parse(exif)?;
+    node.entries.retain(|e| e.tag != 274);
+    node.entries.push(Entry { tag: 274, typ: 3, count: 1, data: if le { o.to_le_bytes().to_vec() } else { o.to_be_bytes().to_vec() } });
+    Some(serialise(node, le))
 }
 
 // ---------------------------------------------------------------------------
@@ -907,6 +989,73 @@ mod tests {
         let (ex, _) = t.read_ifd(t.val32(&sub.data, 0).unwrap() as usize).unwrap();
         let g = |tag| ex.iter().find(|e| e.tag == tag).map(|e| t.val32(&e.data, 0).unwrap()).unwrap_or(0);
         (g(40962), g(40963))
+    }
+
+    /// The entries of the IFD at the structure's first offset, and of its Exif sub-IFD.
+    fn ifd0_and_exif(tiff: &[u8]) -> (Vec<Entry>, Vec<Entry>) {
+        let t = Tiff::new(tiff).unwrap();
+        let (ifd0, _) = t.read_ifd(t.u32(4).unwrap() as usize).unwrap();
+        let exif = ifd0.iter().find(|e| e.tag == 34665).and_then(|e| t.val32(&e.data, 0)).and_then(|o| t.read_ifd(o as usize)).map(|(e, _)| e).unwrap_or_default();
+        (ifd0, exif)
+    }
+
+    #[test]
+    fn a_linear_dng_carries_its_tags_and_the_source_exif() {
+        let info = crate::dng::DngInfo::of_raw("NIKON", "Z 8", vec![(21, [0.8, -0.2, -0.1, -0.5, 1.2, 0.3, -0.1, 0.1, 0.6]), (17, [1.0; 9])], [2.0, 1.0, 1.5], [0.8, -0.2, -0.1, -0.5, 1.2, 0.3, -0.1, 0.1, 0.6]).unwrap();
+        let meta = Meta { exif: Some(sample_exif(false)), icc: Some(vec![1, 2, 3]), xmp: Some(b"<x/>".to_vec()), chrm: None };
+        let samples = vec![1000u16; 3 * 4 * 3];
+        let mut out = Vec::new();
+        write_dng(&mut out, 4, 3, &samples, &info, Some(&meta)).unwrap();
+        assert!(out.starts_with(b"II*\0"));
+        let (ifd0, exif) = ifd0_and_exif(&out);
+        let get = |tag: u16| ifd0.iter().find(|e| e.tag == tag).unwrap_or_else(|| panic!("tag {tag} missing"));
+        assert_eq!(get(50706).data, vec![1, 4, 0, 0], "DNGVersion");
+        assert_eq!(u16::from_le_bytes([get(262).data[0], get(262).data[1]]), 34892, "LinearRaw");
+        assert_eq!(u16::from_le_bytes([get(274).data[0], get(274).data[1]]), 1, "orientation reset");
+        assert_eq!(get(50721).count, 9, "ColorMatrix1");
+        assert_eq!(get(50722).count, 9, "ColorMatrix2");
+        assert_eq!(u16::from_le_bytes([get(50778).data[0], get(50778).data[1]]), 21, "the D65 matrix came first as given: the raw path sorts them");
+        assert_eq!(String::from_utf8_lossy(&get(50708).data).trim_end_matches('\0'), "NIKON Z 8");
+        assert_eq!(String::from_utf8_lossy(&get(271).data).trim_end_matches('\0'), "NIKON", "the DNG's make wins over the EXIF's");
+        assert!(ifd0.iter().all(|e| e.tag != 34675), "no ICC profile in a DNG");
+        assert!(ifd0.iter().any(|e| e.tag == 700), "the XMP is carried");
+        // AsShotNeutral = 1/wb, green 1: [0.5, 1, 1/1.5] over 1e6
+        let n = &get(50728).data;
+        let r = |i: usize| u32::from_le_bytes(n[8 * i..8 * i + 4].try_into().unwrap()) as f64 / u32::from_le_bytes(n[8 * i + 4..8 * i + 8].try_into().unwrap()) as f64;
+        assert!((r(0) - 0.5).abs() < 1e-5 && (r(1) - 1.0).abs() < 1e-9 && (r(2) - 1.0 / 1.5).abs() < 1e-5);
+        assert!(exif.iter().any(|e| e.tag == 36867), "the Exif IFD came along");
+        // the pixel data sits right after the header, 16-bit little-endian
+        assert_eq!(u16::from_le_bytes([out[8], out[9]]), 1000);
+    }
+
+    #[test]
+    fn orientation_can_be_reset() {
+        let src = sample_exif(true);
+        let (ifd0, _) = ifd0_and_exif(&src);
+        assert_eq!(ifd0.iter().find(|e| e.tag == 274).unwrap().data[0], 1);
+        let turned = with_orientation(&src, 6).unwrap();
+        let (ifd0, exif) = ifd0_and_exif(&turned);
+        assert_eq!(ifd0.iter().find(|e| e.tag == 274).unwrap().data[0], 6);
+        assert!(exif.iter().any(|e| e.tag == 36867), "the rest is kept");
+        let back = with_orientation(&turned, 1).unwrap();
+        let (ifd0, _) = ifd0_and_exif(&back);
+        assert_eq!(ifd0.iter().find(|e| e.tag == 274).unwrap().data[0], 1);
+    }
+
+    #[test]
+    fn subject_distance_is_read_from_exif_and_xmp() {
+        let mut w = Writer { out: Vec::new(), le: true, base: 0 };
+        w.out.extend_from_slice(b"II*\0");
+        w.w32(0);
+        let exif = Node { entries: vec![Entry { tag: 37382, typ: 5, count: 1, data: [782u32, 1000].iter().flat_map(|v| v.to_le_bytes()).collect() }], subs: vec![] };
+        let ifd0 = Node { entries: vec![Entry { tag: 34665, typ: 4, count: 1, data: vec![0; 4] }], subs: vec![(34665, exif)] };
+        let off = w.write_ifd(ifd0);
+        w.out[4..8].copy_from_slice(&off.to_le_bytes());
+        let m = Meta { exif: Some(w.out), ..Default::default() };
+        assert!((subject_distance(&m).unwrap() - 0.782).abs() < 1e-9);
+        let x = Meta { xmp: Some(b"<rdf:Description exif:SubjectDistance=\"144/100\"/>".to_vec()), ..Default::default() };
+        assert!((subject_distance(&x).unwrap() - 1.44).abs() < 1e-9);
+        assert!(subject_distance(&Meta::default()).is_none());
     }
 
     fn check_rebuilt(exif: &[u8], le: bool) {

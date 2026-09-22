@@ -12,7 +12,9 @@ use crate::depth::{self, DepthParams};
 use crate::fuse::{FuseParams, Fuser};
 use crate::align::{self, AlignParams, Rect, Sim, common_area};
 use crate::brightness;
+use crate::dng::DngInfo;
 use crate::dust::DustMap;
+use crate::prep;
 use crate::io::{self, Depth};
 use crate::pyramid::{crop_plane, Img3};
 use rayon::prelude::*;
@@ -49,6 +51,19 @@ pub struct Params {
     /// Dust map (`dust.rs`): the spots taken out of every frame as decoded,
     /// before alignment. Must be of the frames' size.
     pub dust: Option<DustMap>,
+    /// Quarter turns clockwise every frame is given as decoded (`--rotate`),
+    /// after the dust map (which is in the sensor's orientation).
+    pub rotate: u8,
+    /// A draft run: every frame block-averaged by `2^reduce` as decoded
+    /// (`--draft`), so the whole run is a quick check of the settings.
+    pub reduce: usize,
+    /// A linear-DNG run (`dng.rs`): raws are developed to their camera space
+    /// and fused in the look space made from frame 0's white balance and
+    /// matrix, which `Output::dng` carries for the writer.
+    pub dng: bool,
+    /// A window of the frame (after `rotate`, in full-resolution pixels) the
+    /// outputs are cut to (`--crop`), on top of the automatic crop.
+    pub crop_rect: Option<Rect>,
 }
 
 /// The slab ranges of a `count`-frame stack: `size` frames each, consecutive
@@ -80,6 +95,8 @@ pub struct Slab<'a> {
     pub hi: usize,
     pub image: &'a Img3,
     pub bit_depth: Depth,
+    /// The look space of a linear-DNG run, for a slab written as a DNG.
+    pub dng: Option<DngInfo>,
 }
 
 impl Default for Params {
@@ -93,6 +110,7 @@ impl Default for Params {
             crop: true,
             brightness: true,
             slabs: None, wav: None, dust: None,
+            rotate: 0, reduce: 0, dng: false, crop_rect: None,
         }
     }
 }
@@ -180,6 +198,14 @@ pub struct Output {
     pub crop: Option<Rect>,
     /// The weighted average (`Params::wav`), cropped like `image`.
     pub wav: Option<Img3>,
+    /// The space of a linear-DNG run (`Params::dng`): what the DNG writer
+    /// needs to take the look image back to the camera's space.
+    pub dng: Option<DngInfo>,
+    /// The draft factor: the outputs are `1/2^reduce` of the frames' size.
+    pub reduce: usize,
+    /// Which end of the stack is near, as far as the run can tell
+    /// (`near_end`): `Some((near_first, why))` when a cue decided it.
+    pub near: Option<(bool, String)>,
 }
 
 /// Decoder threads kept in flight ahead of the fuser (each holds one decoded
@@ -195,7 +221,7 @@ struct LazyFrames {
     depth: Depth,
     /// Last decoded frame and its index (a second pass re-decodes).
     cur: Option<(usize, Img3)>,
-    pending: VecDeque<(usize, JoinHandle<Result<(Img3, Depth), String>>)>,
+    pending: VecDeque<(usize, JoinHandle<Result<Decoded, String>>)>,
     notes: Vec<String>,
     /// Brightness normalisation: frame 0's channel means, and each frame's
     /// gains once found (the depth pass decodes the frames a second time).
@@ -203,18 +229,53 @@ struct LazyFrames {
     gains: Vec<Option<[f32; 3]>>,
     /// The dust map, applied to every frame as it is decoded.
     dust: Option<DustMap>,
+    /// The frames' size as decoded (the dust map's), before the turn and the draft reduction.
+    raw_w: usize,
+    raw_h: usize,
+    /// `Params::rotate` and `Params::reduce`.
+    rotate: u8,
+    reduce: usize,
+    /// The look space of a linear-DNG run: frame 0's (`Params::dng`).
+    look: Option<DngInfo>,
+}
+
+/// One frame decoded: the image, its bit depth, and its own colour space in a
+/// linear-DNG run (to catch a raw among TIFFs or the reverse).
+type Decoded = (Img3, Depth, Option<DngInfo>);
+
+/// A decoded frame turned (`Params::rotate`) and block-averaged for a draft
+/// (`Params::reduce`), in that order.
+fn prep_frame(img: Img3, rotate: u8, reduce: usize) -> Img3 {
+    let img = if rotate % 4 != 0 { prep::rotate(&img, rotate, false) } else { img };
+    if reduce > 0 { prep::reduce(&img, reduce) } else { img }
+}
+
+fn decode(path: &str, look: Option<&DngInfo>) -> Result<Decoded, String> {
+    match look {
+        Some(l) => io::load_look(path, l).map(|(i, d, own)| (i, d, Some(own))),
+        None => io::load_rgb(path).map(|(i, d)| (i, d, None)),
+    }
 }
 
 impl LazyFrames {
-    fn open(paths: Vec<String>, brightness: bool, dust: Option<&DustMap>) -> Result<LazyFrames, String> {
-        let (mut f0, depth) = io::load_rgb(&paths[0])?;
+    fn open(paths: Vec<String>, brightness: bool, params: &Params) -> Result<LazyFrames, String> {
+        let dust = params.dust.as_ref();
+        let (mut f0, depth, look) = if params.dng {
+            let (i, d, info) = io::load_look_first(&paths[0])?;
+            (i, d, Some(info))
+        } else {
+            let (i, d) = io::load_rgb(&paths[0])?;
+            (i, d, None)
+        };
+        let (raw_w, raw_h) = (f0.w, f0.h);
         if let Some(d) = dust {
             check_dust(d, f0.w, f0.h)?;
             d.apply(&mut f0);
         }
+        let f0 = prep_frame(f0, params.rotate, params.reduce);
         let ref_means = brightness.then(|| brightness::means(&f0));
         let n = paths.len();
-        let mut lf = LazyFrames { w: f0.w, h: f0.h, depth, paths, cur: Some((0, f0)), pending: VecDeque::new(), notes: Vec::new(), ref_means, gains: vec![None; n], dust: dust.cloned() };
+        let mut lf = LazyFrames { w: f0.w, h: f0.h, depth, paths, cur: Some((0, f0)), pending: VecDeque::new(), notes: Vec::new(), ref_means, gains: vec![None; n], dust: dust.cloned(), raw_w, raw_h, rotate: params.rotate, reduce: params.reduce, look };
         lf.gains[0] = Some([1.0; 3]);
         lf.prefetch(1);
         Ok(lf)
@@ -231,7 +292,8 @@ impl LazyFrames {
         let mut next = self.pending.back().map_or(from, |(i, _)| i + 1).max(from);
         while self.pending.len() < READ_AHEAD && next < self.paths.len() {
             let p = self.paths[next].clone();
-            self.pending.push_back((next, std::thread::spawn(move || io::load_rgb(&p))));
+            let look = self.look.clone();
+            self.pending.push_back((next, std::thread::spawn(move || decode(&p, look.as_ref()))));
             next += 1;
         }
     }
@@ -246,12 +308,12 @@ impl LazyFrames {
             let (_, jh) = self.pending.pop_front().unwrap();
             let _ = jh.join();
         }
-        let (img, d) = match self.pending.front() {
+        let (img, d, own) = match self.pending.front() {
             Some((pi, _)) if *pi == i => {
                 let (_, jh) = self.pending.pop_front().unwrap();
                 jh.join().map_err(|_| "decoder thread panicked".to_string())??
             }
-            _ => io::load_rgb(&self.paths[i])?,
+            _ => decode(&self.paths[i], self.look.as_ref())?,
         };
         if d != self.depth {
             self.notes.push(format!(
@@ -259,15 +321,34 @@ impl LazyFrames {
                 self.paths[i], d.bits(), self.depth.bits(), self.depth.bits()
             ));
         }
-        if img.w != self.w || img.h != self.h {
-            return Err(format!(
-                "{}: {}x{} differs from frame 0 ({}x{}); frames must share one size",
-                self.paths[i], img.w, img.h, self.w, self.h
-            ));
+        if let (Some(own), Some(look)) = (&own, &self.look) {
+            if own.is_camera() != look.is_camera() {
+                return Err(format!(
+                    "{}: {} but frame 0 is {}; a linear DNG needs frames of one kind",
+                    self.paths[i],
+                    if own.is_camera() { "a camera raw" } else { "not a camera raw" },
+                    if look.is_camera() { "a camera raw" } else { "not one" }
+                ));
+            }
         }
         let mut img = img;
+        // the dust map is in the sensor's orientation and size: a frame of another size goes without it
         if let Some(d) = &self.dust {
-            d.apply(&mut img);
+            if img.w == self.raw_w && img.h == self.raw_h {
+                d.apply(&mut img);
+            } else {
+                self.notes.push(format!("{}: {}x{} is not the dust map's size; no dust taken out of it", self.paths[i], img.w, img.h));
+            }
+        }
+        let mut img = prep_frame(img, self.rotate, self.reduce);
+        if img.w != self.w || img.h != self.h {
+            // a frame of another size (a JPEG among the raws, another camera mode) is brought to
+            // frame 0's size rather than refused: the alignment takes care of what is left
+            self.notes.push(format!(
+                "{}: {}x{} differs from frame 0 ({}x{}); resampled to frame 0's size",
+                self.paths[i], img.w, img.h, self.w, self.h
+            ));
+            img = prep::resize(&img, self.w, self.h, crate::align::Interp::Spline4x4);
         }
         if let Some(r) = self.ref_means {
             let g = *self.gains[i].get_or_insert_with(|| brightness::gains_to(r, &img));
@@ -332,7 +413,7 @@ struct AlignedFrames {
 
 impl AlignedFrames {
     fn open(paths: Vec<String>, a: AlignParams, params: &Params) -> Result<AlignedFrames, String> {
-        let src = LazyFrames::open(paths, false, params.dust.as_ref())?;
+        let src = LazyFrames::open(paths, false, params)?;
         #[cfg(feature = "gpu")]
         let gpu = if a.gpu { Some(crate::gpu::GpuFrames::new(src.w, src.h, a.interp)?) } else { None };
         let n = src.len();
@@ -639,6 +720,7 @@ fn fuse_slabs(
     params: &Params,
     bit_depth: Depth,
     crop: Option<&Rect>,
+    dng: Option<&DngInfo>,
     log: &mut dyn FnMut(String),
     on_slab: &mut dyn FnMut(Slab<'_>) -> Result<(), String>,
 ) -> Result<(), String> {
@@ -649,9 +731,64 @@ fn fuse_slabs(
         log(format!("slab {}/{}: frames {lo}..{hi}", k + 1, ranges.len()));
         let (image, _, _, _) = fuse_range(src, lo, hi, &params.fuse, params.gpu, None, log)?;
         let image = match crop { Some(r) => image.crop(r), None => image };
-        on_slab(Slab { index: k, count: ranges.len(), lo, hi, image: &image, bit_depth })?;
+        on_slab(Slab { index: k, count: ranges.len(), lo, hi, image: &image, bit_depth, dng: dng.cloned() })?;
     }
     Ok(())
+}
+
+/// Which end of the stack is near, from the cues a run has: the focus
+/// distance the camera wrote into the first and last frames (EXIF
+/// SubjectDistance) decides it — the focus went from the smaller distance to
+/// the larger one. The frames' scale over the stack is reported as a hint
+/// but does not decide: on a rail, or with a lens that extends to focus
+/// closer, the near frames are the larger ones and a stack shot near to far
+/// shrinks with its index; with an internal-focus lens the field widens as
+/// it focuses closer and the same stack grows — the sign says nothing
+/// without knowing the lens. `None` when nothing decides it: the caller's
+/// default (frame 0 near) stands.
+fn near_end(inputs: &[String], sims: &[Sim], w: usize, h: usize, log: &mut dyn FnMut(String)) -> Option<(bool, String)> {
+    let _ = (w, h);
+    if inputs.len() < 2 {
+        return None;
+    }
+    if let (Some(a), Some(b)) = (io::load_subject_distance(&inputs[0]), io::load_subject_distance(&inputs[inputs.len() - 1])) {
+        if (a - b).abs() > 1e-6 * a.max(b) {
+            let near_first = a < b;
+            let why = format!("focus distance {:.3} m in the first frame, {:.3} m in the last (the focus distance the camera recorded): frame 0 is the {} end", a, b, if near_first { "near" } else { "far" });
+            log(format!("near end: {why}"));
+            return Some((near_first, why));
+        }
+    }
+    if let (Some(first), Some(last)) = (sims.first(), sims.last()) {
+        let k = last.scale / first.scale;
+        if (k - 1.0).abs() > 0.002 {
+            log(format!(
+                "near end: no focus distance in the frames' metadata; the last frame is {} by {:.2} % to fit the first — on a rail, or with a lens that extends to focus closer, that means frame 0 is the {} end; an internal-focus lens breathes the other way. Frame 0 is taken as the near end unless --near-end says otherwise",
+                if k > 1.0 { "enlarged" } else { "shrunk" }, (k - 1.0).abs() * 100.0, if k > 1.0 { "near" } else { "far" }
+            ));
+        }
+    }
+    None
+}
+
+/// `Params::crop_rect` on the run's grid: given in full-resolution pixels of
+/// the turned frame, brought down by the draft factor, cut to the frame.
+fn user_crop(params: &Params, w: usize, h: usize, log: &mut dyn FnMut(String)) -> Result<Option<Rect>, String> {
+    let Some(r) = params.crop_rect else { return Ok(None) };
+    let k = 1usize << params.reduce;
+    let r = Rect { x: r.x / k, y: r.y / k, w: r.w.div_ceil(k), h: r.h.div_ceil(k) };
+    let r = intersect(&r, &Rect::full(w, h)).ok_or_else(|| format!("--crop: the window {}x{} at ({}, {}) lies outside the {w}x{h} frame", r.w, r.h, r.x, r.y))?;
+    log(format!("cropped to the window asked for: {}x{} at ({}, {})", r.w, r.h, r.x, r.y));
+    Ok(Some(r))
+}
+
+/// The overlap of two windows, `None` when they do not meet.
+pub fn intersect(a: &Rect, b: &Rect) -> Option<Rect> {
+    let x0 = a.x.max(b.x);
+    let y0 = a.y.max(b.y);
+    let x1 = (a.x + a.w).min(b.x + b.w);
+    let y1 = (a.y + a.h).min(b.y + b.h);
+    (x1 > x0 && y1 > y0).then(|| Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
 }
 
 /// A dust map of another size than the frames is a mistake (another camera, a
@@ -701,13 +838,21 @@ pub fn run_with(
             let wav = weighted(&mut src, params, log)?;
             // the borders some frames only reach with smeared edge pixels go
             let area = common_area(&src.sims, w, h, a.interp);
-            let (image, depth, conf, wav, crop) = if params.crop && !area.is_full(w, h) {
+            let mut window = if params.crop && !area.is_full(w, h) {
                 log(format!("cropped to the area every frame covers: {}x{} at ({}, {})", area.w, area.h, area.x, area.y));
-                (image.crop(&area), crop_plane(&depth, w, &area), conf.map(|c| crop_plane(&c, w, &area)), wav.map(|i| i.crop(&area)), Some(area))
+                Some(area)
             } else {
-                (image, depth, conf, wav, None)
+                None
             };
-            fuse_slabs(&mut src, params, bit_depth, crop.as_ref(), log, on_slab)?;
+            if let Some(r) = user_crop(params, w, h, log)? {
+                window = Some(match window { Some(a) => intersect(&a, &r).ok_or("the crop window lies outside the area every frame covers")?, None => r });
+            }
+            let (image, depth, conf, wav, crop) = match window {
+                Some(r) => (image.crop(&r), crop_plane(&depth, w, &r), conf.map(|c| crop_plane(&c, w, &r)), wav.map(|i| i.crop(&r)), Some(r)),
+                None => (image, depth, conf, wav, None),
+            };
+            let look = src.src.look.clone();
+            fuse_slabs(&mut src, params, bit_depth, crop.as_ref(), look.as_ref(), log, on_slab)?;
             for n in &src.src.notes {
                 log(format!("note: {n}"));
             }
@@ -717,10 +862,12 @@ pub fn run_with(
             if let Some(dir) = &params.save_aligned {
                 log(format!("wrote aligned frames to {dir}/"));
             }
-            Ok(Output { image, depth, conf, bit_depth, align: src.sims, levels, crop, wav })
+            let near = near_end(&inputs, &src.sims, w, h, log);
+            let dng = src.src.look.take();
+            Ok(Output { image, depth, conf, bit_depth, align: src.sims, levels, crop, wav, dng, reduce: params.reduce, near })
         }
         _ => {
-            let mut src = LazyFrames::open(inputs.clone(), params.brightness, params.dust.as_ref())?;
+            let mut src = LazyFrames::open(inputs.clone(), params.brightness, params)?;
             if let Some(d) = &params.dust {
                 log(format!("dust map applied to each frame as decoded ({}): {}", d.params.mode.name(), d.describe()));
             }
@@ -729,23 +876,42 @@ pub fn run_with(
                 src.len(), src.w, src.h, src.depth.bits(), rayon::current_num_threads()
             ));
             let bit_depth = src.depth;
+            let (w, h) = (src.w, src.h);
             let (image, depth, conf, levels) = fuse_and_depth(&mut src, params, log)?;
             let wav = weighted(&mut src, params, log)?;
-            fuse_slabs(&mut src, params, bit_depth, None, log, on_slab)?;
+            let crop = user_crop(params, w, h, log)?;
+            let (image, depth, conf, wav) = match &crop {
+                Some(r) => (image.crop(r), crop_plane(&depth, w, r), conf.map(|c| crop_plane(&c, w, r)), wav.map(|i| i.crop(r))),
+                None => (image, depth, conf, wav),
+            };
+            let look = src.look.clone();
+            fuse_slabs(&mut src, params, bit_depth, crop.as_ref(), look.as_ref(), log, on_slab)?;
             for n in &src.notes {
                 log(format!("note: {n}"));
             }
             if let Some(n) = src.brightness_note() {
                 log(n);
             }
-            Ok(Output { image, depth, conf, bit_depth, align: vec![Sim::id(); inputs.len()], levels, crop: None, wav })
+            let near = near_end(&inputs, &[], w, h, log);
+            let dng = src.look.take();
+            Ok(Output { image, depth, conf, bit_depth, align: vec![Sim::id(); inputs.len()], levels, crop, wav, dng, reduce: params.reduce, near })
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::slab_ranges;
+    use super::{intersect, slab_ranges};
+    use crate::align::Rect;
+
+    #[test]
+    fn windows_meet_or_do_not() {
+        let a = Rect { x: 10, y: 10, w: 100, h: 50 };
+        assert_eq!(intersect(&a, &Rect { x: 50, y: 0, w: 100, h: 30 }), Some(Rect { x: 50, y: 10, w: 60, h: 20 }));
+        assert_eq!(intersect(&a, &a), Some(a));
+        assert_eq!(intersect(&a, &Rect { x: 110, y: 10, w: 5, h: 5 }), None);
+        assert_eq!(intersect(&a, &Rect { x: 0, y: 60, w: 500, h: 5 }), None);
+    }
 
     #[test]
     fn slabs_cover_the_stack_and_overlap_as_asked() {

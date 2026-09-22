@@ -91,6 +91,8 @@ const st = {
   zoom: 1, ox: 0, oy: 0, fitted: true,
   pick: false,          // ctrl+G: the next canvas click jumps to the frame that won that pixel
   running: false,
+  cropTool: false, cropDrag: null,   // the crop tool armed (C / the Crop button), and the window being dragged {x0, y0, x1, y1} in image pixels
+  nearAuto: null,       // the near end from the frames' focus distances (nearCue): {first, why}, null without a cue
   retouch: { on: false, prev: null, size: 100, hard: 0.5, from: 'source', result: null, painting: false, dabs: [], last: null, cursor: null, hold: false,   // on: retouch mode (a compare split, stack layer | brush source); from: 'source' = the scrubbed frame, 'stack' = the other stacked result, 'slab' = the on-demand slab (see brushFrom); prev: the compare state to restore on exit; hold: the hover preview waits for the next pointer move (see onPatch)
              wasmIndex: -1, loading: -1, gen: 0, genMin: 0, undo: 0, redo: 0,
              gpuIndex: -1, prefetch: -1, ahead: null, dir: 1, lastSel: -1,     // see ensureSource(): the frame the worker holds on the GPU, the one being prefetched, the read-ahead slot, the scrub direction
@@ -115,12 +117,13 @@ const dpr = () => window.devicePixelRatio || 1;
 const PK = 'lapstack.settings';
 const INTERPS = ['nearest', 'bilinear', 'bicubic', 'spline4x4', 'spline6x6', 'lanczos3'];
 const CORNERS = ['tl', 'tr', 'bl', 'br'];
-const stepDefaults = { 'p-dust-thr': 3, 'p-dust-margin': 3, 'p-kept': 1536, 'p-wav-pow': 2, 'p-wav-smooth': 1, 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5, 'p-dslab-size': 10, 'p-dslab-ov': 2, 'p-split-n': 30, 'p-split-gap': 10 };
+const stepDefaults = { 'p-draft': 0, 'p-dust-thr': 3, 'p-dust-margin': 3, 'p-kept': 1536, 'p-wav-pow': 2, 'p-wav-smooth': 1, 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5, 'p-dslab-size': 10, 'p-dslab-ov': 2, 'p-split-n': 30, 'p-split-gap': 10 };
 function readParams() {
   const n = (id) => Number($(id).textContent) || 0; // a stepper's zero word ('auto', 'off') reads as 0
   return {
     align: $('p-align').checked, shift: $('p-shift').checked, scale: $('p-scale').checked, rotation: $('p-rotation').checked, brightness: $('p-bright').checked,
     coarsen: n('p-coarsen'), interp: $('p-interp').value, model: $('p-model').value, levels: n('p-levels') || null, energy_radius: n('p-energy'), top: $('p-top').value,
+    rotate: Number($('p-rotate').value) || 0, draft: n('p-draft'), dng: $('p-dng').checked,
     top_radius: n('p-topr'), use_chroma: $('p-chroma').checked, halo: n('p-halo'), proxy_edge: n('p-proxy'),
     depth_scale: n('p-depthscale'), depth_level: n('p-depthlevel'), render_dmap: $('p-dmap').checked,
     render_wav: $('p-wav').checked, wav_power: n('p-wav-pow'), wav_smooth: n('p-wav-smooth'),
@@ -144,6 +147,7 @@ function applyParams(p) {
   $('p-align').checked = p.align ?? true; $('p-shift').checked = p.shift ?? true; $('p-scale').checked = p.scale ?? true; $('p-rotation').checked = p.rotation ?? true; $('p-bright').checked = p.brightness ?? true;
   setStep('p-coarsen', p.coarsen ?? 2); $('p-interp').value = INTERPS.includes(p.interp) ? p.interp : 'spline4x4';
   $('p-model').value = ['affine', 'projective'].includes(p.model) ? p.model : 'similarity';
+  $('p-rotate').value = [90, 180, 270].includes(p.rotate) ? String(p.rotate) : '0'; setStep('p-draft', p.draft ?? 0); $('p-dng').checked = p.dng ?? false;
   setStep('p-levels', p.levels ?? 0); setStep('p-energy', p.energy_radius ?? 1);
   $('p-top').value = p.top ?? 'de'; setStep('p-topr', p.top_radius ?? 2); $('p-chroma').checked = p.use_chroma ?? false; setStep('p-halo', p.halo ?? 0);
   setStep('p-proxy', p.proxy_edge ?? 1400); st.turbo = p.turbo ?? false;
@@ -176,7 +180,7 @@ document.querySelectorAll('[data-step="p-slab"]').forEach((b) => b.addEventListe
 // Run menu (DFR and the batch split live here, not in the parameter panel): the Run label
 // shows the state, with the number of stacks a split makes
 const runLabel = () => {
-  const base = 'Run LAP' + ($('p-dmap').checked ? ' + DFR' : '') + ($('p-wav').checked ? ' + WAV' : '');
+  const base = 'Run LAP' + ($('p-dmap').checked ? ' + DFR' : '') + ($('p-wav').checked ? ' + WAV' : '') + ($('p-dng').checked ? ' → DNG' : '') + (Number($('p-draft').textContent) > 0 ? ` (draft ÷${1 << Number($('p-draft').textContent)})` : '');
   $('wav-ctl').hidden = !$('p-wav').checked;
   const stacks = B.all ? null : stacksOf(st.files), n = stacks ? stacks.length : 0;
   $('run').textContent = n > 1 ? `${base} ×${n}` : base;
@@ -212,7 +216,7 @@ document.querySelectorAll('[data-step="p-split-n"], [data-step="p-split-gap"]').
 $('run-more').addEventListener('click', (e) => { e.stopPropagation(); $('runmenu').hidden = !$('runmenu').hidden; });
 $('runmenu').addEventListener('click', (e) => e.stopPropagation());
 document.addEventListener('click', () => { $('runmenu').hidden = true; $('cmp-menu').hidden = true; });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('runmenu').hidden = true; $('cmp-menu').hidden = true; if (st.pick) setPick(false); else exitRetouch(); } });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('runmenu').hidden = true; $('cmp-menu').hidden = true; if (st.pick) setPick(false); else if (st.cropTool) setCropTool(false); else exitRetouch(); } });
 runLabel();
 
 // ---------- worker ----------
@@ -295,7 +299,7 @@ function addFiles(list) {
   log(`[lapstack] ${files.length} frame(s) added (${st.files.length} total)`);
   for (const f of files) makeThumb(f);
   const indices = files.map((f) => st.files.indexOf(f));
-  worker.postMessage({ type: 'thumbs', files, indices, uids: files.map((f) => f.uid), edge: readParams().proxy_edge });
+  worker.postMessage({ type: 'thumbs', files, indices, uids: files.map((f) => f.uid), edge: readParams().proxy_edge, rotate: readParams().rotate / 90 });
 }
 // Every frame's capture time (captureTime: EXIF, else XMP), read once per file, a few small
 // reads each: the split by pause needs them all, the name tokens the first. undefined =
@@ -371,7 +375,9 @@ function onThumb(m) {
 async function makeThumb(f) {
   if (f.missing || !/\.(png|jpe?g)$/i.test(f.name)) return; // the browser cannot decode TIFF; the run supplies a proxy
   try {
-    const bmp = await createImageBitmap(f, { resizeWidth: 320, resizeQuality: 'medium' });
+    let bmp = await createImageBitmap(f, { resizeWidth: 320, resizeQuality: 'medium' });
+    const q = readParams().rotate / 90;
+    if (q) { const cv = new OffscreenCanvas(q % 2 ? bmp.height : bmp.width, q % 2 ? bmp.width : bmp.height), c = cv.getContext('2d'); c.translate(cv.width / 2, cv.height / 2); c.rotate(q * Math.PI / 2); c.drawImage(bmp, -bmp.width / 2, -bmp.height / 2); bmp = await createImageBitmap(cv); }
     const i = st.files.indexOf(f);
     if (i < 0) { const o = st.off.find((o) => o.f === f); if (o) { o.fr = o.fr || { name: f.name }; if (!o.fr.proxy) { o.fr.thumb = bmp; renderFilmstrip(); } } return; }
     st.frames[i] = st.frames[i] || { name: f.name };
@@ -549,7 +555,7 @@ function keepResult(why) {
   for (const kind of ['fused', 'dmap', 'wav']) {
     if (!r[kind]) continue;
     const id = ++keptSeq;
-    const k = { id, kind, run: r.run, label: `run ${r.run} · ${KIND_NAME[kind]}`, w: r.w, h: r.h, bits: r.bits, canvas: r[kind], crop: r.crop, meta: r.meta, params: r.params, dust: r.dust, frames: r.frames, first: r.first, last: r.last, secs: r.secs, when: r.when, strokes: R.undo };
+    const k = { id, kind, run: r.run, label: `run ${r.run} · ${KIND_NAME[kind]}`, w: r.w, h: r.h, bits: r.bits, canvas: r[kind], crop: r.crop, meta: r.meta, dng: !!(r.meta && r.meta.dng), params: r.params, dust: r.dust, frames: r.frames, first: r.first, last: r.last, secs: r.secs, when: r.when, strokes: R.undo };
     worker.postMessage({ type: 'keep', id, kind });
     st.kept.push(k); out.push(k);
     r[kind] = null;   // the canvas belongs to the kept result now
@@ -688,7 +694,8 @@ function captionText(t) {
 // the overlay as the engine takes it (OverlayParams by name), or null when there is nothing to draw
 function overlayParams() {
   const p = readParams();
-  const um = p.ov_bar && p.ov_um > 0 ? p.ov_um : 0, text = captionText(p.ov_text).trim();
+  const draft = st.result && st.result.meta ? (st.result.meta.draft || 0) : p.draft;   // a draft's pixels are 2^N frame pixels wide
+  const um = p.ov_bar && p.ov_um > 0 ? p.ov_um * (1 << draft) : 0, text = captionText(p.ov_text).trim();
   if (!um && !text) return null;
   return { um_per_px: um, bar_um: lengthUm(p.ov_len), text, bar_pos: p.ov_bar_pos, text_pos: p.ov_text_pos, size: p.ov_size / 100, color: p.ov_color, style: p.ov_style };
 }
@@ -882,7 +889,7 @@ function projectData() {
   const dirs = [], dirIx = (f) => { if (!f.dir) return null; let i = dirs.indexOf(f.dir); if (i < 0) { i = dirs.length; dirs.push(f.dir); } return i; };
   const frames = frameList().map((e) => ({ name: e.f.name, path: e.f.relPath || e.f.webkitRelativePath || e.f.name, size: e.f.size, modified: e.f.lastModified, dir: dirIx(e.f), ...(e.on ? {} : { off: true }) }));
   const r = st.result;
-  const run = r ? { params: r.params, frames: st.files.map((f) => f.name), w: r.w, h: r.h, bits: r.bits, sims: st.frames.map((f) => (f && f.sim) || null), gains: st.frames.map((f) => (f && f.gain) || null), dmap: !!r.dmap, secs: r.secs, when: r.when } : PJ.run;   // no result of this session: the project's own run stays, with its strokes
+  const run = r ? { params: r.params, frames: st.files.map((f) => f.name), w: r.w, h: r.h, bits: r.bits, sims: st.frames.map((f) => (f && f.sim) || null), gains: st.frames.map((f) => (f && f.gain) || null), dmap: !!r.dmap, secs: r.secs, when: r.when, crop: r.userCrop || null } : PJ.run;   // no result of this session: the project's own run stays, with its strokes; crop: the user's window
   const dust = DUST.file ? { name: DUST.file.name, size: DUST.file.size, modified: DUST.file.lastModified } : PJ.dust;   // a map still to find keeps its place
   const data = { lapstack_project: 1, saved: new Date().toISOString(), name: PJ.name, frames, dirs: dirs.map((d) => ({ id: d.id, name: d.name })), params: readParams(), save: saveSettingsData(), run, strokes: r ? R.strokes : PJ.strokes, dust };
   return { data, dirs };
@@ -957,7 +964,7 @@ function fillProject(files) {
   ensureTimes(); renderFilmstrip(); runLabel(); $('run').disabled = st.running || !st.files.length; $('tab-source').disabled = !st.files.length;
   if (st.view === 'source') draw();
   for (const f of added) makeThumb(f);
-  if (added.length) worker.postMessage({ type: 'thumbs', files: added, indices: added.map((f) => st.files.indexOf(f)), uids: added.map((f) => f.uid), edge: readParams().proxy_edge });
+  if (added.length) worker.postMessage({ type: 'thumbs', files: added, indices: added.map((f) => st.files.indexOf(f)), uids: added.map((f) => f.uid), edge: readParams().proxy_edge, rotate: readParams().rotate / 90 });
   log(`[lapstack] project ${PJ.name}: ${found} frame${found === 1 ? '' : 's'} found${extra ? `, ${extra} file${extra === 1 ? '' : 's'} not in the project left out` : ''}${PJ.missing ? `, ${PJ.missing} still missing` : ' — all of them'}`);
 }
 // the project's registration for the run about to start: only for its own frames, in its order
@@ -1032,7 +1039,7 @@ function startRun() {
   const sims = projectSims();   // a project's registration for these very frames, else the search
   PJ.runFrames = PJ.run ? PJ.run.frames : null; $('pj-reuse-row').hidden = true;
   if (sims) log(`[lapstack] registration from project ${PJ.name}: no alignment search`);
-  worker.postMessage({ type: 'run', files: st.files, params, sims });
+  worker.postMessage({ type: 'run', files: st.files, params: { ...params, rotate: params.rotate / 90 }, sims });
 }
 $('cancel').addEventListener('click', () => { worker.postMessage({ type: 'cancel' }); if (inBatch() && SV.exporting) { SV.cancel = true; worker.postMessage({ type: 'refold_cancel' }); } });
 // ---------- batch ----------
@@ -1124,7 +1131,9 @@ async function onDone(m) {
   fused.getContext('2d').putImageData(img, 0, 0);
   st.result = { w: m.w, h: m.h, bits: m.bits, fused, dmap: null, depth: new Float32Array(m.depth), conf: new Float32Array(m.conf || 0), dw: m.depth_w, dh: m.depth_h,
                 winner: new Float32Array(m.winner), ww: m.winner_w, wh: m.winner_h, meta: m.meta || null,   // meta: what the first frame carried (EXIF / ICC / XMP sizes)
-                crop: m.crop ? { x: m.crop[0], y: m.crop[1], w: m.crop[2], h: m.crop[3] } : null };            // crop: the window every aligned frame covers, null = all of it
+                crop: m.crop ? { x: m.crop[0], y: m.crop[1], w: m.crop[2], h: m.crop[3] } : null,             // crop: the window the files are cut to (the automatic one, then inside the user's), null = all of it
+                autoCrop: m.crop ? { x: m.crop[0], y: m.crop[1], w: m.crop[2], h: m.crop[3] } : null, userCrop: null };
+  st.nearAuto = null; nearCue();
   resetRetouch();
   const secs = ((performance.now() - st.t0) / 1000).toFixed(1);
   Object.assign(st.result, { run: st.runNo, params: st.runParams, dust: st.runDust, frames: m.frames, first: st.runFirst, last: st.runLast, secs: Number(secs), when: new Date() });   // what a kept result is labelled with
@@ -1157,7 +1166,7 @@ function finishRun() {
   st.rendering = false;
   renderOverlayInfo();   // the first frame's own calibration, if the run found one
   setView('fused');
-  if (PJ.run && st.result && !inBatch()) PJ.run = null;   // the project's run has been made again: the result is the session's now
+  if (PJ.run && st.result && !inBatch()) { if (PJ.run.crop && PJ.run.w === st.result.w && PJ.run.h === st.result.h) setUserCrop(PJ.run.crop); PJ.run = null; }   // the project's run has been made again: the result is the session's now, with the project's crop window
   if (PJ.strokes.length && st.result && !inBatch()) { replayStrokes(); return; }   // finishRun is called again by 'replayed'
   window.__app_done = JSON.stringify({ ok: true, w: st.result?.w, h: st.result?.h, frames: st.frameCount, dmap: !!(st.result && st.result.dmap), secs: ((performance.now() - st.t0) / 1000).toFixed(1) });
   if (inBatch()) stackDone();
@@ -1233,7 +1242,8 @@ function saveSettingsData() {
 }
 function applySaveSettings(o) {
   if (!o) return;
-  for (const id of svIds) if (id in o) { const el = $(id); if (el.type === 'checkbox') el.checked = !!o[id]; else el.value = o[id]; }
+  for (const id of svIds) if (id in o) { const el = $(id); if (el.type === 'checkbox') el.checked = !!o[id]; else el.value = id === 'v3-near' && typeof o[id] === 'boolean' ? (o[id] ? 'first' : 'last') : o[id]; }
+  if (!['auto', 'first', 'last'].includes($('v3-near').value)) $('v3-near').value = 'auto';
   for (const id of svSteps) if (o[id]) setStep(id, Number(o[id]));
   if (Array.isArray(o.sel)) SV.sel = new Set(o.sel);
 }
@@ -1265,8 +1275,11 @@ function chunked(file) {
 // else DateTimeDigitized, else DateTime — the TIFF structure inside a JPEG APP1, a TIFF, or a
 // PNG eXIf chunk — or, without one, the XMP packet's CreateDate (a JPEG APP1, TIFF tag 700, a
 // PNG iTXt): raw converters write TIFFs with XMP and no EXIF at all.
-async function captureDate(file) {
+async function captureDate(file, want = null) {   // want: {v} — fill v with the EXIF SubjectDistance instead of returning the date
+  let dist = null;
+  const done = (r) => { if (want) want.v = dist; return r; };
   try {
+    return done(await (async () => {
     const get = chunked(file);
     const u16 = (b, o, le) => le ? b[o] | b[o + 1] << 8 : b[o] << 8 | b[o + 1];
     const u32 = (b, o, le) => le ? (b[o] | b[o + 1] << 8 | b[o + 2] << 16) + b[o + 3] * 16777216 : b[o] * 16777216 + (b[o + 1] << 16 | b[o + 2] << 8 | b[o + 3]);
@@ -1309,6 +1322,7 @@ async function captureDate(file) {
         if (!want.includes(tag)) continue;
         const p = cnt <= 4 ? t + off + 2 + i + 8 : t + u32(es, i + 8, le);
         if (type === 2) { const b = await get(p, Math.min(cnt, 40)); out[tag] = ascii(b, 0, b.length).replace(/\0[\s\S]*$/, ''); }
+        else if (type === 5) { const b = await get(p, 8); const nu = u32(b, 0, le), de = u32(b, 4, le); out[tag] = de > 0 && nu > 0 && nu < 0xFFFFFFFF && nu / de < 1e6 ? nu / de : null; }
         else if (type === 1 || type === 7) out[tag] = [p, cnt];
         else out[tag] = type === 3 ? u16(es, i + 8, le) : u32(es, i + 8, le);
       }
@@ -1316,13 +1330,27 @@ async function captureDate(file) {
     };
     const ifd0 = await ifd(u32(th, 4, le), [0x0132, 0x8769, 700]);
     let dt = null;
-    if (ifd0[0x8769]) { const ex = await ifd(ifd0[0x8769], [0x9003, 0x9004]); dt = ex[0x9003] || ex[0x9004]; }
+    if (ifd0[0x8769]) { const ex = await ifd(ifd0[0x8769], [0x9003, 0x9004, 0x9206]); dt = ex[0x9003] || ex[0x9004]; if (typeof ex[0x9206] === 'number') dist = ex[0x9206]; }
     dt = dt || ifd0[0x0132];
     const m = dt && /^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(dt);
     if (m && m[1] !== '0000') return `${m[1]}:${m[2]}:${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
     if (t === 0 && !xmp && Array.isArray(ifd0[700])) xmp = ifd0[700];   // a TIFF's XMP is tag 700 of IFD0 (BYTE or UNDEFINED, at the entry's offset)
     return xmpDate();
-  } catch { return null; }
+    })());
+  } catch { return done(null); }
+}
+// the focus distance the first frame's EXIF records (SubjectDistance, metres), or null — most cameras
+// keep it in their MakerNote, which is beyond this reader (the CLI asks exiftool)
+async function subjectDistance(file) { const r = { v: null }; await captureDate(file, r); return r.v; }
+// the near end of the stack from the frames' focus distances, for the stereo, rocking and 3D model
+// when the Save step's near end is 'auto' (the CLI's --near-end auto)
+async function nearCue() {
+  const n = st.files.length; if (n < 2) return;
+  const [a, b] = await Promise.all([subjectDistance(st.files[0]), subjectDistance(st.files[n - 1])]);
+  if (a === null || b === null || Math.abs(a - b) < 1e-6 * Math.max(a, b)) return;
+  st.nearAuto = { first: a < b, why: `focus distance ${a.toFixed(3)} m in the first frame, ${b.toFixed(3)} m in the last (EXIF SubjectDistance)` };
+  log(`[lapstack] near end: ${st.nearAuto.why}: frame 0 is the ${a < b ? 'near' : 'far'} end`);
+  if (st.step === 'save') renderSave();
 }
 // the date as a file-name token, "YYYYMMDD-HHMMSS"
 async function exifDate(file) { const d = await captureDate(file); return d ? d.replace(/^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})$/, '$1$2$3-$4$5$6') : null; }
@@ -1333,7 +1361,9 @@ window.__svTest = { exifDate, nameDate, captureTime, stacksOf, SV, B, save: (kin
                     view: viewFrame, stereo: (format) => call({ type: 'view_stereo', ...v3(), format: format || 'png', quality: 90, meta: false }),
                     refold, refoldView: (index) => call({ type: 'refold_view', index }), refoldEnd: () => call({ type: 'refold_end' }),
                     sign: (bytes, mime, name) => signBlob(new Blob([bytes], { type: mime }), OUTPUTS[0], name, mime).then((b) => b.arrayBuffer()) };
-function svExt(o) { const e = typeof o.ext === 'function' ? o.ext() : o.ext; return e || ($('sv-format').value === 'jpeg' ? 'jpg' : 'png'); }
+const dngRun = () => !!(st.result && st.result.meta && st.result.meta.dng);   // the run was made for a linear DNG (Run ▾ · linear DNG)
+const svFormat = () => ($('sv-format').value === 'dng' && !dngRun() ? 'png' : $('sv-format').value);
+function svExt(o) { const e = typeof o.ext === 'function' ? o.ext() : o.ext; return e || (svFormat() === 'jpeg' ? 'jpg' : svFormat() === 'dng' ? 'dng' : 'png'); }
 function svName(o, now = new Date()) {
   const parts = [];
   if ($('fn-app').checked) parts.push('lapstack');
@@ -1347,7 +1377,8 @@ function svName(o, now = new Date()) {
   return (parts.join('_') || 'stacked') + '.' + svExt(o);
 }
 // the stereo / rocking settings: the shifts as fractions of the width (the card shows percent)
-const v3 = () => ({ method: $('v3-method').value, source: haveKind($('v3-src').value) ? $('v3-src').value : 'fused', crop: !!cropArea(), near: $('v3-near').checked, shift: Number($('v3-shift').value) / 100, rock: Number($('v3-rock').value) / 100, views: Math.max(4, Number($('v3-views').textContent)), layout: $('v3-layout').value });
+const nearFirst = () => { const v = $('v3-near').value; return v === 'first' ? true : v === 'last' ? false : st.nearAuto ? st.nearAuto.first : true; };   // 'auto': the frames' focus distances (nearCue), frame 0 near without them
+const v3 = () => ({ method: $('v3-method').value, source: haveKind($('v3-src').value) ? $('v3-src').value : 'fused', crop: !!cropArea(), near: nearFirst(), shift: Number($('v3-shift').value) / 100, rock: Number($('v3-rock').value) / 100, views: Math.max(4, Number($('v3-views').textContent)), layout: $('v3-layout').value });
 const refolding = () => $('v3-method').value === 'refold';
 // the 3D model's settings (mesh.rs): the relief as a fraction of the width (the card shows percent); the
 // image and the near end are the stereo section's
@@ -1391,7 +1422,15 @@ async function renderSave() {
   const strokes = R.undo, res = st.result;   // res: null when only kept results are on hand
   const cr = res && res.crop;
   $('sv-crop').disabled = !cr && !st.kept.some((k) => k.crop);
-  $('sv-crop-info').textContent = cr ? `${cr.w}×${cr.h} of ${res.w}×${res.h}, from (${cr.x}, ${cr.y}) — the bright window in the viewer` : res ? 'the aligned frames cover the whole image: nothing to cut' : 'no result from a run on hand; a kept result is cut to its own window';
+  { const ac = res && res.autoCrop, uc = res && res.userCrop;
+    $('sv-crop-info').textContent = ac ? `${ac.w}×${ac.h} of ${res.w}×${res.h}, from (${ac.x}, ${ac.y}) — the bright window in the viewer` : res ? 'the aligned frames cover the whole image: nothing to cut' : 'no result from a run on hand; a kept result is cut to its own window';
+    $('sv-crop-user').textContent = uc ? `window ${uc.w}×${uc.h} at (${uc.x}, ${uc.y})` + (cr && (cr.w !== uc.w || cr.h !== uc.h) ? `, cut to ${cr.w}×${cr.h} inside the automatic window` : '') : 'no window of your own';
+    $('sv-cropset').disabled = !res || st.running; $('sv-cropclear').disabled = !uc; }
+  { const dn = dngRun(); $('sv-format').querySelector('[value="dng"]').disabled = !dn;
+    $('sv-format-info').hidden = !($('sv-format').value === 'dng');
+    $('sv-format-info').textContent = dn ? `${res.meta.dng} — the stacked images and the stereo pair as 16-bit linear DNGs a raw converter develops like the raws` : 'a linear DNG needs a run made for one: tick "linear DNG" in the Run ▾ menu and run again; the files are saved as PNG until then'; }
+  { const v = $('v3-near').value, a = st.nearAuto;
+    $('v3-near-info').textContent = v === 'auto' ? (a ? `${a.why}: frame 0 is taken as the ${a.first ? 'near' : 'far'} end` : 'no focus distance in the first and last frames\' EXIF (most cameras keep it in their MakerNote, which the CLI reads through exiftool): frame 0 is taken as the near end — pick the other if the relief looks inside out') : v === 'first' ? 'the focus went front to back' : 'the focus went back to front'; }
   const [ow, oh] = outDims();
   $('sv-info').textContent = res ? `${res.w}×${res.h}, ${res.bits}-bit input, ${st.files.length} frames` + (cropArea() ? `, saved as ${ow}×${oh}` : '') + (strokes ? `, ${strokes} retouch stroke${strokes > 1 ? 's' : ''}` : '')
     : `no result from a run on hand · ${st.kept.length} kept result${st.kept.length > 1 ? 's' : ''}`;
@@ -1724,7 +1763,7 @@ async function saveSelected() {
   if (!items.length) return 'skipped';
   const saved = []; SV.lastSaved = saved;
   SV.exporting = true; SV.cancel = false; updateSaveButtons(); $('run').disabled = true; $('clear').disabled = true;
-  const now = new Date(), fmt = $('sv-format').value, q = Number($('sv-quality').value), sign = $('cc-on').checked;
+  const now = new Date(), fmt = svFormat(), q = Number($('sv-quality').value), sign = $('cc-on').checked;
   const ovj = burnOverlay() ? overlayJson() : '';   // the scale bar and text, burned into the stacked images and views by the engine
   const setState = (o, t) => { const row = $('sv-files').querySelector(`[data-id="${o.id}"] .state`); if (row) row.textContent = t; };
   const prog = (t, done, total) => { $('sv-progress').textContent = t; setProgress(t, done, total); };
@@ -1759,9 +1798,9 @@ async function saveSelected() {
           finally { await call({ type: 'refold_end' }).catch(() => {}); R.gpuIndex = -1; }
           prog(`encoding ${name}`, 0, 0); setState(o, 'encoding…');
         } else if (o.kind === 'stereo') r = await call({ type: 'view_stereo', ...v3(), format: f, quality: q, meta, overlay: ovj });   // the pair at the crop's full size
-        else if (o.kept) r = await call({ type: 'save', kind: o.kind, format: f, quality: q, meta: $('sv-meta').checked && !!o.kept.meta, crop: $('sv-crop').checked && !!o.kept.crop, overlay: ovj });   // its own window and metadata
+        else if (o.kept) r = await call({ type: 'save', kind: o.kind, format: f === 'dng' && !o.kept.dng ? 'png' : f, quality: q, meta: $('sv-meta').checked && !!o.kept.meta, crop: $('sv-crop').checked && !!o.kept.crop, overlay: ovj });   // its own window and metadata; a DNG only from a run made for one
         else r = await call({ type: 'save', kind: o.kind, format: f, quality: q, meta, crop: !!cropArea(), overlay: ovj });
-        mime = f === 'jpeg' ? 'image/jpeg' : 'image/png'; blob = new Blob([r.bytes], { type: mime });
+        mime = f === 'jpeg' ? 'image/jpeg' : f === 'dng' ? 'image/x-adobe-dng' : 'image/png'; blob = new Blob([r.bytes], { type: mime });
       }
       if (sign && !mime.startsWith('video/')) { prog(`signing ${name}`, 0, 0); setState(o, 'signing…'); blob = await signBlob(blob, o, name, mime); }
       await downloadBlob(blob, name); saved.push(name); setState(o, `saved · ${fmtMB(blob.size)}`);
@@ -2315,6 +2354,11 @@ function layerFor(tab) {
 // The crop window over a drawn layer: the border outside it dimmed, a hairline on its
 // edge — in image space, so it sits on the same pixels in every pane and at every zoom.
 function drawCrop(c = ctx) {
+  if (st.cropDrag) {   // the window being drawn
+    const d = st.cropDrag, x = Math.min(d.x0, d.x1), y = Math.min(d.y0, d.y1), w = Math.abs(d.x1 - d.x0), h = Math.abs(d.y1 - d.y0);
+    const lw = 1 / (st.zoom * dpr());
+    c.lineWidth = lw; c.strokeStyle = 'rgba(255,220,80,.95)'; c.setLineDash([6 * lw, 4 * lw]); c.strokeRect(x, y, w, h); c.setLineDash([]);
+  }
   const r = cropArea(); if (!r) return;
   const [W, H] = imageDims();
   c.fillStyle = 'rgba(0,0,0,.55)';
@@ -2517,6 +2561,55 @@ function onWheel(cv, e) {
 }
 let drag = null;
 function imgXY(cv, e) { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left - st.ox) / st.zoom, (e.clientY - r.top - st.oy) / st.zoom]; }
+// ---------- crop tool: a window of the user's own, on top of the automatic crop ----------
+// The Crop button (C) arms a drag on the stacked image; the window goes to the engine, which
+// cuts it to the area every frame covers and cuts every saved file to the result. The Save
+// step's Crop section shows it and clears it; a project file keeps it (in the run's pixels).
+function setCropTool(on) {
+  st.cropTool = !!on && !!st.result && !st.running;
+  if (!st.cropTool) st.cropDrag = null;
+  $('croptool').classList.toggle('on', st.cropTool);
+  $('vwrap').classList.toggle('croptool', st.cropTool);
+  if (st.cropTool && st.step !== 'stack') gotoStep('stack');
+  if (st.cropTool && !['fused', 'dmap', 'wav'].includes(st.view) && !keptOf(st.view)) setView('fused');
+  draw();
+}
+async function endCropDrag() {
+  const d = st.cropDrag; st.cropDrag = null;
+  if (!d) return;
+  const [W, H] = imageDims();
+  const x0 = Math.max(0, Math.min(W, Math.min(d.x0, d.x1))), y0 = Math.max(0, Math.min(H, Math.min(d.y0, d.y1)));
+  const x1 = Math.max(0, Math.min(W, Math.max(d.x0, d.x1))), y1 = Math.max(0, Math.min(H, Math.max(d.y0, d.y1)));
+  const r = { x: Math.round(x0), y: Math.round(y0), w: Math.round(x1 - x0), h: Math.round(y1 - y0) };
+  setCropTool(false);
+  if (r.w < 8 || r.h < 8) { draw(); return; }
+  await setUserCrop(r);
+}
+async function setUserCrop(r) {
+  if (!st.result) return;
+  try {
+    const m = await call({ type: 'crop_set', x: r.x, y: r.y, w: r.w, h: r.h });
+    st.result.userCrop = r; st.result.crop = { x: m.crop[0], y: m.crop[1], w: m.crop[2], h: m.crop[3] };
+    log(`[lapstack] crop window ${r.w}×${r.h} at (${r.x}, ${r.y}) → the files are cut to ${st.result.crop.w}×${st.result.crop.h}`);
+  } catch (e) { toast(`Crop: ${e.message}`, 5000); }
+  $('cropclear').hidden = !st.result.userCrop;
+  if (!$('sv-crop').checked) { $('sv-crop').checked = true; saveSaveSettings(); }
+  renderOverlayInfo(); draw(); if (st.step === 'save') renderSave();
+}
+async function clearUserCrop() {
+  if (!st.result || !st.result.userCrop) return;
+  await call({ type: 'crop_clear' }).catch(() => {});
+  st.result.userCrop = null; st.result.crop = st.result.autoCrop;
+  $('cropclear').hidden = true;
+  log('[lapstack] crop window cleared');
+  renderOverlayInfo(); draw(); if (st.step === 'save') renderSave();
+}
+$('croptool').addEventListener('click', () => setCropTool(!st.cropTool));
+$('cropclear').addEventListener('click', clearUserCrop);
+$('sv-cropset').addEventListener('click', () => setCropTool(true));
+$('sv-cropclear').addEventListener('click', clearUserCrop);
+window.__setUserCrop = (r) => setUserCrop(r); window.__clearUserCrop = () => clearUserCrop();   // harness hooks
+
 // ---------- ctrl+G: jump to the frame that won a pixel ----------
 // The LAP winner map holds, per cell of the depth level's grid, the frame that
 // won there (the map "Save winner map" writes). A single cell is noisy, so a
@@ -2591,6 +2684,7 @@ for (const cv of [canvas, canvas2]) {
   cv.addEventListener('pointerdown', (e) => {
     setMods(e);
     if (st.pick && e.button === 0) { e.preventDefault(); pickAt(cv, e); return; }
+    if (st.cropTool && st.result && e.button === 0 && !e.shiftKey) { e.preventDefault(); try { cv.setPointerCapture(e.pointerId); } catch {} const [x, y] = imgXY(cv, e); st.cropDrag = { x0: x, y0: y, x1: x, y1: y }; draw(); return; }
     const paint = R.on && st.result && e.button === 0 && !e.shiftKey && !(e.buttons & 4);
     try { cv.setPointerCapture(e.pointerId); } catch {}
     if (paint) {
@@ -2603,10 +2697,11 @@ for (const cv of [canvas, canvas2]) {
     setMods(e);
     if (R.on) { R.cursor = imgXY(cv, e); R.hold = false; }
     if (R.painting) { const [x, y] = imgXY(cv, e); addDab(x, y); drawSoon(); return; }
+    if (st.cropDrag) { const [x, y] = imgXY(cv, e); st.cropDrag.x1 = x; st.cropDrag.y1 = y; drawSoon(); return; }
     if (drag) { st.ox = drag.ox + e.clientX - drag.x; st.oy = drag.oy + e.clientY - drag.y; st.fitted = false; }
     if (drag || R.on) drawSoon();
   });
-  cv.addEventListener('pointerup', () => { endStroke(); drag = null; cv.classList.remove('drag'); });
+  cv.addEventListener('pointerup', () => { if (st.cropDrag) { endCropDrag(); return; } endStroke(); drag = null; cv.classList.remove('drag'); });
   cv.addEventListener('pointerleave', () => { if (R.on) { R.cursor = null; draw(); } });
   cv.addEventListener('dblclick', () => (st.fitted ? zoom100() : fit()));
   cv.addEventListener('wheel', (e) => onWheel(cv, e), { passive: false });
@@ -2665,6 +2760,7 @@ function updateTabs() {
   // the Retouch button: whenever a stacked image is on screen (as the view or the compare partner)
   const canRetouch = have && st.step === 'stack' && (isTarget(st.view) || (st.compare && isTarget(st.cmp)));
   $('rtseg').hidden = !canRetouch; $('retouch').classList.toggle('on', retouch);
+  $('cropseg').hidden = !canRetouch || retouch; $('croptool').classList.toggle('on', st.cropTool); $('cropclear').hidden = !(st.result && st.result.userCrop);
   ensureSource(); ensureSlab();
   document.querySelectorAll('#viewseg button').forEach((b) => b.classList.toggle('on', b.dataset.group === group));
   const subs = (GROUPS[group] || []).filter((t) => (t !== 'dmap' || haveDmap()) && (t !== 'wav' || haveWav()) && (t !== 'fused' || have) && (t !== 'conf' || haveConf())).concat(group === 'stack' ? st.kept.map(keptId) : []);
@@ -2770,6 +2866,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 's' && R.on && !e.ctrlKey && !e.metaKey) { const order = ['source', ...(resultSources().length ? ['result'] : []), 'slab']; setBrushFrom(order[(order.indexOf(R.from) + 1) % order.length]); }   // frame → another result (once there is one) → slab
   else if (e.key === '1') gotoStep('stack'); else if (e.key === '2') gotoStep('save');
   else if (e.key === 'r' && !e.ctrlKey && !e.metaKey) toggleRetouch();
+  else if (e.key === 'c' && !e.ctrlKey && !e.metaKey && !R.on) setCropTool(!st.cropTool);
   else if (e.key === 'ArrowLeft') scrub(e.shiftKey ? -10 : -1); else if (e.key === 'ArrowRight') scrub(e.shiftKey ? 10 : 1);
   else if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && st.files[st.selected]) { e.preventDefault(); moveFrame(st.files[st.selected].uid, e.key === 'ArrowUp' ? -1 : 1); }
   else if (e.key === 'x' && !e.ctrlKey && !e.metaKey && !R.on && st.files[st.selected]) markFrames(st.files[st.selected].uid, false, 'toggle');

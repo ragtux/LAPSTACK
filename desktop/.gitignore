@@ -1,0 +1,4 @@
+node_modules/
+electron-fhs
+dist/
+package-lock.json

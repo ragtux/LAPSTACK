@@ -36,6 +36,8 @@
           <label class="stepper" title="the contrast raised to this before weighing: 1 = plain contrast weighting, higher = a keener pick of the sharpest frame">contrast power <span><button data-step="p-wav-pow" data-d="-1">−</button><span id="p-wav-pow" data-min="1" data-max="6">2</span><button data-step="p-wav-pow" data-d="1">+</button></span></label>
           <label class="stepper" title="box radius of the weight map on the depth pass's grid (Helicon's smoothing); 0 = none">weight smoothing <span><button data-step="p-wav-smooth" data-d="-1">−</button><span id="p-wav-smooth" data-min="0" data-max="8">1</span><button data-step="p-wav-smooth" data-d="1">+</button></span></label>
         </div>
+        <label class="tog"><input type="checkbox" id="p-dng"> linear DNG</label>
+        <div class="dim small">Helicon's RAW in, DNG out: the raws are developed to the camera's own linear space (no white balance, matrix or curve baked in) and fused in the look that frame 0's white balance and matrix give, so the Save step can write the stack as a linear DNG that a raw converter develops like a raw — exposure, white balance and profile still open. Frames that are not raws are taken as sRGB and written as a linear sRGB DNG; a stack must be all raws or none. The browser's frames are 16-bit, so a highlight past white is clipped here (the CLI keeps it).</div>
         <!-- batch: the frames cut into stacks (Helicon's split, Zerene's batch), each run in turn and
              saved as it finishes; the filmstrip shows the split before the run -->
         <div class="menu-sep"></div>
@@ -142,6 +144,7 @@
           <!-- retouch mode: shown whenever LAP or DFR is on screen; on = paint the scrubbed source
                frame (right pane) into the stacked image (left pane) -->
           <span class="seg" id="rtseg" hidden><button id="retouch" title="paint from a source frame, a slab or the other stacked result into the stacked image (R; Esc leaves)">Retouch</button></span>
+          <span class="seg" id="cropseg" hidden><button id="croptool" title="draw a window to cut every saved file to (C; Esc leaves); the Save step's Crop section shows it">Crop</button><button id="cropclear" title="clear the window" hidden>✕</button></span>
         </div>
       </div>
     </div>
@@ -201,6 +204,8 @@
       <label title="how much a frame may be deformed to land on the previous one — similarity: shift, scale and rotation (Zerene's and Helicon's, what a focus rail or ring produces); affine adds an aspect ratio and a shear; projective adds perspective, for a camera that tilted against the subject as it stepped (keystone). More terms take longer to search, and on a stack that needs none they only fit noise">model <select id="p-model"><option value="similarity" selected>similarity</option><option value="affine">affine</option><option value="projective">projective</option></select></label>
       <label class="stepper">align coarsen <span><button data-step="p-coarsen" data-d="-1">−</button><span id="p-coarsen" data-min="0" data-max="5">2</span><button data-step="p-coarsen" data-d="1">+</button></span></label>
       <label title="the kernel each aligned frame is resampled with (the registration search itself always uses spline 4×4): the wider the kernel, the sharper fine detail survives a fractional shift, and the more noise and ringing at hard edges — nearest keeps the pixels as they are (jagged sub-pixel shifts), bilinear is soft, spline 4×4 is Zerene's default, spline 6×6 and Lanczos 3 are sharper">interpolation <select id="p-interp"><option value="nearest">nearest</option><option value="bilinear">bilinear</option><option value="bicubic">bicubic</option><option value="spline4x4" selected>spline 4×4</option><option value="spline6x6">spline 6×6</option><option value="lanczos3">Lanczos 3</option></select></label>
+      <label title="turn every frame as decoded, clockwise — a camera held sideways (a raw is already turned by its EXIF orientation); the thumbnails follow">rotate frames <select id="p-rotate"><option value="0" selected>no</option><option value="90">90° cw</option><option value="180">180°</option><option value="270">90° ccw</option></select></label>
+      <label class="stepper" title="a draft run: every frame block-averaged by 2, 4, 8 or 16 as decoded, so the whole run — alignment, fusion, depth, every view and file — is a quick check of the settings at a fraction of the size and time; the scale bar and the crop window follow the frames' own pixels">draft <span><button data-step="p-draft" data-d="-1">−</button><span id="p-draft" data-min="0" data-max="4" data-zero="off">0</span><button data-step="p-draft" data-d="1">+</button></span></label>
     </div>
     <button class="section" type="button" data-sec="fusion">Fusion</button>
     <div class="sec-body">
@@ -273,7 +278,8 @@
       <div class="section sv-head"><span>Files</span><label class="check small"><input type="checkbox" id="sv-all"> <span>all</span></label></div>
       <div id="sv-files"></div>
       <div class="section">Image format</div>
-      <label>format <select id="sv-format"><option value="png">PNG, input bit depth</option><option value="png8">PNG, 8-bit</option><option value="jpeg">JPEG</option></select></label>
+      <label>format <select id="sv-format"><option value="png">PNG, input bit depth</option><option value="png8">PNG, 8-bit</option><option value="jpeg">JPEG</option><option value="dng">DNG, linear (camera space)</option></select></label>
+      <div class="dim small" id="sv-format-info" hidden>—</div>
       <label id="sv-qrow" hidden>quality <span class="val" id="sv-qval">92</span></label>
       <input type="range" id="sv-quality" min="50" max="100" value="92" hidden>
       <div class="dim small">Depth and winner maps are always PNG; animations are GIF.</div>
@@ -281,6 +287,9 @@
       <label class="check"><input type="checkbox" id="sv-crop" checked> <span>crop to the area every aligned frame covers</span></label>
       <div class="dim small" id="sv-crop-info">—</div>
       <div class="dim small">Where a shifted, scaled or rotated frame did not reach, the aligner filled its border by repeating the edge; the stacked images, maps and animations are cut to the window with real pixels from every frame. The viewer shows it as the bright window. Off, the files keep the full frame.</div>
+      <div class="row"><span class="seg"><button id="sv-cropset" title="draw the window on the image in the Stack step (C)">set a window…</button><button id="sv-cropclear" title="back to the automatic window alone">clear</button></span></div>
+      <div class="dim small" id="sv-crop-user">—</div>
+      <div class="dim small">A window of your own, drawn on the stacked image with the Crop button of the Stack step's viewer (or C): every file is cut to it, inside the automatic window. A project file keeps it.</div>
       <div class="section">Scale bar and text</div>
       <label class="check"><input type="checkbox" id="sv-overlay" checked> <span>burn the scale bar and text into the stacked images, the stereo pair and the animations</span></label>
       <div class="dim small" id="sv-overlay-info">—</div>
@@ -307,7 +316,8 @@
       <label>rocking shift <span class="val" id="v3-rock-val">±3 %</span></label>
       <input type="range" id="v3-rock" min="0.5" max="8" step="0.5" value="3">
       <label class="stepper">rocking frames per cycle <span><button data-step="v3-views" data-d="-4">−</button><span id="v3-views" data-min="4" data-max="96">24</span><button data-step="v3-views" data-d="4">+</button></span></label>
-      <label class="check"><input type="checkbox" id="v3-near" checked> <span>frame 0 is the nearest (the focus went front to back)</span></label>
+      <label>near end <select id="v3-near"><option value="auto">what the frames say (frame 0 near when nothing does)</option><option value="first">frame 0 is the nearest (front to back)</option><option value="last">frame 0 is the farthest (back to front)</option></select></label>
+      <div class="dim small" id="v3-near-info">—</div>
       <div class="dim small">The depth map makes the stacked image a relief, and a view from the side is that relief sheared: each pixel slides sideways in proportion to its depth. The shift is how far the far end of the stack moves relative to the near end, as a percentage of the width (Zerene's maximum X shift; ±3 % suits most subjects, more gives a deeper but harder-to-fuse pair — for a scene <i>d</i> deep and <i>w</i> wide, a viewing angle <i>a</i> is a shift of tan(<i>a</i>) · <i>d</i> / <i>w</i>). The middle of the stack stays put. Where a near edge slides off the background, the background shows through. The pair is saved at the crop's size (each view the image's size), the rocking as a GIF at the animation size and speed, one sine cycle of the views per loop. If the depth looks inside out, the frames went back to front: untick the box.<br>The <i>shear</i> needs only the stacked image and its depth map, so it is instant, but a depth map is one surface: it cannot show what is behind a hair or a bristle. The <i>refold</i> does what Zerene does — it reads the frames again and fuses the stack once per view with every frame shifted by its index, so each view is a real LAP stack with no depth map involved. That costs one pass over the frames (as long as the run's fold) per batch of views: the stereo pair is one batch at full resolution, and a rocking sequence at the animation size fits in one batch on most GPUs. Its price is the method's halo: beside a near object, the far frames — which win there because the background is sharp in them — carry that object's defocused copy, displaced by the shift, so a soft ghost shows next to it, wider with a larger shift and a deeper scene. The file thumbnails always use the shear.</div>
       <!-- the 3D model: the stacked image as a textured relief of its depth map (mesh.rs) -->
       <div class="section">3D model</div>

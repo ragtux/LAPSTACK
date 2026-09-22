@@ -9,6 +9,7 @@
 //   8-bit in  -> 8-bit out
 //   16-bit in -> 16-bit out  (PNG/TIFF; JPEG has no 16-bit -> written 8-bit)
 
+use crate::dng::DngInfo;
 use crate::meta::{self, Meta};
 use crate::pyramid::Img3;
 use image::{ColorType, DynamicImage, ImageBuffer, Luma, Rgb};
@@ -95,10 +96,60 @@ fn img3_of(dynimg: DynamicImage) -> (Img3, Depth) {
     (o, depth)
 }
 
+/// Decode a frame for a linear-DNG run (`dng.rs`): a camera raw is developed
+/// to its linear camera space and taken to the look space with `look`'s white
+/// balance and matrix (frame 0's, so every frame is developed alike); any
+/// other file is loaded as it is, its sRGB values being the look already. The
+/// frame's own space comes back with it, so the caller can see that a raw and
+/// a non-raw were mixed.
+pub fn load_look(path: &str, look: &DngInfo) -> Result<(Img3, Depth, DngInfo), String> {
+    if crate::raw::is_raw(path) {
+        let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        let (mut img, own) = crate::raw::develop_linear(&bytes).map_err(|e| format!("cannot develop {path}: {e}"))?;
+        look.to_look(&mut img);
+        return Ok((img, Depth::Sixteen, own));
+    }
+    let (img, depth) = load_rgb(path)?;
+    Ok((img, depth, DngInfo::srgb()))
+}
+
+/// Frame 0 of a linear-DNG run: its space is the run's.
+pub fn load_look_first(path: &str) -> Result<(Img3, Depth, DngInfo), String> {
+    if crate::raw::is_raw(path) {
+        let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        let (mut img, info) = crate::raw::develop_linear(&bytes).map_err(|e| format!("cannot develop {path}: {e}"))?;
+        info.to_look(&mut img);
+        return Ok((img, Depth::Sixteen, info));
+    }
+    let (img, depth) = load_rgb(path)?;
+    Ok((img, depth, DngInfo::srgb()))
+}
+
 /// Read the metadata (EXIF, ICC profile, XMP) of an input file, see `meta`.
+/// A camera raw's frame is turned by its orientation as it is decoded, so the
+/// orientation the metadata carries into the output is set to 1.
 pub fn load_meta(path: &str) -> Result<Meta, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-    Ok(meta::extract(&bytes))
+    let mut m = meta::extract(&bytes);
+    if crate::raw::is_raw(path) {
+        if let Some(e) = m.exif.as_deref().and_then(|e| meta::with_orientation(e, 1)) {
+            m.exif = Some(e);
+        }
+    }
+    Ok(m)
+}
+
+/// Write the look image as a linear DNG (`dng::write`); `info` maps it back
+/// to the camera space and names the camera.
+pub fn save_dng(img: &Img3, path: &str, info: &DngInfo, meta: Option<&Meta>) -> Result<(), String> {
+    let mut out: Vec<u8> = Vec::new();
+    crate::dng::write(&mut out, img, info, meta).map_err(|e| format!("cannot write {path}: {e}"))?;
+    std::fs::write(path, out).map_err(|e| format!("cannot write {path}: {e}"))
+}
+
+/// Whether an output path asks for a linear DNG.
+pub fn is_dng(path: &str) -> bool {
+    path.rsplit('.').next().is_some_and(|e| e.eq_ignore_ascii_case("dng"))
 }
 
 /// The capture time of a frame (`Meta::capture_time`), reading as little of the
@@ -142,6 +193,78 @@ pub fn load_capture_time(path: &str) -> Result<Option<f64>, String> {
     f.seek(SeekFrom::Start(HEAD)).map_err(err)?;
     f.read_to_end(&mut whole).map_err(err)?;
     Ok(meta::extract(&whole).capture_time())
+}
+
+/// The focus distance a frame's metadata records, in metres: the EXIF
+/// SubjectDistance (a raw's own reader when its EXIF is not a TIFF
+/// structure), read like `load_capture_time` reads the time — the head of the
+/// file, or a window around a trailing IFD; failing that, what `exiftool`
+/// finds when it is on the path, since most cameras write the focus distance
+/// into their MakerNote alone (Nikon's is even encrypted), which exiftool
+/// decodes and nothing here does. `None` when nothing records one.
+pub fn load_subject_distance(path: &str) -> Option<f64> {
+    use std::io::{Read, Seek, SeekFrom};
+    if crate::raw::is_raw(path) {
+        let bytes = std::fs::read(path).ok()?;
+        return meta::subject_distance(&meta::extract(&bytes)).or_else(|| crate::raw::subject_distance(&bytes)).or_else(|| exiftool_distance(path));
+    }
+    const HEAD: u64 = 4 << 20;
+    const WINDOW: u64 = 4 << 20;
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut head = Vec::with_capacity(len.min(HEAD) as usize);
+    (&mut f).take(HEAD).read_to_end(&mut head).ok()?;
+    if let Some(v) = meta::subject_distance(&meta::extract(&head)) {
+        return Some(v);
+    }
+    if len <= HEAD {
+        return None;
+    }
+    if let Some(off) = meta::tiff_ifd0_offset(&head).map(u64::from).filter(|&o| o >= HEAD && o < len) {
+        let (lo, hi) = (off.saturating_sub(WINDOW / 2), (off + WINDOW / 2).min(len));
+        let mut sparse = vec![0u8; hi as usize];
+        sparse[..head.len()].copy_from_slice(&head);
+        f.seek(SeekFrom::Start(lo)).ok()?;
+        f.read_exact(&mut sparse[lo as usize..hi as usize]).ok()?;
+        if let Some(v) = meta::subject_distance(&meta::extract(&sparse)) {
+            return Some(v);
+        }
+    }
+    exiftool_distance(path)
+}
+
+/// The focus distance by `exiftool -n`, the first of the tags the makers use
+/// (SubjectDistance, FocusDistance, Nikon's LensData FocusDistance, Canon's
+/// FocusDistanceUpper / Lower averaged, Sony's FocusDistance2) that carries a
+/// finite positive number. `None` without exiftool on the path or without
+/// such a tag; one probe per process decides whether exiftool is there.
+pub fn exiftool_distance(path: &str) -> Option<f64> {
+    use std::sync::OnceLock;
+    static HAVE: OnceLock<bool> = OnceLock::new();
+    if !*HAVE.get_or_init(|| std::process::Command::new("exiftool").arg("-ver").output().is_ok_and(|o| o.status.success())) {
+        return None;
+    }
+    let out = std::process::Command::new("exiftool")
+        .args(["-n", "-s", "-SubjectDistance", "-FocusDistance", "-FocusDistanceUpper", "-FocusDistanceLower", "-FocusDistance2", "-ApproximateFocusDistance", path])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut upper = None;
+    let mut lower = None;
+    let mut first = None;
+    for line in text.lines() {
+        let Some((tag, v)) = line.split_once(':') else { continue };
+        let v: f64 = match v.trim().parse::<f64>() { Ok(v) if v.is_finite() && v > 0.0 && v < 1e5 => v, _ => continue };
+        match tag.trim() {
+            "FocusDistanceUpper" => upper = Some(v),
+            "FocusDistanceLower" => lower = Some(v),
+            _ => first = first.or(Some(v)),
+        }
+    }
+    first.or(match (upper, lower) { (Some(u), Some(l)) => Some((u + l) / 2.0), (u, l) => u.or(l) })
 }
 
 /// Write an `Img3` at the requested depth, downgrading to 8-bit if the output

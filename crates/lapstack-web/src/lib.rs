@@ -20,6 +20,7 @@ use depth::DepthGpu;
 use lapstack_core::depth::{DepthParams, FocusMeasure, Upsample};
 use lapstack_core::fuse::{FuseParams, HALO_FLOOR, HALO_REF, TopRule, binomial, fuse_residuals, halo_guide, upsample_index};
 use lapstack_core::align::{AlignModel, Interp, Rect, common_area, free_mask, inverse, shifted};
+use lapstack_core::dng::DngInfo;
 use lapstack_core::dust::{self, DustMap, DustMode, DustParams};
 use lapstack_core::pyramid::{Img3, auto_levels, half};
 use lapstack_core::view::{self, Layout, View};
@@ -38,6 +39,14 @@ fn now() -> f64 {
 #[derive(Deserialize, Clone)]
 #[serde(default)]
 pub struct Params {
+    /// Quarter turns clockwise every frame is given as decoded (the CLI's `--rotate`).
+    pub rotate: u8,
+    /// A draft run: every frame block-averaged by `2^draft` as decoded (`--draft`).
+    pub draft: usize,
+    /// A linear-DNG run: raws developed to their camera space and fused in the look
+    /// of frame 0's white balance and matrix (`lapstack_core::dng`); the Save step
+    /// can then write a DNG.
+    pub dng: bool,
     pub levels: Option<usize>,
     pub energy_radius: usize,
     pub top: String,
@@ -99,6 +108,9 @@ impl Default for Params {
         let (r_in, r_out) = match d.focus { FocusMeasure::Rdf { r_in, r_out } => (r_in, r_out), _ => (1, 3) };
         let up = match d.upsample { Upsample::Guided { radius, eps } => [radius as f32, eps], Upsample::Bilinear => [-1.0, 0.0] };
         Params {
+            rotate: 0,
+            draft: 0,
+            dng: false,
             levels: None,
             energy_radius: 1,
             top: "de".into(),
@@ -207,7 +219,11 @@ struct Run {
     meta: lapstack_core::meta::Meta,
     /// The area every aligned frame covers with real pixels (`finish`); the
     /// saved images are cropped to it on request. `None` = the whole frame.
+    /// `auto_crop` is that area alone, `user_crop` the window `crop_set` asked
+    /// for, and `crop` their overlap: what the saved images are cut to.
     crop: Option<Rect>,
+    auto_crop: Option<Rect>,
+    user_crop: Option<Rect>,
     /// The source frame currently warped into `cur[0]` (`load_source`); In focus renders from it.
     src_gpu: Option<usize>,
     undo: Vec<Patch>,
@@ -260,8 +276,8 @@ const UNDO_CAP: usize = 600 << 20;
 /// was cut or shrunk (or the depth had to be upsampled); otherwise the run's
 /// own arrays serve.
 struct ViewBase {
-    /// (source, cropped, w, h, edits)
-    key: (String, bool, usize, usize, u64),
+    /// (source, cropped, w, h, edits, the crop in force)
+    key: (String, bool, usize, usize, u64, Option<Rect>),
     w: usize,
     h: usize,
     rgb: Option<Vec<u16>>,
@@ -323,12 +339,19 @@ impl Run {
     }
 }
 
-/// Encode an RGB u16 image as PNG (16-bit when `bits16`, else 8-bit) or JPEG.
-fn encode_rgb16(v: &[u16], w: u32, h: u32, format: &str, quality: u8, bits16: bool) -> Result<Vec<u8>, String> {
+/// Encode an RGB u16 image as PNG (16-bit when `bits16`, else 8-bit), JPEG,
+/// or a linear DNG ("dng", with `dng` the look space it is in — a run's
+/// `look`; refused without one).
+fn encode_rgb16(v: &[u16], w: u32, h: u32, format: &str, quality: u8, bits16: bool, dng: Option<(&DngInfo, Option<&lapstack_core::meta::Meta>)>) -> Result<Vec<u8>, String> {
     use image::ImageEncoder;
     let err = |e: image::ImageError| format!("encode: {e}");
     let to8 = || -> Vec<u8> { v.iter().map(|&s| (s as f32 / 65535.0 * 255.0 + 0.5) as u8).collect() };
     let mut out = Vec::new();
+    if format == "dng" {
+        let (info, meta) = dng.ok_or("a linear DNG needs a run made for one (Run ▾ · linear DNG)")?;
+        lapstack_core::dng::write_u16(&mut out, &v[..w as usize * h as usize * 3], w as usize, h as usize, info, meta).map_err(|e| format!("dng: {e}"))?;
+        return Ok(out);
+    }
     match format {
         "jpeg" => image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.clamp(1, 100)).write_image(&to8(), w, h, image::ExtendedColorType::Rgb8).map_err(err)?,
         "png" if bits16 => image::codecs::png::PngEncoder::new(&mut out).write_image(bytemuck::cast_slice(v), w, h, image::ExtendedColorType::Rgb16).map_err(err)?,
@@ -393,6 +416,8 @@ struct Kept {
     rgb16: Vec<u16>,
     crop: Option<Rect>,
     meta: lapstack_core::meta::Meta,
+    /// The look space of the run it came from, when that was a linear-DNG run.
+    dng: Option<DngInfo>,
 }
 
 /// The dust map (`lapstack_core::dust`) in force: its spots are taken out of
@@ -417,6 +442,13 @@ pub struct Engine {
     run: Option<Run>,
     kept: Vec<Kept>,
     dust: Option<Dust>,
+    /// The run's frame preparation (`Params::rotate`, `Params::draft`), applied to
+    /// every frame decoded for it — the run, the renders, the slabs, the source view.
+    rotate: u8,
+    draft: usize,
+    /// A linear-DNG run (`Params::dng`): the look space, frame 0's, once it is known.
+    dng: bool,
+    look: Option<DngInfo>,
 }
 
 /// Decode a frame on the CPU and area-average it to `edge` px on the long side:
@@ -425,11 +457,12 @@ pub struct Engine {
 #[wasm_bindgen]
 /// `raw`: a camera raw — its embedded JPEG preview stands in, developing the
 /// frame being the run's job (seconds per frame here).
-pub fn thumbnail(bytes: &[u8], edge: usize, raw: bool) -> Result<JsValue, JsValue> {
+pub fn thumbnail(bytes: &[u8], edge: usize, raw: bool, rotate: u8) -> Result<JsValue, JsValue> {
     let f = match if raw { lapstack_core::raw::preview(bytes) } else { None } {
         Some(img) => decode::frame_of(img),
         None => decode::decode_any(bytes, raw).map_err(|e| JsValue::from_str(&e))?,
     };
+    let f = if rotate % 4 != 0 { decode::rotate(&f, rotate) } else { f };
     let (w, h) = (f.w, f.h);
     let (out, pw, ph) = proxy_of(&f, edge);
     let o = js_sys::Object::new();
@@ -476,7 +509,7 @@ fn proxy_of(f: &decode::Frame, edge: usize) -> (Vec<u8>, usize, usize) {
 pub async fn create_engine() -> Result<Engine, JsValue> {
     console_error_panic_hook::set_once();
     let gpu = Gpu::new().await.map_err(|e| JsValue::from_str(&e))?;
-    Ok(Engine { gpu, run: None, kept: Vec::new(), dust: None })
+    Ok(Engine { gpu, run: None, kept: Vec::new(), dust: None, rotate: 0, draft: 0, dng: false, look: None })
 }
 
 /// The full-resolution depth map (u16, 65535 = last frame): the DFF map, or
@@ -837,14 +870,76 @@ impl Engine {
 
     /// A frame decoded (or developed) with the dust map's spots taken out, when
     /// there is one of its size.
-    fn decode(&self, bytes: &[u8], raw: bool) -> Result<decode::Frame, String> {
-        let mut frame = decode::decode_any(bytes, raw)?;
+    /// A frame decoded for the run: the dust map taken out (in the sensor's
+    /// orientation and size), then the turn and the draft reduction of the run's
+    /// parameters. In a linear-DNG run a raw is developed to its camera space
+    /// and taken to the look of frame 0's white balance and matrix (the first
+    /// raw decoded sets it); a frame that is not a raw is the look already.
+    fn decode(&mut self, bytes: &[u8], raw: bool) -> Result<decode::Frame, String> {
+        let mut frame = if self.dng && raw {
+            let (mut img, info) = lapstack_core::raw::develop_linear(bytes)?;
+            let look = self.look.get_or_insert(info);
+            if !look.is_camera() {
+                return Err("a camera raw among frames that are not: a linear DNG needs frames of one kind".into());
+            }
+            look.to_look(&mut img);
+            decode::of_img3(&img)
+        } else {
+            if self.dng {
+                let look = self.look.get_or_insert_with(DngInfo::srgb);
+                if look.is_camera() {
+                    return Err("a frame that is not a camera raw among raws: a linear DNG needs frames of one kind".into());
+                }
+            }
+            decode::decode_any(bytes, raw)?
+        };
         if let Some(d) = &self.dust {
             if d.map.w == frame.w && d.map.h == frame.h {
                 d.map.apply_rgb16(&mut frame.rgb);
             }
         }
+        if self.rotate % 4 != 0 {
+            frame = decode::rotate(&frame, self.rotate);
+        }
+        if self.draft > 0 {
+            frame = decode::reduce(&frame, self.draft);
+        }
         Ok(frame)
+    }
+
+    /// `decode`, with a frame of another size than the run's brought to it.
+    fn decode_for_run(&mut self, bytes: &[u8], raw: bool) -> Result<decode::Frame, String> {
+        let frame = self.decode(bytes, raw)?;
+        match &self.run {
+            Some(run) if frame.w != run.w || frame.h != run.h => Ok(decode::resize(&frame, run.w, run.h)),
+            _ => Ok(frame),
+        }
+    }
+
+    /// Cut every saved image to this window of the frame (full-resolution pixels
+    /// of the run's grid), on top of the area every aligned frame covers; the
+    /// Save step's manual crop. Returns the window in force as [x, y, w, h].
+    pub fn crop_set(&mut self, x: u32, y: u32, w: u32, h: u32) -> Result<JsValue, JsValue> {
+        let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
+        let r = Rect { x: x as usize, y: y as usize, w: w as usize, h: h as usize };
+        let r = lapstack_core::stack::intersect(&r, &Rect::full(run.w, run.h)).ok_or_else(|| JsValue::from_str("the crop window lies outside the frame"))?;
+        run.user_crop = Some(r);
+        run.crop = match run.auto_crop {
+            Some(a) => Some(lapstack_core::stack::intersect(&a, &r).ok_or_else(|| JsValue::from_str("the crop window lies outside the area every frame covers"))?),
+            None => Some(r),
+        };
+        run.view_base = None;
+        let c = run.crop.unwrap();
+        Ok(js_sys::Array::from_iter([c.x, c.y, c.w, c.h].iter().map(|&v| JsValue::from(v as u32))).into())
+    }
+
+    /// Back to the automatic crop alone.
+    pub fn crop_clear(&mut self) {
+        if let Some(run) = self.run.as_mut() {
+            run.user_crop = None;
+            run.crop = run.auto_crop;
+            run.view_base = None;
+        }
     }
 
     /// Set the dust map (`lapstack_core::dust`) from a frame of an evenly lit
@@ -908,6 +1003,7 @@ impl Engine {
 
     pub fn reset(&mut self) {
         self.run = None;
+        self.look = None;
     }
 
     /// Keep the run's `kind` (fused | dmap | wav) master under `id`, taking it out of the
@@ -917,7 +1013,7 @@ impl Engine {
         let Some(run) = self.run.as_mut() else { return false };
         let Some(rgb16) = master_slot(run, kind).take() else { return false };
         self.kept.retain(|k| k.id != id);
-        self.kept.push(Kept { id, w: run.w, h: run.h, bits: run.bits, rgb16, crop: run.crop, meta: run.meta.clone() });
+        self.kept.push(Kept { id, w: run.w, h: run.h, bits: run.bits, rgb16, crop: run.crop, meta: run.meta.clone(), dng: self.look.clone() });
         run.view_base = None;
         true
     }
@@ -931,7 +1027,7 @@ impl Engine {
         let (w, h) = (frame.w, frame.h);
         let rgba = rgba8_of(&frame.rgb, w * h);
         self.kept.retain(|k| k.id != id);
-        self.kept.push(Kept { id, w, h, bits: frame.bits, rgb16: frame.rgb, crop: None, meta: lapstack_core::meta::extract(bytes) });
+        self.kept.push(Kept { id, w, h, bits: frame.bits, rgb16: frame.rgb, crop: None, meta: lapstack_core::meta::extract(bytes), dng: None });
         let o = js_sys::Object::new();
         set(&o, "w", w as u32);
         set(&o, "h", h as u32);
@@ -968,22 +1064,45 @@ impl Engine {
                 return Err(JsValue::from_str(&format!("the dust map {} is {}x{} but the frames are {w}x{h}; it must be shot with the same camera at the same size", d.name, d.map.w, d.map.h)));
             }
         }
-        let frame = self.decode(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
-        let t_dec = now();
-        if self.run.is_none() {
+        let first = self.run.is_none();
+        let params: Option<Params> = if first {
             let params: Params = serde_json::from_str(params_json).map_err(|e| JsValue::from_str(&format!("params: {e}")))?;
+            // the run's frame preparation, for every frame decoded from now on
+            self.rotate = params.rotate % 4;
+            self.draft = params.draft.min(6);
+            self.dng = params.dng;
+            self.look = None;
+            Some(params)
+        } else {
+            None
+        };
+        let mut frame = self.decode(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
+        let t_dec = now();
+        if let Some(params) = params {
             let mut run = self.setup(frame.w, frame.h, frame.bits, params).map_err(|e| JsValue::from_str(&e))?;
             run.meta = lapstack_core::meta::extract(bytes);
+            if raw {
+                // the frame was turned by its orientation as developed: the output must not be turned again
+                if let Some(e) = run.meta.exif.as_deref().and_then(|e| lapstack_core::meta::with_orientation(e, 1)) {
+                    run.meta.exif = Some(e);
+                }
+            }
             log(&format!("[lapstack] metadata of the first frame: {}", run.meta.describe()));
+            if let Some(look) = &self.look {
+                log(&format!("[lapstack] {}", look.describe()));
+            }
+            if self.rotate != 0 || self.draft != 0 {
+                log(&format!("[lapstack] frames{}{}", if self.rotate != 0 { format!(" turned by {}°", 90 * self.rotate as u32) } else { String::new() }, if self.draft != 0 { format!(" reduced by {} (draft)", 1 << self.draft) } else { String::new() }));
+            }
             self.run = Some(run);
         }
         let g = &self.gpu;
         let run = self.run.as_mut().unwrap();
         if frame.w != run.w || frame.h != run.h {
-            return Err(JsValue::from_str(&format!(
-                "frame is {}x{} but the stack is {}x{}; frames must share one size",
-                frame.w, frame.h, run.w, run.h
-            )));
+            // a frame of another size (a JPEG among the raws, another camera mode) is brought to
+            // frame 0's size rather than refused: the alignment takes care of what is left
+            log(&format!("[lapstack] frame {}: {}x{} differs from frame 0 ({}x{}); resampled to frame 0's size", run.count, frame.w, frame.h, run.w, run.h));
+            frame = decode::resize(&frame, run.w, run.h);
         }
         let (w, h, n) = (run.w, run.h, run.w * run.h);
         g.upload(&run.up, bytemuck::cast_slice(&frame.rgb)).await.map_err(|e| JsValue::from_str(&e))?;
@@ -1163,7 +1282,9 @@ impl Engine {
         set(&o, "frames", run.count as u32);
         // the window every frame covers without a smeared edge: [x, y, w, h], or null for the whole frame
         let area = common_area(&run.sims, w, h, run.interp);
-        run.crop = (!area.is_full(w, h)).then_some(area);
+        run.auto_crop = (!area.is_full(w, h)).then_some(area);
+        run.crop = run.auto_crop;
+        run.user_crop = None;
         match run.crop {
             Some(r) => set(&o, "crop", js_sys::Array::from_iter([r.x, r.y, r.w, r.h].iter().map(|&v| JsValue::from(v as u32)))),
             None => set(&o, "crop", JsValue::NULL),
@@ -1191,7 +1312,7 @@ impl Engine {
     /// same accumulator; `render_finish(true)` normalises it into `wav_rgb16`.
     pub async fn render_push(&mut self, index: usize, bytes: &[u8], raw: bool, wav: bool, power: f32, smooth: u32) -> Result<JsValue, JsValue> {
         let t0 = now();
-        let frame = self.decode(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
+        let frame = self.decode_for_run(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         if run.fused_rgb16.is_none() {
@@ -1366,7 +1487,7 @@ impl Engine {
     /// {index, w, h} and the two full-frame readbacks are skipped.
     pub async fn load_source(&mut self, index: usize, bytes: &[u8], readback: bool, raw: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
-        let frame = self.decode(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
+        let frame = self.decode_for_run(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         if run.fused_rgb16.is_none() {
@@ -1459,7 +1580,7 @@ impl Engine {
     /// Fold frame `index` (decoded again from `bytes`) into the slab. Returns {index, ms}.
     pub async fn slab_push(&mut self, index: usize, bytes: &[u8], raw: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
-        let frame = self.decode(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
+        let frame = self.decode_for_run(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         let (lo, hi) = run.slab.as_ref().map(|s| (s.lo, s.hi)).ok_or_else(|| JsValue::from_str("no slab begun"))?;
@@ -1710,6 +1831,10 @@ impl Engine {
         let px = m.pixel_size_um();
         set(&o, "pixel_um", px.map_or(0.0, |v| v.0));
         set(&o, "pixel_src", px.map_or("", |v| v.1));
+        // a linear-DNG run: the look space, so the Save step offers the DNG and says whose space it is
+        set(&o, "dng", self.look.as_ref().map_or(JsValue::NULL, |l| JsValue::from_str(&l.describe())));
+        set(&o, "draft", self.draft as u32);
+        set(&o, "rotate", self.rotate as u32);
         Ok(o.into())
     }
 
@@ -1739,7 +1864,13 @@ impl Engine {
             if let Some(o) = &overlay {
                 Overlay::render(o, w as usize, h as usize, 1.0).apply_u16(v.to_mut(), w as usize, 0, 0);
             }
-            let out = encode_rgb16(&v, w, h, format, quality, k.bits == 16).map_err(|e| JsValue::from_str(&e))?;
+            if format == "dng" {
+                let info = k.dng.as_ref().ok_or_else(|| JsValue::from_str("this result was not made for a linear DNG"))?;
+                let mut out = Vec::new();
+                lapstack_core::dng::write_u16(&mut out, &v[..w as usize * h as usize * 3], w as usize, h as usize, info, metadata.then_some(&k.meta)).map_err(|e| JsValue::from_str(&format!("dng: {e}")))?;
+                return Ok(js_sys::Uint8Array::from(&out[..]));
+            }
+            let out = encode_rgb16(&v, w, h, format, quality, k.bits == 16, None).map_err(|e| JsValue::from_str(&e))?;
             return Ok(js_sys::Uint8Array::from(&if metadata { lapstack_core::meta::embed(out, &k.meta) } else { out }[..]));
         }
         let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no result"))?;
@@ -1761,6 +1892,12 @@ impl Engine {
                 let mut v: std::borrow::Cow<'_, [u16]> = match &area { Some(r) => std::borrow::Cow::Owned(cut(v, 3, r)), None => std::borrow::Cow::Borrowed(v) };
                 if let Some(o) = &overlay {
                     Overlay::render(o, w as usize, h as usize, 1.0).apply_u16(v.to_mut(), w as usize, 0, 0);
+                }
+                if format == "dng" {
+                    let info = self.look.as_ref().ok_or_else(|| JsValue::from_str("a linear DNG needs a run made for one (Run ▾ · linear DNG)"))?;
+                    let mut out = Vec::new();
+                    lapstack_core::dng::write_u16(&mut out, &v[..w as usize * h as usize * 3], w as usize, h as usize, info, metadata.then_some(&run.meta)).map_err(|e| JsValue::from_str(&format!("dng: {e}")))?;
+                    return Ok(js_sys::Uint8Array::from(&out[..]));
                 }
                 if format == "png" && run.bits == 16 {
                     (Vec::new(), Some(v), image::ExtendedColorType::Rgb16)
@@ -1831,7 +1968,7 @@ impl Engine {
     /// the source, crop, size or retouch changes. Returns {w, h}.
     pub fn view_prepare(&mut self, source: &str, crop: bool, ow: u32, oh: u32) -> Result<JsValue, JsValue> {
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no result"))?;
-        let key = (source.to_string(), crop, ow as usize, oh as usize, run.edits);
+        let key = (source.to_string(), crop, ow as usize, oh as usize, run.edits, run.crop);
         if run.view_base.as_ref().is_none_or(|b| b.key != key) {
             let area = if crop { run.crop } else { None }.unwrap_or(Rect::full(run.w, run.h));
             let (ow, oh) = if ow == 0 || oh == 0 { (area.w, area.h) } else { (ow as usize, oh as usize) };
@@ -1894,8 +2031,8 @@ impl Engine {
                 ov.apply_u16(&mut px, pw, w, 0);
             }
         }
-        let mut out = encode_rgb16(&px, pw as u32, ph as u32, format, quality, run.bits == 16).map_err(|e| JsValue::from_str(&e))?;
-        if metadata {
+        let mut out = encode_rgb16(&px, pw as u32, ph as u32, format, quality, run.bits == 16, self.look.as_ref().map(|l| (l, metadata.then_some(&run.meta)))).map_err(|e| JsValue::from_str(&e))?;
+        if metadata && format != "dng" {
             out = lapstack_core::meta::embed(out, &run.meta);
         }
         Ok(js_sys::Uint8Array::from(&out[..]))
@@ -2046,7 +2183,7 @@ impl Engine {
     /// pass, shifted by its index. Returns {index, ms}.
     pub async fn refold_push(&mut self, index: usize, bytes: &[u8], raw: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
-        let frame = self.decode(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
+        let frame = self.decode_for_run(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
         let run = self.run.as_mut().ok_or_else(|| JsValue::from_str("no run"))?;
         if frame.w != run.w || frame.h != run.h {
@@ -2163,8 +2300,8 @@ impl Engine {
                 ov.apply_u16(&mut px, pw, rf.crop.w, 0);
             }
         }
-        let mut out = encode_rgb16(&px, pw as u32, ph as u32, format, quality, run.bits == 16).map_err(|e| JsValue::from_str(&e))?;
-        if metadata {
+        let mut out = encode_rgb16(&px, pw as u32, ph as u32, format, quality, run.bits == 16, self.look.as_ref().map(|l| (l, metadata.then_some(&run.meta)))).map_err(|e| JsValue::from_str(&e))?;
+        if metadata && format != "dng" {
             out = lapstack_core::meta::embed(out, &run.meta);
         }
         Ok(js_sys::Uint8Array::from(&out[..]))
@@ -2347,6 +2484,8 @@ impl Engine {
             refold: None,
             meta: Default::default(),
             crop: None,
+            auto_crop: None,
+            user_crop: None,
         })
     }
 }

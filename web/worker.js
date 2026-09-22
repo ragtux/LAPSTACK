@@ -42,7 +42,7 @@ async function thumbLoop() {
     try {
       const bytes = new Uint8Array(await f.arrayBuffer());
       if (job.gen !== thumbGen) return;
-      const t = thumbnail(bytes, job.edge, isRaw(f.name));
+      const t = thumbnail(bytes, job.edge, isRaw(f.name), job.rotate || 0);
       const [proxy, strip] = await proxyBitmaps(t.proxy.buffer, t.proxy_w, t.proxy_h);
       post({ type: 'thumb', index: i, uid, name: f.name, w: t.w, h: t.h, bits: t.bits, proxy, strip }, [proxy, strip]);
     } catch (e) {
@@ -188,6 +188,12 @@ async function handleCall(m) {
   } else if (m.type === 'refold_end') {
     engine.refold_end();
     post({ type: 'refold', rid: m.rid });
+  } else if (m.type === 'crop_set') {   // the Save step's own window, on top of the automatic crop: the engine returns the window in force
+    const c = engine.crop_set(m.x, m.y, m.w, m.h);
+    post({ type: 'crop_set', rid: m.rid, crop: Array.from(c) });
+  } else if (m.type === 'crop_clear') {
+    engine.crop_clear();
+    post({ type: 'crop_clear', rid: m.rid });
   } else if (m.type === 'dust_set' || m.type === 'dust_update' || m.type === 'dust_clear') {
     // the dust map (lapstack-core's dust.rs): a frame of an evenly lit blank surface, whose spots
     // the engine takes out of every frame it decodes from now on; 'dust_update' finds the spots
@@ -243,7 +249,7 @@ async function handle(m) {
       post({ type: 'ready', info: { ...JSON.parse(engine.info()), ...(ainfo || {}) } });
     } else if (m.type === 'thumbs') {
       if (thumbJob) { thumbJob.files.push(...m.files); thumbJob.indices.push(...m.indices); thumbJob.uids.push(...m.uids); }
-      else { thumbJob = { files: [...m.files], indices: [...m.indices], uids: [...m.uids], edge: m.edge, gen: thumbGen }; thumbLoop(); }
+      else { thumbJob = { files: [...m.files], indices: [...m.indices], uids: [...m.uids], edge: m.edge, rotate: m.rotate || 0, gen: thumbGen }; thumbLoop(); }
     } else if (m.type === 'run') {
       if (running) return;
       running = true; cancelled = false;
