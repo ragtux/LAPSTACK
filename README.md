@@ -466,16 +466,19 @@ included:
 | run | wall | of which fold (align + fuse + focus measure) / depth | peak RSS |
 |---|--:|--:|--:|
 | 25 frames, `lapstack --align-coarsen 2` (CPU) | 71 s | 40 s (1.6 s per frame) / 30 s | 6.8 GB |
-| 25 frames, `lapstack --gpu --gpu-align --align-coarsen 2` | 50 s | 18 s (0.7 s per frame) / 29 s | 4.9 GB |
+| 25 frames, `lapstack --gpu --gpu-align --align-coarsen 2` | 38 s | 6.5 s (0.26 s per frame) / 29 s | 3.7 GB |
 | 100 frames, CPU | 251 s | 164 s (1.6 s per frame) / 84 s | 12.0 GB |
-| 100 frames, `--gpu --gpu-align` | 161 s | 74 s (0.7 s per frame) / 84 s | 12.0 GB |
+| 100 frames, `--gpu --gpu-align` | 114 s | 28 s (0.28 s per frame) / 83 s | 7.0 GB |
 | 25 frames, `lapstack --no-align` on the aligned 16-bit PNGs, CPU or GPU | 26 s | 24 s / – (no depth pass then) | 4.4 GB |
 
 Before the aligner's cost was fused into one pass and its search put on the
 per-level schedule (above), the same rows read 118 s (75 s align + fuse,
 3.0 s per frame), 74 s (30 s, 1.2 s), 449 s (310 s, 3.1 s) and 265 s (126 s,
 1.3 s): the CPU search alone was 1.2 s of every frame, the two registration
-pyramids 0.5 s. The depth pass then decoded and warped every frame a second
+pyramids 0.5 s; and until the frames moved onto the device with
+`--gpu-align`, the CUDA rows read 50 s (18 s fold) and 161 s (74 s), the
+CPU-side warps, pyramids and focus measure being 0.5 s of every frame. The
+depth pass then decoded and warped every frame a second
 time to take its focus measure, 1.2 s per frame on either path (42 s of the
 25-frame runs); now the fold takes each frame's focus slice as it passes
 (0.15 s per frame) and the depth pass is the guided-filter aggregation of
@@ -492,20 +495,27 @@ With `--gpu` (build with `--features gpu`; CUDA is loaded at run time, no
 toolkit needed at build time) the fusion runs in `gpu.rs`: the same kernels
 transcribed to CUDA, the accumulator pyramid, best-energy planes and winner
 map stay on the device, and only the three RGB planes go up per frame and
-the tiny residual comes back. `--gpu-align` runs the aligner's Nelder-Mead
-cost search on the GPU; what is left of a GPU frame is the CPU side of the
-alignment (luma, the two registration pyramids, the warps) and the decode. The
-`--no-align` row is 16-bit PNG decode-bound (~1 s per frame with four
-decoder threads); uncompressed TIFF input decodes an order of magnitude
-faster.
+the tiny residual comes back. With `--gpu-align` the frames live on the
+device (`gpu::GpuFrames`): a decoded frame is uploaded once, and its luma
+and registration pyramid, the Nelder-Mead cost search, the warp with the
+kernel of `--interpolation`, the brightness gains and the depth pass's
+focus slice are all computed there; the fuser folds the warped planes in
+place, and a frame comes back to the host only when something there asks
+for it (`--save-aligned`, the weighted average). What is left of a GPU
+frame is the decode and the upload, and the host holds no warped copies,
+which is where the peak memory went. The `--no-align` row is 16-bit PNG
+decode-bound (~1 s per frame with four decoder threads); uncompressed TIFF
+input decodes an order of magnitude faster.
 
 GPU fusion output is bit-exact with the CPU output (one run out of four
 differed in 637 of 45.7 M pixels on energy ties and could not be
 reproduced); with halo control the weights are made, REDUCEd and folded
 on the device too (`wgtk`, `wacck`, `wnormk`) and the output differs from
 the CPU's by float rounding only. CPU reruns are byte-identical. GPU alignment evaluates the cost
-in FP32, so `--gpu-align` results differ from CPU-aligned ones by ~0.5 % of
-pixels.
+in FP32 and warps the frames on the device (coordinates in double like the
+CPU's warp, taps in FP32), so `--gpu-align` results differ from CPU-aligned
+ones by ~0.5 % of pixels; the transforms it finds are the same as when the
+registration pyramids were built on the CPU, to the last printed digit.
 
 Parameter sweep on the same aligned frames (default = 3×3 window, 7 levels,
 `--top de`): the energy window is the only knob that matters.
@@ -978,7 +988,7 @@ Measured in headless Chrome on the RTX 3060 (`web/test/headless.mjs`):
 
 | stack | browser | native (`lapstack --gpu --gpu-align`) |
 |---|--:|--:|
-| 25 × 8280×5520 16-bit TIFF, align coarsen 2 | **16 s** (≈0.65 s/frame: decode 0.4 s, align 0.2 s, fuse 0.1 s; 30 s before the search's per-level schedule and batched readbacks) | 18 s (align + fuse + focus measure; the depth pass is another 29 s) |
+| 25 × 8280×5520 16-bit TIFF, align coarsen 2 | **16 s** (≈0.65 s/frame: decode 0.4 s, align 0.2 s, fuse 0.1 s; 30 s before the search's per-level schedule and batched readbacks) | 6.5 s (align + fuse + focus measure, the frames on the device; the depth pass is another 29 s) |
 | 8 × 1024×768 crops, aligned | 1.2 s (2.0 s before) | – |
 
 Both stream now, and the per-frame GPU work is the same. Fusion

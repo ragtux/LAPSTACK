@@ -4,8 +4,9 @@
 //! Alignment — similarity, affine or projective registration
 //! (`AlignModel`: 4, 6 or 8 parameters). Direct intensity-based,
 //! coarse-to-fine, DC-removed-RMS on luminance, one frame against the
-//! previous aligned one (`PairAligner`; the chaining to frame 0 is
-//! `stack::AlignedFrames`, which streams the frames). Uses a bounded
+//! previous aligned one (`multiscale_align`; the chaining to frame 0 is
+//! `stack::AlignedFrames`, which streams the frames, on the CUDA device
+//! with `gpu::GpuFrames`). Uses a bounded
 //! Nelder-Mead optimiser. The search resamples with Spline4x4; the aligned
 //! frames are resampled with the kernel of the user's choice (`Interp`,
 //! Spline4x4 by default).
@@ -914,27 +915,6 @@ pub(crate) fn multiscale_align(
         }
     }
     Sim::from_vec(&cur)
-}
-
-/// The search for one frame's transform against the previous aligned
-/// frame's luma: on the CPU, or the CUDA cost search (the `gpu` feature).
-pub enum PairAligner {
-    Cpu,
-    #[cfg(feature = "gpu")]
-    Gpu(crate::gpu::GpuAligner),
-}
-
-impl PairAligner {
-    /// The transform that takes `tg` (a frame's luma) onto `rf` (the previous
-    /// aligned frame's), searched from `guess` over the `free` parameters
-    /// (`free_mask`), `coarsen` levels short of full resolution.
-    pub fn align_pair(&self, rf: &[f32], tg: &[f32], w: usize, h: usize, guess: Sim, free: [bool; Sim::N], coarsen: usize) -> Sim {
-        match self {
-            PairAligner::Cpu => multiscale_align(rf, tg, w, h, guess, free, coarsen),
-            #[cfg(feature = "gpu")]
-            PairAligner::Gpu(g) => g.align_pair(rf, tg, w, h, guess, free, coarsen),
-        }
-    }
 }
 
 pub fn report(sim: &Sim, w: usize, h: usize) -> String {

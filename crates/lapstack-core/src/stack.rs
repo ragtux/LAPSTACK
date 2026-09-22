@@ -139,6 +139,13 @@ pub trait FrameSource {
     /// Level-0 frame dimensions.
     fn dims(&self) -> (usize, usize);
     fn get(&mut self, i: usize) -> Result<Cow<'_, Img3>, String>;
+    /// Frame `i` on the CUDA device, with its focus slice when `measure`
+    /// asks, for a source that keeps its frames there (`AlignedFrames` with
+    /// `--gpu-align`); `None` from one that does not, and `get` serves it.
+    #[cfg(feature = "gpu")]
+    fn get_gpu(&mut self, _i: usize, _measure: Option<&DepthParams>) -> Result<Option<crate::gpu::DeviceFrame<'_>>, String> {
+        Ok(None)
+    }
     /// Log lines the source made while serving frames (a frame's
     /// registration), taken out once; the caller logs them.
     fn take_log(&mut self) -> Vec<String> {
@@ -300,7 +307,14 @@ struct AlignedFrames {
     src: LazyFrames,
     a: AlignParams,
     free: [bool; Sim::N],
-    aligner: align::PairAligner,
+    /// With `--gpu-align`, the frames live on the device (`gpu::GpuFrames`):
+    /// registration, warp, gains and focus slice all happen there, and a
+    /// frame comes to the host only when something here asks for it.
+    #[cfg(feature = "gpu")]
+    gpu: Option<crate::gpu::GpuFrames>,
+    /// The frame the device holds, once processed.
+    #[cfg(feature = "gpu")]
+    on_device: Option<usize>,
     /// The transforms found so far (frame 0's is the identity).
     sims: Vec<Sim>,
     /// The previous aligned frame's luma, while the transforms are being found.
@@ -320,15 +334,16 @@ impl AlignedFrames {
     fn open(paths: Vec<String>, a: AlignParams, params: &Params) -> Result<AlignedFrames, String> {
         let src = LazyFrames::open(paths, false, params.dust.as_ref())?;
         #[cfg(feature = "gpu")]
-        let aligner = if a.gpu { align::PairAligner::Gpu(crate::gpu::GpuAligner::new()?) } else { align::PairAligner::Cpu };
-        #[cfg(not(feature = "gpu"))]
-        let aligner = align::PairAligner::Cpu;
+        let gpu = if a.gpu { Some(crate::gpu::GpuFrames::new(src.w, src.h, a.interp)?) } else { None };
         let n = src.len();
         Ok(AlignedFrames {
             src,
             a,
             free: a.free(),
-            aligner,
+            #[cfg(feature = "gpu")]
+            gpu,
+            #[cfg(feature = "gpu")]
+            on_device: None,
             sims: Vec::with_capacity(n),
             prev_ref: None,
             reference: None,
@@ -353,7 +368,7 @@ impl AlignedFrames {
         let y = align::luma(img);
         let sim = match &self.prev_ref {
             None => Sim::id(),
-            Some(rf) => self.aligner.align_pair(rf, &y, w, h, *self.sims.last().unwrap(), self.free, self.a.coarsen),
+            Some(rf) => align::multiscale_align(rf, &y, w, h, *self.sims.last().unwrap(), self.free, self.a.coarsen),
         };
         // the next frame is registered to this one as aligned; after the last, nothing is
         self.prev_ref = (i + 1 < self.src.len()).then(|| if sim == Sim::id() { y } else { align::warp_plane(&y, w, h, &sim, w, h, self.a.interp).0 });
@@ -369,6 +384,42 @@ impl AlignedFrames {
         let (lo, hi) = gs.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
         Some(format!("brightness equalised to frame 0: gains {lo:.3} … {hi:.3}"))
     }
+
+    /// Frame `i` through the device: decoded here, then registered (the first
+    /// time), warped and equalised there; its focus slice when `measure`
+    /// asks. Afterwards the device holds it.
+    #[cfg(feature = "gpu")]
+    fn process_gpu(&mut self, i: usize, measure: Option<&DepthParams>) -> Result<Option<Vec<f32>>, String> {
+        let img = self.src.take(i)?;
+        self.src.prefetch(i + 1);
+        let (w, h) = (img.w, img.h);
+        let first = self.sims.len() <= i;
+        if first && i != self.sims.len() {
+            return Err(format!("frame {i} asked for before frame {} was aligned", self.sims.len()));
+        }
+        let known = (!first).then(|| (self.sims[i], self.gains[i].unwrap_or([1.0; 3])));
+        let guess = self.sims.last().copied().unwrap_or(Sim::id());
+        let gpu = self.gpu.as_mut().unwrap();
+        let (sim, gain, focus) = gpu.process(&img, guess, self.free, self.a.coarsen, known, self.brightness, measure)?;
+        drop(img);
+        self.on_device = Some(i);
+        if first {
+            self.sims.push(sim);
+            self.gains[i] = Some(gain);
+            if i > 0 {
+                self.lines.push(format!(
+                    "  frame {i:>3}: {}{}",
+                    align::report(&sim, w, h),
+                    if self.brightness { format!("  brightness {}", brightness::describe(gain)) } else { String::new() }
+                ));
+            }
+            if let Some(dir) = &self.save_dir {
+                let img = self.gpu.as_ref().unwrap().download()?;
+                io::save_rgb(&img, &format!("{dir}/aligned_{i:03}.png"), self.src.depth, None)?;
+            }
+        }
+        Ok(focus)
+    }
 }
 
 impl FrameSource for AlignedFrames {
@@ -378,7 +429,26 @@ impl FrameSource for AlignedFrames {
     fn dims(&self) -> (usize, usize) {
         (self.src.w, self.src.h)
     }
+    #[cfg(feature = "gpu")]
+    fn get_gpu(&mut self, i: usize, measure: Option<&DepthParams>) -> Result<Option<crate::gpu::DeviceFrame<'_>>, String> {
+        if self.gpu.is_none() {
+            return Ok(None);
+        }
+        let focus = self.process_gpu(i, measure)?;
+        Ok(Some(crate::gpu::DeviceFrame { planes: self.gpu.as_mut().unwrap().planes(), focus }))
+    }
     fn get(&mut self, i: usize) -> Result<Cow<'_, Img3>, String> {
+        #[cfg(feature = "gpu")]
+        if self.gpu.is_some() {
+            if self.cur.as_ref().is_none_or(|(ci, _)| *ci != i) {
+                if self.on_device != Some(i) {
+                    self.process_gpu(i, None)?;
+                }
+                let img = self.gpu.as_ref().unwrap().download()?;
+                self.cur = Some((i, img));
+            }
+            return Ok(Cow::Borrowed(&self.cur.as_ref().unwrap().1));
+        }
         if self.cur.as_ref().is_none_or(|(ci, _)| *ci != i) {
             let mut img = self.src.take(i)?;
             self.src.prefetch(i + 1);
@@ -492,7 +562,17 @@ fn fuse_range(
     let t = Instant::now();
     let mut slices = Vec::with_capacity(if measure.is_some() { hi + 1 - lo } else { 0 });
     for i in lo..=hi {
-        {
+        #[allow(unused_mut)]
+        let mut done = false;
+        #[cfg(feature = "gpu")]
+        if let AnyFuser::Gpu(f) = &mut fuser {
+            if let Some(df) = src.get_gpu(i, measure)? {
+                f.push_device(df.planes)?;
+                slices.extend(df.focus);
+                done = true;
+            }
+        }
+        if !done {
             let f = src.get(i)?;
             fuser.push(&f)?;
             if let Some(dp) = measure {

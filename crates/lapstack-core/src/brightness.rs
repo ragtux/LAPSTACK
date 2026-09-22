@@ -90,7 +90,7 @@ fn sums(frame: &Img3, other: Option<&Reference>, sim: &Sim) -> ([f64; 3], [f64; 
 }
 
 /// Gains from a reference's and a frame's channel sums over the same pixels.
-fn ratio(reference: [f64; 3], frame: [f64; 3], n: usize) -> [f32; 3] {
+pub(crate) fn ratio(reference: [f64; 3], frame: [f64; 3], n: usize) -> [f32; 3] {
     if n < 64 {
         return [1.0; 3];
     }
