@@ -100,8 +100,16 @@ self.onmessage = (ev) => {
 // 3D model, GIF quantisation + LZW, image encoding, and content credentials.
 async function handleCall(m) {
   if (m.type === 'save') {
-    const bytes = engine.encode(m.kind, m.format || 'png', m.quality || 90, !!m.meta, !!m.crop);
+    // m.overlay: the scale bar and caption (JSON, see overlay.rs) burned into the stacked images; '' = none
+    const bytes = engine.encode(m.kind, m.format || 'png', m.quality || 90, !!m.meta, !!m.crop, m.overlay || '');
     post({ type: 'png', rid: m.rid, kind: m.kind, format: m.format || 'png', bytes: bytes.buffer }, [bytes.buffer]);
+  } else if (m.type === 'overlay') {
+    // the scale bar and caption for an m.w×m.h output (m.scale = its pixels per frame pixel) as
+    // RGBA patches over the corners it occupies, for the page to draw (the viewer's preview,
+    // the Save step's thumbnails, the animation frames), with the overlay's description
+    const r = engine.overlay_patches(m.json || '', m.w, m.h, m.scale || 1);
+    const patches = r.patches.map((q) => ({ x: q.x, y: q.y, w: q.w, h: q.h, rgba: q.rgba.buffer }));
+    post({ type: 'overlay', rid: m.rid, text: r.text, patches }, patches.map((q) => q.rgba));
   } else if (m.type === 'export_source') {
     // the aligned full-res frame (or its In focus rendering, m.focus = focusParams), like load_source
     // without the scrub bookkeeping; the page passes the file bytes it has already read
@@ -137,7 +145,7 @@ async function handleCall(m) {
       const rgba = engine.view_rgba(m.shift, m.near !== false);
       post({ type: 'view', rid: m.rid, w: b.w, h: b.h, rgba: rgba.buffer }, [rgba.buffer]);
     } else {
-      const bytes = engine.view_stereo(m.shift, m.near !== false, m.layout || 'sbs', m.format || 'png', m.quality || 90, !!m.meta);
+      const bytes = engine.view_stereo(m.shift, m.near !== false, m.layout || 'sbs', m.format || 'png', m.quality || 90, !!m.meta, m.overlay || '');
       post({ type: 'png', rid: m.rid, kind: 'stereo', format: m.format || 'png', bytes: bytes.buffer }, [bytes.buffer]);
     }
   } else if (m.type === 'mesh') {
@@ -175,7 +183,7 @@ async function handleCall(m) {
     const r = engine.refold_view(m.index);
     post({ type: 'view', rid: m.rid, w: r.w, h: r.h, rgba: r.rgba.buffer }, [r.rgba.buffer]);
   } else if (m.type === 'refold_stereo') {
-    const bytes = engine.refold_stereo(m.layout || 'sbs', m.format || 'png', m.quality || 90, !!m.meta);
+    const bytes = engine.refold_stereo(m.layout || 'sbs', m.format || 'png', m.quality || 90, !!m.meta, m.overlay || '');
     post({ type: 'png', rid: m.rid, kind: 'stereo', format: m.format || 'png', bytes: bytes.buffer }, [bytes.buffer]);
   } else if (m.type === 'refold_end') {
     engine.refold_end();
@@ -409,7 +417,7 @@ async function handle(m) {
       const d = engine.conf_full();
       post({ type: 'conf_full', w: 0, data: d.buffer }, [d.buffer]);
     } else if (m.type === 'save') {
-      const bytes = engine.encode(m.kind, m.format || 'png', m.quality || 90, !!m.meta, !!m.crop);
+      const bytes = engine.encode(m.kind, m.format || 'png', m.quality || 90, !!m.meta, !!m.crop, m.overlay || '');
       post({ type: 'png', kind: m.kind, format: m.format || 'png', bytes: bytes.buffer }, [bytes.buffer]);
     }
   } catch (e) {

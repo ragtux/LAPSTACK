@@ -24,6 +24,7 @@ use lapstack_core::dust::{self, DustMap, DustMode, DustParams};
 use lapstack_core::pyramid::{Img3, auto_levels, half};
 use lapstack_core::view::{self, Layout, View};
 use lapstack_core::mesh::{self, MeshParams, TexFormat};
+use lapstack_core::overlay::{Overlay, OverlayParams};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
@@ -334,6 +335,49 @@ fn encode_rgb16(v: &[u16], w: u32, h: u32, format: &str, quality: u8, bits16: bo
         _ => image::codecs::png::PngEncoder::new(&mut out).write_image(&to8(), w, h, image::ExtendedColorType::Rgb8).map_err(err)?,
     }
     Ok(out)
+}
+
+/// The scale bar and caption (`lapstack_core::overlay`) as the page sends it: the
+/// fields of `OverlayParams` as JSON, the corners, colour and style by name.
+#[derive(Deserialize)]
+#[serde(default)]
+struct OverlayJson {
+    um_per_px: f64,
+    bar_um: f64,
+    text: String,
+    bar_pos: String,
+    text_pos: String,
+    size: f32,
+    color: String,
+    style: String,
+}
+
+impl Default for OverlayJson {
+    fn default() -> Self {
+        let d = OverlayParams::default();
+        OverlayJson { um_per_px: 0.0, bar_um: 0.0, text: String::new(), bar_pos: d.bar_pos.name().into(), text_pos: d.text_pos.name().into(), size: d.size, color: d.color.name().into(), style: d.style.name().into() }
+    }
+}
+
+/// The overlay a call asks for: "" (or one with neither bar nor text) is none.
+fn overlay_params(json: &str) -> Result<Option<OverlayParams>, JsValue> {
+    use lapstack_core::overlay::{Corner, Ink, Style};
+    if json.trim().is_empty() || json.trim() == "null" {
+        return Ok(None);
+    }
+    let j: OverlayJson = serde_json::from_str(json).map_err(|e| JsValue::from_str(&format!("overlay: {e}")))?;
+    let d = OverlayParams::default();
+    let p = OverlayParams {
+        um_per_px: j.um_per_px,
+        bar_um: j.bar_um,
+        text: j.text,
+        bar_pos: Corner::parse(&j.bar_pos).unwrap_or(d.bar_pos),
+        text_pos: Corner::parse(&j.text_pos).unwrap_or(d.text_pos),
+        size: if j.size > 0.0 { j.size } else { d.size },
+        color: Ink::parse(&j.color).unwrap_or(d.color),
+        style: Style::parse(&j.style).unwrap_or(d.style),
+    };
+    Ok((!p.is_empty()).then_some(p))
 }
 
 /// A stacked image kept past its run — the LAP or DFR master of an earlier run,
@@ -1662,6 +1706,10 @@ impl Engine {
         set(&o, "xmp", m.xmp.as_ref().map_or(0, |v| v.len()) as u32);
         set(&o, "chrm", m.chrm.is_some() as u32);
         set(&o, "text", m.describe());
+        // a microscope's pixel size (ImageJ, OME-TIFF), the scale bar's default calibration
+        let px = m.pixel_size_um();
+        set(&o, "pixel_um", px.map_or(0.0, |v| v.0));
+        set(&o, "pixel_src", px.map_or("", |v| v.1));
         Ok(o.into())
     }
 
@@ -1669,13 +1717,16 @@ impl Engine {
     /// input bit depth, depth map 8-bit gray), "png8" (8-bit), "jpeg" (8-bit,
     /// `quality` 1..100). With `metadata` the stacked images (not the maps)
     /// carry the first frame's EXIF / ICC profile / XMP; with `crop` every
-    /// image is cut to the area all frames cover (`finish`'s crop). Returns the file bytes.
-    pub fn encode(&self, kind: &str, format: &str, quality: u8, metadata: bool, crop: bool) -> Result<js_sys::Uint8Array, JsValue> {
+    /// image is cut to the area all frames cover (`finish`'s crop); `overlay`
+    /// (JSON, see `overlay_params`; "" = none) burns the scale bar and caption
+    /// into the stacked images, over the cut. Returns the file bytes.
+    pub fn encode(&self, kind: &str, format: &str, quality: u8, metadata: bool, crop: bool, overlay: &str) -> Result<js_sys::Uint8Array, JsValue> {
         use image::ImageEncoder;
+        let overlay = overlay_params(overlay)?;
         if let Some(id) = kind.strip_prefix("kept:") {
             let id: u32 = id.parse().map_err(|_| JsValue::from_str("bad kept id"))?;
             let k = self.kept.iter().find(|k| k.id == id).ok_or_else(|| JsValue::from_str("no such kept result"))?;
-            let (v, w, h): (std::borrow::Cow<'_, [u16]>, u32, u32) = match if crop { k.crop } else { None } {
+            let (mut v, w, h): (std::borrow::Cow<'_, [u16]>, u32, u32) = match if crop { k.crop } else { None } {
                 Some(r) => {
                     let mut out = Vec::with_capacity(r.w * r.h * 3);
                     for y in r.y..r.y + r.h {
@@ -1685,6 +1736,9 @@ impl Engine {
                 }
                 None => (std::borrow::Cow::Borrowed(&k.rgb16[..k.w * k.h * 3]), k.w as u32, k.h as u32),
             };
+            if let Some(o) = &overlay {
+                Overlay::render(o, w as usize, h as usize, 1.0).apply_u16(v.to_mut(), w as usize, 0, 0);
+            }
             let out = encode_rgb16(&v, w, h, format, quality, k.bits == 16).map_err(|e| JsValue::from_str(&e))?;
             return Ok(js_sys::Uint8Array::from(&if metadata { lapstack_core::meta::embed(out, &k.meta) } else { out }[..]));
         }
@@ -1704,7 +1758,10 @@ impl Engine {
         let (pixels8, pixels16, color): (Vec<u8>, Option<std::borrow::Cow<'_, [u16]>>, image::ExtendedColorType) = match kind {
             "fused" | "dmap" | "wav" => {
                 let v = master(run, kind)?;
-                let v: std::borrow::Cow<'_, [u16]> = match &area { Some(r) => std::borrow::Cow::Owned(cut(v, 3, r)), None => std::borrow::Cow::Borrowed(v) };
+                let mut v: std::borrow::Cow<'_, [u16]> = match &area { Some(r) => std::borrow::Cow::Owned(cut(v, 3, r)), None => std::borrow::Cow::Borrowed(v) };
+                if let Some(o) = &overlay {
+                    Overlay::render(o, w as usize, h as usize, 1.0).apply_u16(v.to_mut(), w as usize, 0, 0);
+                }
                 if format == "png" && run.bits == 16 {
                     (Vec::new(), Some(v), image::ExtendedColorType::Rgb16)
                 } else {
@@ -1765,7 +1822,7 @@ impl Engine {
 
     /// Kept for the test page: PNG at the input bit depth.
     pub fn encode_png(&self, kind: &str) -> Result<js_sys::Uint8Array, JsValue> {
-        self.encode(kind, "png", 90, false, false)
+        self.encode(kind, "png", 90, false, false, "")
     }
 
     /// Prepare the image the stereo / rocking views are cut from: the
@@ -1821,11 +1878,22 @@ impl Engine {
     /// the right at ∓`shift` — in `layout` (sbs | cross | anaglyph), encoded
     /// like `encode` (`format` png | png8 | jpeg, the first frame's metadata
     /// embedded with `metadata`).
-    pub fn view_stereo(&self, shift: f32, near_first: bool, layout: &str, format: &str, quality: u8, metadata: bool) -> Result<js_sys::Uint8Array, JsValue> {
+    pub fn view_stereo(&self, shift: f32, near_first: bool, layout: &str, format: &str, quality: u8, metadata: bool, overlay: &str) -> Result<js_sys::Uint8Array, JsValue> {
         let layout = Layout::parse(layout).ok_or_else(|| JsValue::from_str("layout must be sbs | cross | anaglyph"))?;
         let (rgb, z, w, h) = self.view_base()?;
-        let (px, pw, ph) = view::stereo(rgb, w, h, 3, z, 1.0 / 65535.0, shift, near_first, layout);
+        let (mut px, pw, ph) = view::stereo(rgb, w, h, 3, z, 1.0 / 65535.0, shift, near_first, layout);
         let run = self.run.as_ref().unwrap();
+        if let Some(o) = overlay_params(overlay)? {
+            // the overlay on each view (once on an anaglyph, whose views share the pixels); the
+            // base may be shrunk, and the calibration follows it
+            let cropped = run.view_base.as_ref().is_some_and(|b| b.key.1);
+            let full_w = match (cropped, run.crop) { (true, Some(r)) => r.w, _ => run.w };
+            let ov = Overlay::render(&o, w, h, w as f64 / full_w as f64);
+            ov.apply_u16(&mut px, pw, 0, 0);
+            if pw > w {
+                ov.apply_u16(&mut px, pw, w, 0);
+            }
+        }
         let mut out = encode_rgb16(&px, pw as u32, ph as u32, format, quality, run.bits == 16).map_err(|e| JsValue::from_str(&e))?;
         if metadata {
             out = lapstack_core::meta::embed(out, &run.meta);
@@ -2082,12 +2150,19 @@ impl Engine {
 
     /// Views 0 (left) and 1 (right) of the refold as a stereo pair in
     /// `layout` (sbs | cross | anaglyph), encoded like `view_stereo`.
-    pub fn refold_stereo(&self, layout: &str, format: &str, quality: u8, metadata: bool) -> Result<js_sys::Uint8Array, JsValue> {
+    pub fn refold_stereo(&self, layout: &str, format: &str, quality: u8, metadata: bool, overlay: &str) -> Result<js_sys::Uint8Array, JsValue> {
         let layout = Layout::parse(layout).ok_or_else(|| JsValue::from_str("layout must be sbs | cross | anaglyph"))?;
         let run = self.run.as_ref().ok_or_else(|| JsValue::from_str("no run"))?;
         let rf = run.refold.as_ref().ok_or_else(|| JsValue::from_str("no refold begun"))?;
         let get = |i: usize| rf.done.get(i).and_then(|d| d.as_deref()).ok_or_else(|| JsValue::from_str("the pair's views are not rendered"));
-        let (px, pw, ph) = view::compose_pair(get(0)?, get(1)?, rf.crop.w, rf.crop.h, 3, layout);
+        let (mut px, pw, ph) = view::compose_pair(get(0)?, get(1)?, rf.crop.w, rf.crop.h, 3, layout);
+        if let Some(o) = overlay_params(overlay)? {
+            let ov = Overlay::render(&o, rf.crop.w, rf.crop.h, 1.0 / rf.k as f64);
+            ov.apply_u16(&mut px, pw, 0, 0);
+            if pw > rf.crop.w {
+                ov.apply_u16(&mut px, pw, rf.crop.w, 0);
+            }
+        }
         let mut out = encode_rgb16(&px, pw as u32, ph as u32, format, quality, run.bits == 16).map_err(|e| JsValue::from_str(&e))?;
         if metadata {
             out = lapstack_core::meta::embed(out, &run.meta);
@@ -2100,6 +2175,32 @@ impl Engine {
         if let Some(run) = self.run.as_mut() {
             run.refold = None;
         }
+    }
+
+    /// The scale bar and caption for an output of `w`×`h` (`scale` = its pixels per
+    /// pixel of the frames) as RGBA8 patches for the page to draw — the viewer's
+    /// preview over the Stack layers, the Save step's thumbnails and every frame of an
+    /// animation: {patches: [{x, y, w, h, rgba}], text: the overlay's description}.
+    pub fn overlay_patches(&self, json: &str, w: u32, h: u32, scale: f64) -> Result<JsValue, JsValue> {
+        let o = js_sys::Object::new();
+        let arr = js_sys::Array::new();
+        let mut text = String::new();
+        if let Some(p) = overlay_params(json)? {
+            let ov = Overlay::render(&p, w as usize, h as usize, scale);
+            text = ov.describe();
+            for (x, y, pw, ph, rgba) in ov.rgba8() {
+                let q = js_sys::Object::new();
+                set(&q, "x", x as u32);
+                set(&q, "y", y as u32);
+                set(&q, "w", pw as u32);
+                set(&q, "h", ph as u32);
+                set(&q, "rgba", js_sys::Uint8Array::from(&rgba[..]));
+                arr.push(&q);
+            }
+        }
+        set(&o, "patches", arr);
+        set(&o, "text", text);
+        Ok(o.into())
     }
 
     /// Full-resolution depth map (u16, 65535 = last frame); for tests.

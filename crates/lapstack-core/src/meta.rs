@@ -59,6 +59,52 @@ impl Meta {
         }
         self.xmp.as_deref().and_then(xmp_time)
     }
+    /// The size of a pixel in µm, when a microscope's software wrote it into
+    /// the TIFF: ImageJ's ImageDescription (`unit=micron`, with XResolution in
+    /// pixels per unit), OME-XML's PhysicalSizeX / PhysicalSizeXUnit in the
+    /// description, or a plain XResolution in cm or inch from a writer that is
+    /// not a camera (no Make tag: a camera's 72 or 300 dpi says nothing about
+    /// the subject). With where it came from, for the log. The default
+    /// calibration of the scale bar (`overlay`).
+    pub fn pixel_size_um(&self) -> Option<(f64, &'static str)> {
+        let t = Tiff::new(self.exif.as_deref()?)?;
+        let (ifd0, _) = t.read_ifd(t.u32(4)? as usize)?;
+        let ascii = |tag: u16| -> Option<String> {
+            let e = ifd0.iter().find(|e| e.tag == tag && e.typ == 2)?;
+            Some(String::from_utf8_lossy(&e.data).trim_end_matches('\0').to_string())
+        };
+        let rational = |tag: u16| -> Option<f64> {
+            let e = ifd0.iter().find(|e| e.tag == tag && e.typ == 5)?;
+            let (n, d) = (t.val32(&e.data, 0)? as f64, t.val32(&e.data, 4)? as f64);
+            (n > 0.0 && d > 0.0).then(|| n / d)
+        };
+        let short = |tag: u16| -> Option<u16> {
+            let e = ifd0.iter().find(|e| e.tag == tag && e.typ == 3)?;
+            let v = e.data.get(0..2)?;
+            Some(if t.le { u16::from_le_bytes([v[0], v[1]]) } else { u16::from_be_bytes([v[0], v[1]]) })
+        };
+        let desc = ascii(270).unwrap_or_default();
+        // OME-XML: <Pixels … PhysicalSizeX="0.325" PhysicalSizeXUnit="µm" …>
+        let attr = |name: &str| -> Option<String> {
+            let k = desc.find(&format!("{name}=\""))? + name.len() + 2;
+            let rest = &desc[k..];
+            Some(rest[..rest.find('"')?].to_string())
+        };
+        if let Some(v) = attr("PhysicalSizeX").and_then(|s| s.trim().parse::<f64>().ok()).filter(|v| *v > 0.0) {
+            let unit = attr("PhysicalSizeXUnit").unwrap_or_else(|| "µm".into());
+            return Some((v * crate::overlay::unit_um(&unit)?, "OME-XML"));
+        }
+        // ImageJ: "ImageJ=1.54f\nunit=micron\n…", XResolution in pixels per unit
+        if desc.starts_with("ImageJ") {
+            let unit = desc.lines().find_map(|l| l.strip_prefix("unit="))?.trim();
+            return Some((crate::overlay::unit_um(unit)? / rational(282)?, "ImageJ"));
+        }
+        if ifd0.iter().all(|e| e.tag != 271) {
+            let unit = match short(296)? { 2 => 25400.0, 3 => 1e4, _ => return None };
+            return Some((unit / rational(282)?, "TIFF resolution"));
+        }
+        None
+    }
 }
 
 /// Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's algorithm).
@@ -980,6 +1026,45 @@ mod tests {
         png_chunk(&mut file, b"zTXt", &d);
         png_chunk(&mut file, b"IEND", &[]);
         assert_eq!(extract(&file).xmp.as_deref(), Some(&xmp[..]));
+    }
+
+    #[test]
+    /// ImageJ's calibration: unit=micron in the description, XResolution in pixels per micron.
+    fn pixel_size_from_imagej() {
+        let desc = b"ImageJ=1.54f\nunit=micron\n\0";
+        let mut b = vec![b'I', b'I', 42, 0, 8, 0, 0, 0, 3, 0];
+        let data_at = 8u32 + 2 + 3 * 12 + 4;
+        let entry = |b: &mut Vec<u8>, tag: u16, typ: u16, count: u32, val: [u8; 4]| {
+            b.extend(tag.to_le_bytes());
+            b.extend(typ.to_le_bytes());
+            b.extend(count.to_le_bytes());
+            b.extend(val);
+        };
+        entry(&mut b, 270, 2, desc.len() as u32, data_at.to_le_bytes());
+        entry(&mut b, 282, 5, 1, (data_at + desc.len() as u32).to_le_bytes());
+        entry(&mut b, 296, 3, 1, [1, 0, 0, 0]);
+        b.extend([0u8; 4]);
+        b.extend_from_slice(desc);
+        b.extend(40u32.to_le_bytes());   // 40/13 px per µm = 0.325 µm/px
+        b.extend(13u32.to_le_bytes());
+        let m = Meta { exif: Some(b.clone()), ..Default::default() };
+        let (v, src) = m.pixel_size_um().unwrap();
+        assert!((v - 0.325).abs() < 1e-9, "{v}");
+        assert_eq!(src, "ImageJ");
+        // the same structure without ImageJ's description: a camera-less TIFF at 1 px per cm is not read
+        // (unit 1 = none), and nothing at all comes from a description of another program
+        let mut c = b.clone();
+        c[data_at as usize..data_at as usize + 6].copy_from_slice(b"Photos");
+        assert!(Meta { exif: Some(c), ..Default::default() }.pixel_size_um().is_none());
+        let ome = format!("<OME><Pixels PhysicalSizeX=\"0.5\" PhysicalSizeXUnit=\"nm\"/></OME>");
+        let mut o = vec![b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0];
+        entry(&mut o, 270, 2, ome.len() as u32 + 1, 26u32.to_le_bytes());
+        o.extend([0u8; 4]);
+        o.extend_from_slice(ome.as_bytes());
+        o.push(0);
+        let (v, src) = Meta { exif: Some(o), ..Default::default() }.pixel_size_um().unwrap();
+        assert!((v - 0.0005).abs() < 1e-12, "{v}");
+        assert_eq!(src, "OME-XML");
     }
 
     #[test]

@@ -18,7 +18,8 @@
 //! `depth` the depth-from-focus pass (ring difference filter, guided-filter
 //! aggregation, sub-frame peaks, edge-aware WLS), `align` the 4-DOF similarity
 //! registration, `dust` the dust map, `io` bit-depth-preserving TIFF/PNG/JPEG I/O, `view` synthetic
-//! stereo, `mesh` the textured 3D model, `stack::run` the decode → align →
+//! stereo, `mesh` the textured 3D model, `overlay` the scale bar and caption
+//! burned into the saved images, `stack::run` the decode → align →
 //! fuse → depth pipeline, and `batch` the rules that cut a list of frames into
 //! stacks for a batch of runs.
 
@@ -33,6 +34,7 @@ pub mod gpu;
 pub mod io;
 pub mod mesh;
 pub mod meta;
+pub mod overlay;
 pub mod raw;
 pub mod pyramid;
 pub mod stack;
@@ -46,6 +48,7 @@ pub use dust::{DustMap, DustMode, DustParams};
 pub use fuse::{FuseParams, Fuser, TopRule};
 pub use io::Depth;
 pub use mesh::{Mesh, MeshParams, TexFormat};
+pub use overlay::{Overlay, OverlayParams};
 pub use pyramid::Img3;
 pub use stack::{FrameSource, Output, Params, Slab, run, run_with, slab_ranges};
 pub use view::{Layout, View};

@@ -304,6 +304,7 @@ body.log-collapsed #toasts { bottom: 46px; }
 .panel .row button { flex: none; white-space: nowrap; }
 .panel .row .small { min-width: 0; }
 .panel .val { color: var(--text); }
+.panel .dim button { height: 20px; padding: 0 7px; margin-left: 6px; font-size: var(--fs-xs); vertical-align: middle; }
 /* Save step: body.step-save hides the filmstrip, canvas, panel and log; #savepage fills #main
    and centres one card that reuses the panel's row grid at a wider measure */
 body.step-save #left, body.step-save #center, body.step-save #logwrap { display: none; }

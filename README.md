@@ -310,6 +310,50 @@ slabs, the Source view and the retouch brush (the filmstrip's thumbnails
 are of the frames as shot). A project file records the map's name, and the
 file is taken from the ones added when the project is opened again.
 
+**Scale bar and caption** (`overlay.rs`; `--scale-bar CAL[:LENGTH]`, `--text TEXT`,
+`--overlay-pos`, `--overlay-size`, `--overlay-color`, `--overlay-style`): for
+the microscope, where the stacked image is a figure. `CAL` is the size of one
+pixel of the frames in µm (`0.325`, or with a unit, `325nm`) — the camera's
+pixel pitch over the magnification, or what a stage micrometer measures — or
+`auto`, which reads it from the first frame's TIFF (`Meta::pixel_size_um`):
+ImageJ's `unit=micron` in the ImageDescription with XResolution in pixels per
+unit, OME-XML's `PhysicalSizeX` / `PhysicalSizeXUnit`, or a plain resolution
+in cm or inch from a writer that is not a camera (no Make tag: a camera's 72
+or 300 dpi says nothing about the subject). Alignment brings every frame onto
+frame 0's pixel grid and the crop only cuts that grid, so one number serves
+every output at full size. The bar is the 1-2-5 value nearest a fifth of the
+width, or `LENGTH` (`100um`, `2mm`, `500nm`; one that does not fit is brought
+down to the largest 1-2-5 value that does, and the log says so), snapped to
+whole pixels, with its length written over it in the unit that keeps the
+number under a thousand (500 nm, 100 µm, 2.5 mm). `--text` is a caption:
+`\n` breaks a line, and `{date}` / `{time}` (the first frame's capture time,
+as the batch split reads it), `{frames}`, `{first}` (the first frame's stem)
+and `{n}` (the stack's number in a batch) are filled in. Bar and text each
+take a corner (`--overlay-pos BAR[,TEXT]`, `tl | tr | bl | br`, default
+bottom right and bottom left; in one corner the text goes above the bar,
+below it at the top), in white with a black halo — the ink dilated by a
+disc, a thin outline that reads on any background — or black with a white
+one (`--overlay-color`), or on a translucent box, or plain
+(`--overlay-style halo | box | plain`). Every size follows the image: the
+font's em is `--overlay-size` % of the image height (3 by default), and the
+margins, the bar's thickness, the gap under the label and the halo's width
+are fractions of it, so the same settings give the same figure at every
+resolution, and an animation shrunk to a long edge carries the same bar,
+shrunk with it. The text is set in Fira Sans, the browser app's own face — a
+30 KB subset of the Regular weight embedded in the core crate
+(`crates/lapstack-core/fonts`, made by `subset.py` there from Mozilla's TTF;
+SIL OFL) — and rasterised by lapstack itself: a TrueType outline reader
+(glyf / loca / cmap / hmtx, simple and composite glyphs, no hinting) and the
+signed-area coverage accumulation of font-rs / stb_truetype v2, where each
+edge deposits the area it sweeps into the pixels it crosses and a running
+sum along the row gives the exact coverage of the nonzero-winding fill,
+anti-aliased for free. The overlay is a few patches of coverage over the
+corners it occupies, so nothing the size of the image is allocated; it is
+burned into the fused image, the weighted average and every stereo and
+rocking view (after the shear — a bar sheared by the depth map would bend),
+not into the depth maps, the slabs or the 3D model's texture. The browser
+app draws the same patches (below).
+
 **Synthetic stereo and rocking** (`view.rs`; `--stereo PCT[:LAYOUT]`,
 `--rocking PCT[:N]`, `--far-first`): the depth map makes the result a relief,
 and a view from the side is that relief sheared — every pixel slides
@@ -838,6 +882,27 @@ pixel (`web/test/headless.mjs` with a project script checks it). A stroke
 whose source is not on hand is left out and the log says why. Saving again
 after the run writes this session's run and strokes; saving before it keeps
 the project's own.
+
+**Scale bar and text** (the panel's *Scale bar and text* section; the CLI's
+`--scale-bar` and `--text`, above): the calibration in µm per pixel, the bar's
+length (empty = the 1-2-5 value nearest a fifth of the width), a caption with
+the same tokens (`{date}`, `{time}`, `{frames}`, `{first}`, `{n}`; `\n` breaks
+a line), the corners, the size, the colour and the style. The engine renders
+the overlay for the saved file's size (`overlay_patches`, core `overlay.rs`)
+and returns RGBA patches over the corners it occupies, which the viewer draws
+over the Stack layers — LAP, DFR, WAV and the kept results — inside the crop
+window, so what is on screen is what the file will carry (not while
+retouching: the brush preview lives there); the section's line says what the
+bar came to (*scale bar 100 µm = 308 px at 0.325 µm/px, bottom right*), and
+after a run the calibration the first frame carries (ImageJ, OME-TIFF) is
+offered with a *use* button. Saving burns the same overlay into the 16-bit
+master in the engine (`encode`, `view_stereo` and `refold_stereo` take it as
+JSON) — the stacked images, the kept results, the stereo pair (once per
+view) — and the page draws it, rendered at the animation's size, over every
+frame of the GIFs and videos; the Save step's *Scale bar and text* switch
+leaves it out of the files (and off the screen) without losing the
+settings. The settings are part of the panel's parameters, so they persist
+and travel with a project file.
 
 **Depth slice**: with `slice` on, the Depth view (gray or Turbo) paints a
 60 % magenta band over the pixels the depth map assigns to the scrubbed

@@ -114,6 +114,7 @@ const dpr = () => window.devicePixelRatio || 1;
 // ---------- settings (persisted) ----------
 const PK = 'lapstack.settings';
 const INTERPS = ['nearest', 'bilinear', 'bicubic', 'spline4x4', 'spline6x6', 'lanczos3'];
+const CORNERS = ['tl', 'tr', 'bl', 'br'];
 const stepDefaults = { 'p-dust-thr': 3, 'p-dust-margin': 3, 'p-kept': 1536, 'p-wav-pow': 2, 'p-wav-smooth': 1, 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5, 'p-dslab-size': 10, 'p-dslab-ov': 2, 'p-split-n': 30, 'p-split-gap': 10 };
 function readParams() {
   const n = (id) => Number($(id).textContent) || 0; // a stepper's zero word ('auto', 'off') reads as 0
@@ -128,6 +129,9 @@ function readParams() {
     brush_size: st.retouch.size, brush_hard: st.retouch.hard, brush_from: st.retouch.from, brush_slab: n('p-slab'),
     split: $('p-split').value, split_n: n('p-split-n'), split_gap: n('p-split-gap'), kept_mb: n('p-kept'),
     dust_thr: n('p-dust-thr'), dust_margin: n('p-dust-margin'), dust_mode: $('p-dust-mode').value,
+    // the scale bar and text (overlay.rs): the calibration in µm per pixel, the bar's length as typed ('' = auto), the caption
+    ov_bar: $('p-ov-bar').checked, ov_um: parseFloat(String($('p-ov-um').value).replace(',', '.')) || 0, ov_len: $('p-ov-len').value, ov_text: $('p-ov-txt').value,
+    ov_bar_pos: $('p-ov-barpos').value, ov_text_pos: $('p-ov-txtpos').value, ov_size: Number($('p-ov-size').value) || 3, ov_color: $('p-ov-color').value, ov_style: $('p-ov-style').value,
   };
 }
 function setStep(id, v) {
@@ -152,6 +156,9 @@ function applyParams(p) {
   $('p-split').value = ['count', 'gap', 'dir'].includes(p.split) ? p.split : 'none'; setStep('p-split-n', p.split_n ?? 30); setStep('p-split-gap', p.split_gap ?? 10);
   setStep('p-kept', p.kept_mb ?? 1536);
   setStep('p-dust-thr', p.dust_thr ?? 3); setStep('p-dust-margin', p.dust_margin ?? 3); $('p-dust-mode').value = p.dust_mode === 'flat' ? 'flat' : 'fill';
+  $('p-ov-bar').checked = p.ov_bar ?? false; $('p-ov-um').value = p.ov_um > 0 ? String(p.ov_um) : ''; $('p-ov-len').value = p.ov_len ?? ''; $('p-ov-txt').value = p.ov_text ?? '';
+  $('p-ov-barpos').value = CORNERS.includes(p.ov_bar_pos) ? p.ov_bar_pos : 'br'; $('p-ov-txtpos').value = CORNERS.includes(p.ov_text_pos) ? p.ov_text_pos : 'bl';
+  $('p-ov-size').value = p.ov_size ?? 3; $('p-ov-color').value = p.ov_color === 'black' ? 'black' : 'white'; $('p-ov-style').value = ['box', 'plain'].includes(p.ov_style) ? p.ov_style : 'halo';
 }
 function saveParams() { try { localStorage.setItem(PK, JSON.stringify(readParams())); } catch {} }
 try { applyParams(JSON.parse(localStorage.getItem(PK))); } catch {}
@@ -654,6 +661,94 @@ document.querySelectorAll('[data-step="p-dust-thr"], [data-step="p-dust-margin"]
 $('p-dust-mode').addEventListener('change', updateDustMap);
 new ResizeObserver(() => { if (DUST.file) renderDust(); }).observe($('params'));
 
+// ---------- scale bar and text (lapstack-core's overlay.rs) ----------
+// The overlay is rendered by the engine for an output size and comes back as RGBA patches
+// over the corners it occupies (a few hundred KB at full resolution): the viewer draws them
+// over the Stack layers in image space, the Save step's thumbnails scale them down, and an
+// animation draws its own set, rendered at its size, over every frame. Rendered once per
+// (settings, size) and kept; a save burns the same overlay into the 16-bit master in the
+// engine (encode / view_stereo / refold_stereo take the settings as JSON).
+const OV = { cache: new Map(), text: '', date: null, dateFor: null };   // cache: key -> {patches: [{x, y, w, h, bmp}], text} | 'pending'; date: the first frame's capture date for {date} / {time}
+window.__OV = OV;
+// a length with a unit ("100 µm", "2mm", "500 nm"; a bare number is µm) in µm; 0 = auto / not a length
+function lengthUm(s) {
+  const m = /^\s*([0-9]*[.,]?[0-9]+(?:e-?\d+)?)\s*([a-zA-Zµμ]*)\s*$/.exec(s || ''); if (!m) return 0;
+  const k = { '': 1, um: 1, 'µm': 1, 'μm': 1, micron: 1, microns: 1, nm: 1e-3, mm: 1e3, cm: 1e4, m: 1e6, in: 25400, inch: 25400 }[m[2].toLowerCase()];
+  const v = parseFloat(m[1].replace(',', '.')) * (k ?? NaN); return v > 0 && isFinite(v) ? v : 0;
+}
+// the caption with its tokens filled in: {date} {time} from the first frame's capture time (read once per first frame,
+// the overlay redrawn when it lands), {frames}, {first}, {n}; \n breaks a line
+function captionText(t) {
+  const f0 = st.files[0];
+  if (f0 && OV.dateFor !== f0) { OV.dateFor = f0; OV.date = null; captureDate(f0).then((d) => { if (OV.dateFor === f0) { OV.date = d; overlayChanged(false); } }); }
+  const m = /^(\d{4}):(\d{2}):(\d{2}) (\d{2}:\d{2}:\d{2})$/.exec(OV.date || '');
+  return t.replace(/\\n/g, '\n').replace(/\{date\}/g, m ? `${m[1]}-${m[2]}-${m[3]}` : '').replace(/\{time\}/g, m ? m[4] : '')
+    .replace(/\{frames\}/g, String(st.files.length)).replace(/\{first\}/g, f0 ? stemOf(f0.name) : '').replace(/\{n\}/g, String(B.all ? B.k + 1 : 1));
+}
+// the overlay as the engine takes it (OverlayParams by name), or null when there is nothing to draw
+function overlayParams() {
+  const p = readParams();
+  const um = p.ov_bar && p.ov_um > 0 ? p.ov_um : 0, text = captionText(p.ov_text).trim();
+  if (!um && !text) return null;
+  return { um_per_px: um, bar_um: lengthUm(p.ov_len), text, bar_pos: p.ov_bar_pos, text_pos: p.ov_text_pos, size: p.ov_size / 100, color: p.ov_color, style: p.ov_style };
+}
+const overlayJson = () => { const p = overlayParams(); return p ? JSON.stringify(p) : ''; };
+const burnOverlay = () => !!overlayParams() && $('sv-overlay').checked;   // the saved files get it, and the viewer shows it
+// the patches for an output of W×H at `scale` of the frames' resolution: from the cache, or null while the
+// engine renders them (the viewer and the Save step are redrawn when they land)
+function overlayPatches(W, H, scale = 1) {
+  const p = overlayParams(); if (!p || !W || !H) return null;
+  const key = JSON.stringify([p, W, H, scale]);
+  const hit = OV.cache.get(key);
+  if (hit) return hit === 'pending' ? null : hit;
+  OV.cache.set(key, 'pending');
+  if (OV.cache.size > 6) for (const [k, v] of OV.cache) { if (v !== 'pending' && k !== key) { for (const q of v.patches) q.bmp.close(); OV.cache.delete(k); break; } }
+  call({ type: 'overlay', json: JSON.stringify(p), w: W, h: H, scale }).then(async (r) => {
+    if (OV.cache.get(key) !== 'pending') return;   // the settings moved on
+    const patches = await Promise.all(r.patches.map(async (q) => ({ x: q.x, y: q.y, w: q.w, h: q.h, bmp: await createImageBitmap(new ImageData(new Uint8ClampedArray(q.rgba), q.w, q.h)) })));
+    if (OV.cache.get(key) !== 'pending') { for (const q of patches) q.bmp.close(); return; }
+    OV.cache.set(key, { patches, text: r.text });
+    if (scale === 1) { OV.text = r.text; renderOverlayInfo(); }
+    draw(); if (st.step === 'save') renderSave();
+  }).catch((e) => { OV.cache.delete(key); log(`[lapstack] overlay: ${e.message}`); });
+  return null;
+}
+// the overlay at an animation's size: rendered by the engine at that scale; the caller closes the bitmaps
+async function animOverlay(ow, oh) {
+  const [W] = outDims(); const r = await call({ type: 'overlay', json: overlayJson(), w: ow, h: oh, scale: ow / W });
+  return { patches: await Promise.all(r.patches.map(async (q) => ({ x: q.x, y: q.y, w: q.w, h: q.h, bmp: await createImageBitmap(new ImageData(new Uint8ClampedArray(q.rgba), q.w, q.h)) }))), text: r.text };
+}
+function drawOverlay(c, ov, ox, oy, s = 1) { if (!ov) return; c.imageSmoothingEnabled = true; for (const q of ov.patches) c.drawImage(q.bmp, ox + q.x * s, oy + q.y * s, q.w * s, q.h * s); }
+// the settings changed: the cache goes, the viewer and the info lines follow
+function overlayChanged(save = true) {
+  for (const v of OV.cache.values()) if (v !== 'pending') for (const q of v.patches) q.bmp.close();
+  OV.cache.clear(); OV.text = '';
+  if (save) saveParams();
+  renderOverlayInfo(); draw(); if (st.step === 'save') renderSave();
+}
+function renderOverlayInfo() {
+  const p = overlayParams();
+  $('p-ov-size-val').textContent = `${$('p-ov-size').value} %`;
+  // the calibration the first frame carries (ImageJ, OME-TIFF), read by the run
+  const m = st.result && st.result.meta, cal = m && m.pixel_um > 0 ? +m.pixel_um.toPrecision(6) : 0, f0 = st.files[0];
+  const el = $('ov-cal'); el.textContent = '';
+  if (cal) {
+    el.append(`${f0 ? f0.name : 'the first frame'}: ${cal} µm per pixel (${m.pixel_src})`);
+    const b = document.createElement('button'); b.textContent = 'use'; b.title = 'take the calibration the first frame carries';
+    b.addEventListener('click', () => { $('p-ov-um').value = String(cal); $('p-ov-bar').checked = true; overlayChanged(); });
+    el.append(b);
+  } else el.textContent = st.result ? 'the first frame carries no pixel size (a TIFF from ImageJ or an OME-TIFF would); calibrate with a stage micrometer' : 'a frame\'s own calibration (ImageJ, OME-TIFF) shows here after a run';
+  const have = !!(st.result || st.kept.length), [W, H] = outDims();
+  const hit = p && have && W ? OV.cache.get(JSON.stringify([p, W, H, 1])) : null;
+  $('ov-info').textContent = !p ? 'off'
+    : !$('sv-overlay').checked ? 'shown nowhere: the Save step\'s "burn the scale bar and text" is off'
+    : hit && hit !== 'pending' ? hit.text
+    : have && W ? 'rendering…'
+    : `${p.um_per_px ? `scale bar at ${p.um_per_px} µm per pixel` : ''}${p.um_per_px && p.text ? '; ' : ''}${p.text ? `text “${p.text.replace(/\n/g, ' / ')}”` : ''} — on the Stack layers once there is a result`;
+}
+for (const id of ['p-ov-bar', 'p-ov-um', 'p-ov-len', 'p-ov-txt', 'p-ov-barpos', 'p-ov-txtpos', 'p-ov-size', 'p-ov-color', 'p-ov-style']) $(id).addEventListener('input', () => overlayChanged());
+window.__overlayParams = () => overlayParams(); window.__overlayChanged = () => overlayChanged(); window.__overlayPatches = (w, h, s) => overlayPatches(w, h, s);
+
 // the Results section's list: a row per kept result, newest first
 function renderKept() {
   const list = $('kept-list'); list.innerHTML = '';
@@ -1060,6 +1155,7 @@ function onRendered(m, kind) {
 }
 function finishRun() {
   st.rendering = false;
+  renderOverlayInfo();   // the first frame's own calibration, if the run found one
   setView('fused');
   if (PJ.run && st.result && !inBatch()) PJ.run = null;   // the project's run has been made again: the result is the session's now
   if (PJ.strokes.length && st.result && !inBatch()) { replayStrokes(); return; }   // finishRun is called again by 'replayed'
@@ -1113,7 +1209,7 @@ const MESH_MIME = { glb: 'model/gltf-binary', obj: 'model/obj', mtl: 'model/mtl'
 const SV = { sel: new Set(['lap']), exif: null, exifFor: null, exporting: false, cancel: false, dir: null, lastSaved: [] };   // dir: the folder saved files go to (File System Access), null = downloads
 const SK = 'lapstack.save';
 window.__SV = SV; window.__updateSaveButtons = () => updateSaveButtons();   // harness hooks
-const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-first', 'fn-stack', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'sv-meta', 'sv-crop', 'an-edge', 'an-fps', 'an-loop', 'an-format', 'an-vq', 'v3-method', 'v3-src', 'v3-shift', 'v3-layout', 'v3-rock', 'v3-near', 'm3-format', 'm3-relief', 'm3-grid', 'm3-tex', 'cc-on', 'cc-name'];
+const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-first', 'fn-stack', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'sv-meta', 'sv-crop', 'sv-overlay', 'an-edge', 'an-fps', 'an-loop', 'an-format', 'an-vq', 'v3-method', 'v3-src', 'v3-shift', 'v3-layout', 'v3-rock', 'v3-near', 'm3-format', 'm3-relief', 'm3-grid', 'm3-tex', 'cc-on', 'cc-name'];
 const svSteps = ['an-step', 'v3-views'];   // the card's steppers (a number in a span between − and +)
 const svLive = ['sv-quality', 'sv-name', 'cc-name', 'v3-shift', 'v3-rock', 'm3-relief'];   // re-render on every input, not on change
 // The crop: the run reports the window every aligned frame covers with real pixels
@@ -1313,6 +1409,10 @@ async function renderSave() {
   $('sv-meta').disabled = !have;
   $('sv-meta-info').textContent = !mt ? '—' : have ? `${f0 ? f0.name : 'first frame'}: ${mt.text}` + (!mt.icc && mt.chrm ? ' (no ICC profile: PNG gets a cHRM chunk)' : '') : `nothing found in ${f0 ? f0.name : 'the first frame'}`;
   $('fn-preview').textContent = svName(OUTPUTS[0]);
+  // the scale bar and text: what the Stack step's section set up, and whether the files get it
+  const ovp = overlayParams(); $('sv-overlay').disabled = !ovp;
+  $('sv-overlay-info').textContent = !ovp ? 'off — a scale bar or a text is set up in the Stack step\'s "Scale bar and text" section'
+    : (OV.text || `${ovp.um_per_px ? `scale bar at ${ovp.um_per_px} µm per pixel` : ''}${ovp.um_per_px && ovp.text ? '; ' : ''}${ovp.text ? `text “${ovp.text.replace(/\n/g, ' / ')}”` : ''}`) + ($('sv-overlay').checked ? '' : ' — left out of the files');
   // stereo / rocking: the DFR image is on offer only when it was rendered
   for (const k of ['dmap', 'wav']) $('v3-src').querySelector(`[value="${k}"]`).disabled = !haveKind(k);
   if (!haveKind($('v3-src').value)) $('v3-src').value = 'fused';
@@ -1382,6 +1482,7 @@ async function renderVideo(o, progress) {
   const ow = Math.max(2, plan.ow & ~1), oh = Math.max(2, plan.oh & ~1);
   const cfg = await videoConfig(fmt, ow, oh, fps, Math.round(ow * oh * fps * Number($('an-vq').value)));
   const oc = new OffscreenCanvas(ow, oh), c = oc.getContext('2d', { willReadFrequently: true });
+  const ovA = burnOverlay() ? await animOverlay(ow, oh) : null;
   let refolded = false;
   if (o.rock && refolding()) { const v = v3(); await refold(seq.map((i) => rockShift(v.rock, i, v.views)), ow, oh); refolded = true; }
   const samples = []; let description = null, failure = null;
@@ -1401,7 +1502,7 @@ async function renderVideo(o, progress) {
       if (SV.cancel) throw new Error('cancelled');
       if (failure) throw failure;
       progress(k, seq.length);
-      await drawAnimFrame(o, seq[k], c, ow, oh);
+      await drawAnimFrame(o, seq[k], c, ow, oh); drawOverlay(c, ovA, 0, 0);
       const vf = new VideoFrame(oc, { timestamp: k * dur, duration: dur });
       enc.encode(vf, { keyFrame: k % kf === 0 }); vf.close();
       if (enc.encodeQueueSize > 4) await new Promise((r) => enc.addEventListener('dequeue', r, { once: true }));
@@ -1410,6 +1511,7 @@ async function renderVideo(o, progress) {
     if (failure) throw failure;
   } catch (e) { try { enc.close(); } catch {} throw e; }
   finally {
+    if (ovA) for (const q of ovA.patches) q.bmp.close();
     if (refolded) await call({ type: 'refold_end' }).catch(() => {});
     if (o.id !== 'anim-depth' && !o.rock) { R.gpuIndex = -1; R.wasmIndex = -1; }   // the worker's source frame is whatever we exported last
     else if (refolded) R.gpuIndex = -1;
@@ -1427,7 +1529,12 @@ function updateSaveButtons() {
 // a small preview of an output: the layer as the viewer shows it, the animations at their middle frame
 async function thumbInto(o, cv) {
   const c = cv.getContext('2d'); c.fillStyle = '#111'; c.fillRect(0, 0, cv.width, cv.height);
-  if (o.kept) { const k = o.kept, s = Math.min(cv.width / k.w, cv.height / k.h); c.drawImage(k.canvas, (cv.width - k.w * s) / 2, (cv.height - k.h * s) / 2, k.w * s, k.h * s); return; }
+  if (o.kept) {
+    const k = o.kept, s = Math.min(cv.width / k.w, cv.height / k.h), x0 = (cv.width - k.w * s) / 2, y0 = (cv.height - k.h * s) / 2;
+    c.drawImage(k.canvas, x0, y0, k.w * s, k.h * s);
+    if (burnOverlay()) { const w = ($('sv-crop').checked && k.crop) || { x: 0, y: 0, w: k.w, h: k.h }; drawOverlay(c, overlayPatches(w.w, w.h), x0 + w.x * s, y0 + w.y * s, s); }
+    return;
+  }
   const r = st.result; if (!r) return;
   const mid = Math.floor((st.files.length - 1) / 2);
   const [ow, oh] = outDims();
@@ -1435,8 +1542,10 @@ async function thumbInto(o, cv) {
     const s = Math.min(cv.width / ow, cv.height / oh), w = ow * s, h = oh * s;
     c.imageSmoothingEnabled = !pixelated; c.drawImage(bmp, ...srcRect(bmp.width, bmp.height), (cv.width - w) / 2, (cv.height - h) / 2, w, h);
   };
-  if (o.kind === 'fused' || o.kind === 'dmap') fit(r[o.kind]);
-  else if (o.kind === 'stereo' || o.rock) {
+  if (o.kind === 'fused' || o.kind === 'dmap' || o.kind === 'wav') {
+    fit(r[o.kind]);
+    if (burnOverlay()) { const s = Math.min(cv.width / ow, cv.height / oh); drawOverlay(c, overlayPatches(ow, oh), (cv.width - ow * s) / 2, (cv.height - oh * s) / 2, s); }
+  } else if (o.kind === 'stereo' || o.rock) {
     // the views at thumbnail size: the pair side by side (the anaglyph mixed here), the rocking at one extreme
     const v = v3(), pair = o.kind === 'stereo' && v.layout !== 'anaglyph';
     const s = Math.min(cv.width / (pair ? 2 * ow : ow), cv.height / oh), tw = Math.max(1, Math.round(ow * s)), th = Math.max(1, Math.round(oh * s));
@@ -1487,7 +1596,7 @@ async function winnerBitmap() {
   for (let i = 0; i < w * h; i++) { const g = (d[i] - lo) * k; px[4 * i] = g; px[4 * i + 1] = g; px[4 * i + 2] = g; px[4 * i + 3] = 255; }
   const bmp = await createImageBitmap(new ImageData(px, w, h)); st.depthBmp.set('winner', bmp); return bmp;
 }
-for (const id of svIds) $(id).addEventListener(svLive.includes(id) ? 'input' : 'change', () => { $('sv-qval').textContent = $('sv-quality').value; saveSaveSettings(); renderSave(); if (id === 'sv-crop') draw(); });
+for (const id of svIds) $(id).addEventListener(svLive.includes(id) ? 'input' : 'change', () => { $('sv-qval').textContent = $('sv-quality').value; saveSaveSettings(); renderSave(); if (id === 'sv-crop') draw(); if (id === 'sv-overlay') { renderOverlayInfo(); draw(); } });
 document.querySelectorAll('#savecard [data-step]').forEach((b) => b.addEventListener('click', () => { const id = b.dataset.step; setStep(id, Number($(id).textContent) + Number(b.dataset.d)); saveSaveSettings(); renderSave(); }));
 $('sv-all').addEventListener('change', (e) => { for (const o of saveRows()) if (o.avail()) { if (e.target.checked) SV.sel.add(o.id); else SV.sel.delete(o.id); } saveSaveSettings(); renderSave(); });
 // a finished file: into the chosen folder when there is one, else a download
@@ -1526,6 +1635,7 @@ renderDest();
 async function renderAnim(o, progress) {
   const { ow, oh, seq, delay } = animPlan(o);
   const oc = new OffscreenCanvas(ow, oh), c = oc.getContext('2d', { willReadFrequently: true });
+  const ovA = burnOverlay() ? await animOverlay(ow, oh) : null;   // the scale bar and text at the animation's size, on every frame
   let refolded = false;
   if (o.rock && refolding()) {   // one pass over the frames (or a few) before any GIF frame
     const v = v3();
@@ -1538,7 +1648,7 @@ async function renderAnim(o, progress) {
     for (let k = 0; k < seq.length; k++) {
       if (SV.cancel) throw new Error('cancelled');
       progress(k, seq.length);
-      await drawAnimFrame(o, seq[k], c, ow, oh);
+      await drawAnimFrame(o, seq[k], c, ow, oh); drawOverlay(c, ovA, 0, 0);
       const img = c.getImageData(0, 0, ow, oh);
       const r = await call({ type: 'gif_frame', rgba: img.data.buffer, delay }, [img.data.buffer]);
       if (r.bytes.byteLength) chunks.push(r.bytes);
@@ -1546,6 +1656,7 @@ async function renderAnim(o, progress) {
     const r = await call({ type: 'gif_end' }); chunks.push(r.bytes);
   } catch (e) { await call({ type: 'gif_abort' }).catch(() => {}); throw e; }
   finally {
+    if (ovA) for (const q of ovA.patches) q.bmp.close();
     if (refolded) await call({ type: 'refold_end' }).catch(() => {});
     if (o.id !== 'anim-depth' && !o.rock) { R.gpuIndex = -1; R.wasmIndex = -1; }   // the worker's source frame is whatever we exported last
     else if (refolded) R.gpuIndex = -1;   // the refold's warps went through cur[0]
@@ -1614,6 +1725,7 @@ async function saveSelected() {
   const saved = []; SV.lastSaved = saved;
   SV.exporting = true; SV.cancel = false; updateSaveButtons(); $('run').disabled = true; $('clear').disabled = true;
   const now = new Date(), fmt = $('sv-format').value, q = Number($('sv-quality').value), sign = $('cc-on').checked;
+  const ovj = burnOverlay() ? overlayJson() : '';   // the scale bar and text, burned into the stacked images and views by the engine
   const setState = (o, t) => { const row = $('sv-files').querySelector(`[data-id="${o.id}"] .state`); if (row) row.textContent = t; };
   const prog = (t, done, total) => { $('sv-progress').textContent = t; setProgress(t, done, total); };
   let status = 'saved';
@@ -1643,12 +1755,12 @@ async function saveSelected() {
         if (o.kind === 'stereo' && refolding()) {   // the two views folded from the frames at full resolution, then composed
           const v = v3(); setState(o, 'refolding…');
           await refold([-v.shift, v.shift], 0, 0);
-          try { r = await call({ type: 'refold_stereo', layout: v.layout, format: f, quality: q, meta }); }
+          try { r = await call({ type: 'refold_stereo', layout: v.layout, format: f, quality: q, meta, overlay: ovj }); }
           finally { await call({ type: 'refold_end' }).catch(() => {}); R.gpuIndex = -1; }
           prog(`encoding ${name}`, 0, 0); setState(o, 'encoding…');
-        } else if (o.kind === 'stereo') r = await call({ type: 'view_stereo', ...v3(), format: f, quality: q, meta });   // the pair at the crop's full size
-        else if (o.kept) r = await call({ type: 'save', kind: o.kind, format: f, quality: q, meta: $('sv-meta').checked && !!o.kept.meta, crop: $('sv-crop').checked && !!o.kept.crop });   // its own window and metadata
-        else r = await call({ type: 'save', kind: o.kind, format: f, quality: q, meta, crop: !!cropArea() });
+        } else if (o.kind === 'stereo') r = await call({ type: 'view_stereo', ...v3(), format: f, quality: q, meta, overlay: ovj });   // the pair at the crop's full size
+        else if (o.kept) r = await call({ type: 'save', kind: o.kind, format: f, quality: q, meta: $('sv-meta').checked && !!o.kept.meta, crop: $('sv-crop').checked && !!o.kept.crop, overlay: ovj });   // its own window and metadata
+        else r = await call({ type: 'save', kind: o.kind, format: f, quality: q, meta, crop: !!cropArea(), overlay: ovj });
         mime = f === 'jpeg' ? 'image/jpeg' : 'image/png'; blob = new Blob([r.bytes], { type: mime });
       }
       if (sign && !mime.startsWith('video/')) { prog(`signing ${name}`, 0, 0); setState(o, 'signing…'); blob = await signBlob(blob, o, name, mime); }
@@ -2166,9 +2278,10 @@ function zoom100() {
   st.zoom = z; st.ox = cw / 2 - cx * z; st.oy = ch / 2 - cy * z; st.fitted = false; draw();
 }
 function layerFor(tab) {
-  const k = keptOf(tab); if (k) return { bmp: k.canvas, w: k.w, h: k.h };
-  if (tab === 'fused') return st.result ? { bmp: st.result.fused, w: st.result.w, h: st.result.h } : null;
-  if (tab === 'dmap') return st.result && st.result.dmap ? { bmp: st.result.dmap, w: st.result.w, h: st.result.h } : null;
+  // ov: the window the saved file is cut to, where the scale bar and text go (drawLayer)
+  const k = keptOf(tab); if (k) return { bmp: k.canvas, w: k.w, h: k.h, ov: ($('sv-crop').checked && k.crop) || { x: 0, y: 0, w: k.w, h: k.h } };
+  if (tab === 'fused') return st.result ? { bmp: st.result.fused, w: st.result.w, h: st.result.h, ov: ovWindow() } : null;
+  if (tab === 'dmap') return st.result && st.result.dmap ? { bmp: st.result.dmap, w: st.result.w, h: st.result.h, ov: ovWindow() } : null;
   if (isDepthLayer(tab)) {
     if (!st.result || (tab === 'conf' && !haveConf())) return null;
     const bmp = st.depthBmp.get(`${tab}:${st.turbo ? 'turbo' : 'gray'}`); if (!bmp) { mapBitmap(tab, st.turbo).then(draw); return null; }
@@ -2210,12 +2323,15 @@ function drawCrop(c = ctx) {
   const lw = 1 / (st.zoom * dpr());
   c.lineWidth = lw; c.strokeStyle = 'rgba(255,255,255,.75)'; c.strokeRect(r.x - lw / 2, r.y - lw / 2, r.w + lw, r.h + lw);
 }
+const ovWindow = () => cropArea() || { x: 0, y: 0, w: st.result.w, h: st.result.h };
 function drawLayer(L, c = ctx) {
   if (!L) return;
   c.imageSmoothingEnabled = !L.pixelated && st.zoom * L.bmp.width / L.w < 1.0 ? true : !L.pixelated;
   if (L.pixelated) c.imageSmoothingEnabled = false;
   c.drawImage(L.bmp, 0, 0, L.w, L.h);
   if (L.overlay) { c.imageSmoothingEnabled = !L.overlayPixelated; c.drawImage(L.overlay, 0, 0, L.w, L.h); }
+  // the scale bar and text as the saved file will carry them, in its crop window; not while retouching (the brush preview lives here)
+  if (L.ov && !R.on && burnOverlay()) drawOverlay(c, overlayPatches(L.ov.w, L.ov.h), L.ov.x, L.ov.y);
 }
 function sizeCanvas(cv, d) {
   const cw = cv.clientWidth, ch = cv.clientHeight;
@@ -2681,4 +2797,4 @@ if (q.get('autorun')) {
     tick();
   })();
 }
-renderKept(); updateTabs(); draw();
+renderKept(); renderOverlayInfo(); updateTabs(); draw();

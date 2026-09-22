@@ -7,6 +7,7 @@ use lapstack_core::{DepthParams, DustMode, DustParams, FocusMeasure, Layout, Mes
 use lapstack_core::align::{AlignModel, Interp};
 use lapstack_core::batch::{self, Names};
 use lapstack_core::mesh;
+use lapstack_core::overlay::{self, Corner, Ink, Overlay, OverlayParams, Style};
 use lapstack_core::io;
 use lapstack_core::pyramid::Img3;
 use lapstack_core::view;
@@ -45,6 +46,8 @@ fn main() {
     let mut dust_map: Option<String> = None;
     let mut dust = DustParams::default();
     let mut save_dust: Option<String> = None;
+    let mut ov = OverlayParams::default();
+    let mut ov_auto = false;   // --scale-bar auto: the calibration from the first frame's TIFF
 
     let mut i = 0;
     let next = |i: &mut usize| -> String {
@@ -181,6 +184,33 @@ fn main() {
             }
             "--gpu" => p.gpu = true,
             "--gpu-align" => a.gpu = true,
+            "--scale-bar" => {
+                // CAL[:LENGTH]: the size of a pixel (0.325 = µm; 325nm), or auto (the first frame's TIFF), and the bar's length
+                let s = next(&mut i);
+                let mut it = s.splitn(2, ':');
+                let cal = it.next().unwrap_or("");
+                if cal.eq_ignore_ascii_case("auto") {
+                    ov_auto = true;
+                } else {
+                    ov.um_per_px = overlay::parse_length_um(cal).unwrap_or_else(|| fail("--scale-bar CAL[:LENGTH]: CAL is the size of one pixel of the frames, in µm (0.325) or with a unit (325nm), or auto"));
+                }
+                if let Some(len) = it.next() {
+                    ov.bar_um = if len.eq_ignore_ascii_case("auto") { 0.0 } else { overlay::parse_length_um(len).unwrap_or_else(|| fail("--scale-bar CAL[:LENGTH]: LENGTH with a unit (100um | 2mm | 500nm), or auto")) };
+                }
+            }
+            "--text" => ov.text = next(&mut i),
+            "--overlay-pos" => {
+                let s = next(&mut i);
+                let mut it = s.split(',');
+                let corner = |c: &str| Corner::parse(c).unwrap_or_else(|| fail("--overlay-pos BAR[,TEXT]: corners tl | tr | bl | br"));
+                ov.bar_pos = corner(it.next().unwrap_or(""));
+                if let Some(t) = it.next() {
+                    ov.text_pos = corner(t);
+                }
+            }
+            "--overlay-size" => ov.size = next(&mut i).parse::<f32>().ok().filter(|v| *v > 0.0 && *v <= 50.0).unwrap_or_else(|| fail("--overlay-size: percent of the image height, 0 < PCT <= 50")) / 100.0,
+            "--overlay-color" => { let s = next(&mut i); ov.color = Ink::parse(&s).unwrap_or_else(|| fail("--overlay-color: white | black")); }
+            "--overlay-style" => { let s = next(&mut i); ov.style = Style::parse(&s).unwrap_or_else(|| fail("--overlay-style: halo | box | plain")); }
             "-h" | "--help" => {
                 help();
                 return;
@@ -217,7 +247,8 @@ fn main() {
     } else if save_dust.is_some() {
         fail("--save-dust-map writes the spots found in the dust map: it needs --dust-map");
     }
-    let cfg = Cfg { output, save_depth, save_conf, metadata, depth_raw, p, slab_dir, stereo, rocking, video, near_first, mesh_formats, mp, mesh_tex };
+    let overlay = (ov_auto || !ov.is_empty()).then_some(ov);
+    let cfg = Cfg { output, save_depth, save_conf, metadata, depth_raw, p, slab_dir, stereo, rocking, video, near_first, mesh_formats, mp, mesh_tex, overlay, overlay_auto: ov_auto };
 
     // a directory among the inputs stands for the image files in it; --skip counts positions in that list
     let inputs = batch::expand_dirs(&inputs).unwrap_or_else(|e| fail(&e));
@@ -331,6 +362,11 @@ struct Cfg {
     mesh_formats: Vec<String>,
     mp: MeshParams,
     mesh_tex: (usize, TexFormat),
+    /// The scale bar and caption (`overlay.rs`) burned into the fused image, the weighted
+    /// average and every stereo / rocking view; `overlay_auto` takes the calibration from the
+    /// first frame's TIFF (`Meta::pixel_size_um`).
+    overlay: Option<OverlayParams>,
+    overlay_auto: bool,
 }
 
 /// Stack one set of frames and write everything asked for. `tag` goes into the
@@ -357,17 +393,48 @@ fn run_stack(inputs: &[String], cfg: &Cfg, names: &Names<'_>, tag: &str) -> Resu
         eprintln!("[lapstack{tag}] slab {}/{} (frames {}..{}) -> {path}", s.index + 1, s.count, s.lo, s.hi);
         Ok(())
     };
-    let out = run_with(inputs, &p, &mut log, &mut on_slab)?;
+    let mut out = run_with(inputs, &p, &mut log, &mut on_slab)?;
     if let Some(m) = &meta {
         eprintln!("[lapstack{tag}] metadata from {}: {}", inputs[0], m.describe());
     }
+    // the scale bar and caption: rendered once for the output's size, burned into the fused
+    // image, the weighted average and each view (the clean image is kept for the shears and
+    // the 3D texture — a bar sheared by the depth map would bend)
+    let overlay = match &cfg.overlay {
+        Some(o) => {
+            let mut o = o.clone();
+            let needs_meta = cfg.overlay_auto || o.text.contains("{date}") || o.text.contains("{time}");
+            let own = if meta.is_none() && needs_meta { Some(io::load_meta(&inputs[0])?) } else { None };
+            let m = meta.as_ref().or(own.as_ref());
+            if cfg.overlay_auto {
+                let (um, src) = m.and_then(|m| m.pixel_size_um()).ok_or_else(|| format!("--scale-bar auto: {} carries no pixel size (ImageJ's unit= with XResolution, OME-XML's PhysicalSizeX, or a TIFF resolution in cm or inch from a writer that is not a camera); give the calibration in µm per pixel", inputs[0]))?;
+                eprintln!("[lapstack{tag}] pixel size {um} µm, from the first frame's {src}");
+                o.um_per_px = um;
+            }
+            o.text = overlay::expand_text(&o.text, m.and_then(|m| m.capture_time()), inputs.len(), names.first, names.n);
+            let ov = Overlay::render(&o, out.image.w, out.image.h, 1.0);
+            eprintln!("[lapstack{tag}] overlay: {}", ov.describe());
+            Some(ov)
+        }
+        None => None,
+    };
     // a template names a folder that may not exist yet
     if let Some(dir) = std::path::Path::new(&output).parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
+    let under = overlay.as_ref().map(|ov| ov.under_f32(&out.image));
+    if let Some(ov) = &overlay {
+        ov.apply_f32(&mut out.image);
+    }
     io::save_rgb(&out.image, &output, out.bit_depth, meta.as_ref())?;
     eprintln!("[lapstack{tag}] fused -> {output}");
-    if let Some(wav) = &out.wav {
+    if let (Some(ov), Some(u)) = (&overlay, &under) {
+        ov.restore_f32(&mut out.image, u);
+    }
+    if let Some(wav) = &mut out.wav {
+        if let Some(ov) = &overlay {
+            ov.apply_f32(wav);
+        }
         let path = format!("{stem}_wav{ext}");
         io::save_rgb(wav, &path, out.bit_depth, meta.as_ref())?;
         eprintln!("[lapstack{tag}] weighted average -> {path}");
@@ -388,6 +455,9 @@ fn run_stack(inputs: &[String], cfg: &Cfg, names: &Names<'_>, tag: &str) -> Resu
         let mut img = Img3::zeros(iw, ih);
         for c in 0..3 {
             view::render(&out.image.p[c], iw, ih, 1, &out.depth, 1.0 / n_last, v, &mut img.p[c], iw, 0);
+        }
+        if let Some(ov) = &overlay {
+            ov.apply_f32(&mut img);
         }
         img
     };
@@ -558,6 +628,18 @@ fn help() {
            --mesh-relief PCT      the depth of the stack as a percentage of the image width [25]\n\
            --mesh-grid N          vertices along the long edge [1000]\n\
            --mesh-texture EDGE[:jpeg[:Q] | png]   the texture's long edge, 0 = full [8192], and format [jpeg:92]\n\
+         Scale bar and caption (microscopy), burned into the fused image, the weighted average and the views:\n\
+           --scale-bar CAL[:LENGTH]   CAL = the size of one pixel of the frames in µm (0.325, or 325nm), or auto = read\n\
+                                  from the first frame's TIFF (ImageJ's unit=, OME-XML's PhysicalSizeX, a resolution in\n\
+                                  cm or inch from a writer that is not a camera); LENGTH = the bar's length with a unit\n\
+                                  (100um, 2mm, 500nm) [auto: the 1-2-5 value nearest a fifth of the width]; the label\n\
+                                  picks its unit (500 nm, 100 µm, 2.5 mm)\n\
+           --text TEXT            a caption; \\n breaks a line; {{date}} {{time}} (the first frame's capture time),\n\
+                                  {{frames}}, {{first}} (its stem), {{n}} (the stack in a batch)\n\
+           --overlay-pos BAR[,TEXT]   the corners, tl | tr | bl | br [br,bl]; in one corner the text goes above the bar\n\
+           --overlay-size PCT     the font size as % of the image height; everything else scales with it [3]\n\
+           --overlay-color C      white | black [white]\n\
+           --overlay-style S      halo (a thin outline in the other colour) | box (a translucent box behind) | plain [halo]\n\
            --depth MODE           dff = depth from focus (default) | winner = pyramid winner map\n\
            --depth-level L        (winner) pyramid level the map is read from [2 = 1/4 res]\n\
          Depth from focus (Jeon et al. 2019 focus measure, guided-filter aggregation,\n\
