@@ -293,8 +293,9 @@ impl FrameSource for LazyFrames {
 /// frames in order, first — and warped with its transform every time, then
 /// brought to frame 0's brightness. Between passes only the transforms, the
 /// gains and frame 0 on the brightness grid are kept, so memory is that of a
-/// few frames whatever the stack's length; the depth pass, the weighted
-/// average and the slabs decode and warp the frames again.
+/// few frames whatever the stack's length; the weighted average and the
+/// slabs decode and warp the frames again (the depth pass runs on the focus
+/// slices the fold took).
 struct AlignedFrames {
     src: LazyFrames,
     a: AlignParams,
@@ -433,21 +434,26 @@ fn fuse_all(
     src: &mut dyn FrameSource,
     params: &FuseParams,
     gpu: bool,
+    measure: Option<&DepthParams>,
     log: &mut dyn FnMut(String),
-) -> Result<(Img3, Vec<f32>, usize), String> {
+) -> Result<(Img3, Vec<f32>, usize, Vec<Vec<f32>>), String> {
     let last = src.len() - 1;
-    fuse_range(src, 0, last, params, gpu, log)
+    fuse_range(src, 0, last, params, gpu, measure, log)
 }
 
-/// Fuse frames `lo..=hi` of the source.
+/// Fuse frames `lo..=hi` of the source. With `measure`, each frame's focus
+/// slice (`depth::focus_slice`) is taken as it passes and the slices come
+/// back with the result, so the depth pass needs no second pass over the
+/// frames.
 fn fuse_range(
     src: &mut dyn FrameSource,
     lo: usize,
     hi: usize,
     params: &FuseParams,
     gpu: bool,
+    measure: Option<&DepthParams>,
     log: &mut dyn FnMut(String),
-) -> Result<(Img3, Vec<f32>, usize), String> {
+) -> Result<(Img3, Vec<f32>, usize, Vec<Vec<f32>>), String> {
     let (w, h) = src.dims();
     #[cfg(feature = "gpu")]
     let mut fuser = if gpu {
@@ -484,31 +490,44 @@ fn fuse_range(
         params.top_rule
     ));
     let t = Instant::now();
+    let mut slices = Vec::with_capacity(if measure.is_some() { hi + 1 - lo } else { 0 });
     for i in lo..=hi {
         {
             let f = src.get(i)?;
             fuser.push(&f)?;
+            if let Some(dp) = measure {
+                slices.push(depth::focus_slice(&f, dp));
+            }
         }
         for line in src.take_log() {
             log(line);
         }
-        log(format!("  frame {:>3}/{} folded  ({:.1}s)", i + 1 - lo, hi + 1 - lo, t.elapsed().as_secs_f64()));
+        log(format!(
+            "  frame {:>3}/{} folded{}  ({:.1}s)",
+            i + 1 - lo,
+            hi + 1 - lo,
+            if measure.is_some() { " and measured" } else { "" },
+            t.elapsed().as_secs_f64()
+        ));
     }
     let (img, depth) = fuser.finish()?;
     log(format!("collapsed  ({:.1}s)", t.elapsed().as_secs_f64()));
-    Ok((img, depth, levels))
+    Ok((img, depth, levels, slices))
 }
 
-/// Fusion followed by the optional depth-from-focus pass over the same frames.
+/// Fusion, with the optional depth from focus: the frames' focus slices are
+/// taken during the fold and the depth pass runs on them once the fused
+/// image, its guide, exists.
 fn fuse_and_depth(
     src: &mut dyn FrameSource,
     params: &Params,
     log: &mut dyn FnMut(String),
 ) -> Result<(Img3, Vec<f32>, Option<Vec<f32>>, usize), String> {
-    let (image, winner, levels) = fuse_all(src, &params.fuse, params.gpu, log)?;
+    let (image, winner, levels, slices) = fuse_all(src, &params.fuse, params.gpu, params.depth.as_ref(), log)?;
     match &params.depth {
         Some(dp) => {
-            let dm = depth::depth_from_focus(src, &image, dp, log)?;
+            let n = slices.len();
+            let dm = depth::depth_from_slices(&mut slices.into_iter().map(Ok), n, &image, dp, log)?;
             Ok((image, dm.depth, Some(dm.conf), levels))
         }
         None => Ok((image, winner, None, levels)),
@@ -544,7 +563,7 @@ fn fuse_slabs(
     log(format!("{} slabs of {size} frames, overlap {overlap}", ranges.len()));
     for (k, &(lo, hi)) in ranges.iter().enumerate() {
         log(format!("slab {}/{}: frames {lo}..{hi}", k + 1, ranges.len()));
-        let (image, _, _) = fuse_range(src, lo, hi, &params.fuse, params.gpu, log)?;
+        let (image, _, _, _) = fuse_range(src, lo, hi, &params.fuse, params.gpu, None, log)?;
         let image = match crop { Some(r) => image.crop(r), None => image };
         on_slab(Slab { index: k, count: ranges.len(), lo, hi, image: &image, bit_depth })?;
     }

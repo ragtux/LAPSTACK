@@ -148,9 +148,12 @@ warped, brought to frame 0's brightness and folded into the fusion, then
 dropped; only the transforms, the gains and frame 0 on the brightness
 sampling grid are kept, so memory is that of a few frames whatever the
 stack's length (a 100-frame 45 MP stack needed over 100 GB resident). The
-passes after the fusion — depth, weighted average, slabs — decode and warp
-the frames again with the transforms found, as they already did without
-alignment.
+depth pass takes no second look at the frames: each frame's focus slice
+(`depth::focus_slice`, its focus measure on the depth pass's working grid,
+45 MB per 45 MP frame at the default half grid) is taken as the frame is
+folded and kept, the one thing that grows with the stack's length. The
+weighted average and the slabs decode and warp the frames again with the
+transforms found, as they already did without alignment.
 
 **Interpolation** (`--interpolation K`; `align::Interp`): the kernel each
 aligned frame is resampled with once its transform is found — the choice
@@ -418,9 +421,10 @@ map is noise wherever the scene is flat).
 
 ### Depth from focus (`depth.rs`)
 
-After fusion, lapstack streams the aligned frames a second time and builds a
-dense, sub-frame depth map with the modern non-learned depth-from-focus
-recipe, written from the papers:
+Each frame's focus measure is taken as it is folded, and after the fusion,
+whose result is the guide, lapstack builds a dense, sub-frame depth map
+from those slices with the modern non-learned depth-from-focus recipe,
+written from the papers:
 
 1. **Focus measure** — the *ring difference filter* of Jeon, Surh, Im &
    Kweon (IEEE TIP 2019), `|mean(disk r≤1) − mean(ring 1<r≤3)|` on luma at
@@ -459,26 +463,30 @@ On a stack of 8280×5520 16-bit TIFFs (RTX 3060, 128-thread host), the same
 frames and alignment settings for every row; the whole run, depth pass
 included:
 
-| run | wall | of which align + fuse / depth | peak RSS |
+| run | wall | of which fold (align + fuse + focus measure) / depth | peak RSS |
 |---|--:|--:|--:|
-| 25 frames, `lapstack --align-coarsen 2` (CPU) | 80 s | 36 s (1.4 s per frame) / 42 s | 6.3 GB |
-| 25 frames, `lapstack --gpu --gpu-align --align-coarsen 2` | 58 s | 14 s (0.5 s per frame) / 42 s | 7.8 GB |
-| 100 frames, CPU | 287 s | 148 s (1.5 s per frame) / 136 s | 7.8 GB |
-| 100 frames, `--gpu --gpu-align` | 195 s | 57 s (0.6 s per frame) / 136 s | 5.5 GB |
+| 25 frames, `lapstack --align-coarsen 2` (CPU) | 71 s | 40 s (1.6 s per frame) / 30 s | 6.8 GB |
+| 25 frames, `lapstack --gpu --gpu-align --align-coarsen 2` | 50 s | 18 s (0.7 s per frame) / 29 s | 4.9 GB |
+| 100 frames, CPU | 251 s | 164 s (1.6 s per frame) / 84 s | 12.0 GB |
+| 100 frames, `--gpu --gpu-align` | 161 s | 74 s (0.7 s per frame) / 84 s | 12.0 GB |
 | 25 frames, `lapstack --no-align` on the aligned 16-bit PNGs, CPU or GPU | 26 s | 24 s / – (no depth pass then) | 4.4 GB |
 
 Before the aligner's cost was fused into one pass and its search put on the
 per-level schedule (above), the same rows read 118 s (75 s align + fuse,
 3.0 s per frame), 74 s (30 s, 1.2 s), 449 s (310 s, 3.1 s) and 265 s (126 s,
 1.3 s): the CPU search alone was 1.2 s of every frame, the two registration
-pyramids 0.5 s. The peak RSS swings between runs by how far the read-ahead
-decoders (four frames) get ahead of the fold. Memory is flat over the
-stack's length since the frames stream through the alignment: before that,
-when every frame was loaded and aligned at once, the 25-frame CPU run took
-56 s to align and 21 s to fuse at 31 GB peak, the CUDA run 32 s and 2.0 s at
-the same 31 GB, and 100 frames did not fit. The depth pass decodes and warps
-every frame again, about 1.3 s per frame here on either path, and is now
-the larger half of either run.
+pyramids 0.5 s. The depth pass then decoded and warped every frame a second
+time to take its focus measure, 1.2 s per frame on either path (42 s of the
+25-frame runs); now the fold takes each frame's focus slice as it passes
+(0.15 s per frame) and the depth pass is the guided-filter aggregation of
+the slices (0.75 s each at the half grid), the WLS solve (9 s) and the
+upsampling (1 s). The peak RSS swings between runs by how far the read-ahead
+decoders (four frames) get ahead of the fold; the slices add 45 MB per
+frame. Otherwise memory is flat over the stack's length since the frames
+stream through the alignment: before that, when every frame was loaded and
+aligned at once, the 25-frame CPU run took 56 s to align and 21 s to fuse at
+31 GB peak, the CUDA run 32 s and 2.0 s at the same 31 GB, and 100 frames
+did not fit.
 
 With `--gpu` (build with `--features gpu`; CUDA is loaded at run time, no
 toolkit needed at build time) the fusion runs in `gpu.rs`: the same kernels
@@ -970,7 +978,7 @@ Measured in headless Chrome on the RTX 3060 (`web/test/headless.mjs`):
 
 | stack | browser | native (`lapstack --gpu --gpu-align`) |
 |---|--:|--:|
-| 25 × 8280×5520 16-bit TIFF, align coarsen 2 | **16 s** (≈0.65 s/frame: decode 0.4 s, align 0.2 s, fuse 0.1 s; 30 s before the search's per-level schedule and batched readbacks) | 14 s (align + fuse; the depth pass is another 42 s) |
+| 25 × 8280×5520 16-bit TIFF, align coarsen 2 | **16 s** (≈0.65 s/frame: decode 0.4 s, align 0.2 s, fuse 0.1 s; 30 s before the search's per-level schedule and batched readbacks) | 18 s (align + fuse + focus measure; the depth pass is another 29 s) |
 | 8 × 1024×768 crops, aligned | 1.2 s (2.0 s before) | – |
 
 Both stream now, and the per-frame GPU work is the same. Fusion

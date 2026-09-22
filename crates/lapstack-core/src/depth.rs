@@ -6,7 +6,8 @@
 //! The pipeline is the modern non-learned "focus volume" recipe, written from
 //! the papers:
 //!
-//! 1. **Focus measure** per frame on luma at full resolution. Default is the
+//! 1. **Focus measure** per frame on luma at full resolution, taken as the
+//!    frame is folded (`focus_slice`) so the stack is read once. Default is the
 //!    *ring difference filter* of Jeon, Surh, Im & Kweon, "Ring Difference
 //!    Filter for Fast and Noise Robust Depth From Focus", IEEE TIP 29 (2019):
 //!    the magnitude of the difference between the mean of a small disk and the
@@ -788,14 +789,42 @@ pub fn wls_solve(d: &[f32], conf: &[f32], guide: &[f32], w: usize, h: usize, lam
 
 // ---------------------------------------------------------------- pipeline
 
+/// A frame's slice of the focus volume: the focus measure of its luma,
+/// block-averaged to the working grid (1/2^scale). It needs nothing but the
+/// frame, so the fold takes it as each frame passes (`stack::fuse_range`)
+/// and the depth pass never decodes or warps the frames again; a slice is
+/// `dw × dh` floats (45 MB per 45 MP frame at the default half grid), the
+/// one thing kept per frame.
+pub fn focus_slice(img: &Img3, p: &DepthParams) -> Vec<f32> {
+    let y = luma(img);
+    block_mean(&focus_measure(&y, img.w, img.h, p.focus), img.w, img.h, 1 << p.scale).0
+}
+
 /// Depth from focus over `src` (aligned frames), guided by the fused
-/// all-in-focus image. Streams the frames once.
+/// all-in-focus image. Streams the frames once, taking each one's
+/// `focus_slice`; `depth_from_slices` when the fold took them already.
 pub fn depth_from_focus(src: &mut dyn FrameSource, fused: &Img3, p: &DepthParams, log: &mut dyn FnMut(String)) -> Result<DepthMap, String> {
     let (w, h) = src.dims();
     let n = src.len();
     if fused.w != w || fused.h != h {
         return Err("depth: fused image size differs from the frames".into());
     }
+    let mut slices = (0..n).map(|m| src.get(m).map(|f| focus_slice(&f, p)));
+    depth_from_slices(&mut slices, n, fused, p, log)
+}
+
+/// Depth from focus over the `n` frames' focus slices (`focus_slice`, in
+/// frame order), guided by the fused all-in-focus image: each slice is
+/// aggregated with the guided filter and fed to the peak search as it comes,
+/// then the sub-frame depth is regularised and upsampled.
+pub fn depth_from_slices(
+    slices: &mut dyn Iterator<Item = Result<Vec<f32>, String>>,
+    n: usize,
+    fused: &Img3,
+    p: &DepthParams,
+    log: &mut dyn FnMut(String),
+) -> Result<DepthMap, String> {
+    let (w, h) = (fused.w, fused.h);
     let k = 1usize << p.scale;
     let t = Instant::now();
     let y_full = luma(fused);
@@ -807,17 +836,16 @@ pub fn depth_from_focus(src: &mut dyn FrameSource, fused: &Img3, p: &DepthParams
     ));
     let mut tracker = PeakTracker::new(dw * dh);
     for m in 0..n {
-        let (c, _, _) = {
-            let f = src.get(m)?;
-            let y = luma(&f);
-            block_mean(&focus_measure(&y, w, h, p.focus), w, h, k)
-        };
+        let c = slices.next().ok_or_else(|| format!("depth: slice {m} of {n} missing"))??;
+        if c.len() != dw * dh {
+            return Err(format!("depth: slice {m} has {} cells, the working grid {dw}x{dh}", c.len()));
+        }
         let c = if p.agg_radius > 0 { gf.filter(&c) } else { c };
         // the guided filter can undershoot; the profile statistics assume ≥ 0
         let c: Vec<f32> = c.into_par_iter().map(|v| v.max(0.0)).collect();
         tracker.push(&c);
-        log(format!("  frame {:>3}/{n} measured  ({:.1}s)", m + 1, t.elapsed().as_secs_f64()));
     }
+    log(format!("depth: {n} slices aggregated  ({:.1}s)", t.elapsed().as_secs_f64()));
     let (mut depth_w, mut conf) = tracker.finish(p.gate);
     if p.median {
         depth_w = median3(&depth_w, dw, dh);
