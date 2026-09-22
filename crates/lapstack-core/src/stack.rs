@@ -607,7 +607,11 @@ fn fuse_and_depth(
     match &params.depth {
         Some(dp) => {
             let n = slices.len();
-            let dm = depth::depth_from_slices(&mut slices.into_iter().map(Ok), n, &image, dp, log)?;
+            let mut it = slices.into_iter().map(Ok);
+            #[cfg(feature = "gpu")]
+            let dm = if params.gpu { crate::gpu::depth_from_slices(&mut it, n, &image, dp, log)? } else { depth::depth_from_slices(&mut it, n, &image, dp, log)? };
+            #[cfg(not(feature = "gpu"))]
+            let dm = depth::depth_from_slices(&mut it, n, &image, dp, log)?;
             Ok((image, dm.depth, Some(dm.conf), levels))
         }
         None => Ok((image, winner, None, levels)),

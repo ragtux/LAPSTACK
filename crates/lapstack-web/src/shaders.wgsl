@@ -642,17 +642,17 @@ fn scale_clamp(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgro
     let i = gid1(g, nwg); if (i >= p.w * p.h) { return; }
     o[i] = min(a[i] * p.f0, 1.0) + p.f1;
 }
-// edge weights exp(-|dI|/sigma): a = guide -> o = [ax | ay] (2n), f0 = sigma
+// edge weights f1 * exp(-|dI|/sigma): a = guide -> o = [ax | ay] (2n), f0 = sigma, f1 = lambda
 @compute @workgroup_size(16, 16)
 fn edge_w(@builtin(global_invocation_id) g: vec3<u32>) {
     let x = g.x; let y = g.y;
     if (x >= p.w || y >= p.h) { return; }
     let n = p.w * p.h; let i = y * p.w + x; let inv = -1.0 / max(p.f0, 1e-6);
-    o[i] = select(0.0, exp(abs(a[i] - a[i + 1u]) * inv), x + 1u < p.w);
-    o[n + i] = select(0.0, exp(abs(a[i] - a[i + p.w]) * inv), y + 1u < p.h);
+    o[i] = select(0.0, p.f1 * exp(abs(a[i] - a[i + 1u]) * inv), x + 1u < p.w);
+    o[n + i] = select(0.0, p.f1 * exp(abs(a[i] - a[i + p.w]) * inv), y + 1u < p.h);
 }
-// 1-D WLS along rows (Thomas): a = f (data), wt = wd, e = [ax|ay] (2n, read), b = u (out),
-// o = scratch [cp | dp] (2n). f0 = lambda. One thread per row.
+// 1-D WLS along rows (Thomas): a = f (data), wt = wd, e = [ax|ay] (2n, read, lambda in them),
+// b = u (out), o = scratch [cp | dp] (2n). f0 = lambda_t / lambda. One thread per row.
 @compute @workgroup_size(64)
 fn fgs_rows(@builtin(global_invocation_id) g: vec3<u32>) {
     let y = g.x; if (y >= p.h) { return; }
@@ -703,40 +703,79 @@ fn fgs_cols(@builtin(global_invocation_id) g: vec3<u32>) {
         b[k] = o[n + k] - o[k] * b[k + w];
     }
 }
-// CG for (W + lambda L) u = W d.  a = x, wt = wd, e = [ax|ay] -> b = A x   (f0 = lambda)
-fn wls_matvec(i: u32, x: u32, y: u32) -> f32 {
-    let n = p.w * p.h; let lam = p.f0;
-    var v = wt[i] * a[i];
-    if (x > 0u) { v += lam * e[i - 1u] * (a[i] - a[i - 1u]); }
-    if (x + 1u < p.w) { v += lam * e[i] * (a[i] - a[i + 1u]); }
-    if (y > 0u) { v += lam * e[n + i - p.w] * (a[i] - a[i - p.w]); }
-    if (y + 1u < p.h) { v += lam * e[n + i] * (a[i] - a[i + p.w]); }
-    return v;
-}
+// ---- the WLS system on the multigrid hierarchy (twins of depth::MgLevel). Per grid two
+// 2n buffers: [wd | dinv] and [ax | ay] (lambda in the edges); A x = wd x + sum a (x - x_nb).
+// mg_coarsen: 2x2 aggregation — a = fine [wd|dinv], wt = fine [ax|ay] (p.w x p.h) ->
+// b = coarse [wd|dinv] (its wd half), o = coarse [ax|ay] (p.ow x p.oh): the data weights
+// summed over the block, the fine edges a block boundary cuts summed into the coarse edge.
 @compute @workgroup_size(16, 16)
-fn cg_matvec(@builtin(global_invocation_id) g: vec3<u32>) {
-    let x = g.x; let y = g.y; if (x >= p.w || y >= p.h) { return; }
-    b[y * p.w + x] = wls_matvec(y * p.w + x, x, y);
+fn mg_coarsen(@builtin(global_invocation_id) g: vec3<u32>) {
+    let X = g.x; let Y = g.y;
+    if (X >= p.ow || Y >= p.oh) { return; }
+    let w = p.w; let h = p.h; let nf = w * h; let nc = p.ow * p.oh;
+    let y1 = min(2u * Y + 2u, h); let x1 = min(2u * X + 2u, w);
+    var s = 0.0; var sx = 0.0; var sy = 0.0;
+    for (var y = 2u * Y; y < y1; y++) {
+        for (var x = 2u * X; x < x1; x++) { s += a[y * w + x]; }
+        if (X + 1u < p.ow) { sx += wt[y * w + 2u * X + 1u]; }
+    }
+    if (Y + 1u < p.oh) {
+        let y = 2u * Y + 1u;
+        for (var x = 2u * X; x < x1; x++) { sy += wt[nf + y * w + x]; }
+    }
+    b[Y * p.ow + X] = s; o[Y * p.ow + X] = sx; o[nc + Y * p.ow + X] = sy;
 }
-// cg_init: given u in a, d in... : r = wd*d - A u, z = r*diag, p = z, and diag itself.
-// Inputs: a = u, wt = wd, e = [ax|ay]; b = d (read), o = r, and diag/z/p come from a second kernel.
+// mg_dinv: b = [wd|dinv] (dinv written), e = [ax|ay]
 @compute @workgroup_size(16, 16)
-fn cg_resid(@builtin(global_invocation_id) g: vec3<u32>) {
-    let x = g.x; let y = g.y; if (x >= p.w || y >= p.h) { return; }
-    let i = y * p.w + x; let n = p.w * p.h; let lam = p.f0;
-    o[i] = wt[i] * b[i] - wls_matvec(i, x, y);
-    var dg = wt[i];
-    if (x > 0u) { dg += lam * e[i - 1u]; }
-    if (x + 1u < p.w) { dg += lam * e[i]; }
-    if (y > 0u) { dg += lam * e[n + i - p.w]; }
-    if (y + 1u < p.h) { dg += lam * e[n + i]; }
-    o[n + i] = 1.0 / max(dg, 1e-12);   // o = [r | diag]
+fn mg_dinv(@builtin(global_invocation_id) g: vec3<u32>) {
+    let x = g.x; let y = g.y;
+    if (x >= p.w || y >= p.h) { return; }
+    let n = p.w * p.h; let i = y * p.w + x;
+    var v = b[i];
+    if (x > 0u) { v += e[i - 1u]; }
+    if (x + 1u < p.w) { v += e[i]; }
+    if (y > 0u) { v += e[n + i - p.w]; }
+    if (y + 1u < p.h) { v += e[n + i]; }
+    b[n + i] = 1.0 / max(v, 1e-12);
 }
-// z = r * diag, p = z:  a = [r|diag] (2n) -> b = z, o = p
+// mg_stencil: a = x, wt = rhs, b = [wd|dinv], e = [ax|ay] -> o;
+// flag 0: A x, 1: rhs - A x, 2: x + f0 dinv (rhs - A x)  (one damped-Jacobi sweep)
+@compute @workgroup_size(16, 16)
+fn mg_stencil(@builtin(global_invocation_id) g: vec3<u32>) {
+    let x = g.x; let y = g.y;
+    if (x >= p.w || y >= p.h) { return; }
+    let n = p.w * p.h; let i = y * p.w + x; let xi = a[i];
+    var v = b[i] * xi;
+    if (x > 0u) { v += e[i - 1u] * (xi - a[i - 1u]); }
+    if (x + 1u < p.w) { v += e[i] * (xi - a[i + 1u]); }
+    if (y > 0u) { v += e[n + i - p.w] * (xi - a[i - p.w]); }
+    if (y + 1u < p.h) { v += e[n + i] * (xi - a[i + p.w]); }
+    if (p.flag == 0u) { o[i] = v; }
+    else if (p.flag == 1u) { o[i] = wt[i] - v; }
+    else { o[i] = xi + p.f0 * b[n + i] * (wt[i] - v); }
+}
+// mg_jac0: the sweep from zero, o = f0 dinv rhs:  a = rhs, b = [wd|dinv]
 @compute @workgroup_size(256)
-fn cg_zp(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+fn mg_jac0(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = gid1(g, nwg); let n = p.w * p.h; if (i >= n) { return; }
-    let z = a[i] * a[n + i]; b[i] = z; o[i] = z;
+    o[i] = p.f0 * b[n + i] * a[i];
+}
+// mg_restrict: a = fine residual (p.w x p.h) -> o = coarse rhs (p.ow x p.oh), block sums
+@compute @workgroup_size(16, 16)
+fn mg_restrict(@builtin(global_invocation_id) g: vec3<u32>) {
+    let X = g.x; let Y = g.y;
+    if (X >= p.ow || Y >= p.oh) { return; }
+    let y1 = min(2u * Y + 2u, p.h); let x1 = min(2u * X + 2u, p.w);
+    var s = 0.0;
+    for (var y = 2u * Y; y < y1; y++) { for (var x = 2u * X; x < x1; x++) { s += a[y * p.w + x]; } }
+    o[Y * p.ow + X] = s;
+}
+// mg_prolong: o (fine, p.w x p.h) += a (coarse, p.ow wide): the correction injected
+@compute @workgroup_size(16, 16)
+fn mg_prolong(@builtin(global_invocation_id) g: vec3<u32>) {
+    let x = g.x; let y = g.y;
+    if (x >= p.w || y >= p.h) { return; }
+    o[y * p.w + x] += a[(y / 2u) * p.ow + x / 2u];
 }
 // workgroup-partial dot product: a . wt over n = w*h -> o[wg]
 var<workgroup> sdot: array<f32, 256>;
@@ -753,7 +792,7 @@ fn dot_partial(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invoc
     if (t == 0u) { o[wg.y * nwg.x + wg.x] = sdot[0]; }
 }
 // sum the klen partials in a into scal (o): flag 0: rz = sum; 1: pap = sum, alpha = rz/pap;
-// 2: rz_new = sum, beta = rz_new/rz, rz = rz_new.  scal = [rz, alpha, beta, pap]
+// 2: rz_new = sum, beta = rz_new/rz, rz = rz_new; 3: rr = sum.  scal = [rz, alpha, beta, pap, rr]
 @compute @workgroup_size(256)
 fn reduce_scal(@builtin(local_invocation_index) t: u32) {
     var s = 0.0;
@@ -768,21 +807,15 @@ fn reduce_scal(@builtin(local_invocation_index) t: u32) {
         let v = sdot[0];
         if (p.flag == 0u) { o[0] = v; }
         else if (p.flag == 1u) { o[3] = v; o[1] = select(0.0, o[0] / v, v > 0.0); }
-        else { o[2] = select(0.0, v / o[0], o[0] > 0.0); o[0] = v; }
+        else if (p.flag == 2u) { o[2] = select(0.0, v / o[0], o[0] > 0.0); o[0] = v; }
+        else { o[4] = v; }
     }
 }
-// u += alpha p:  a = p, b = u, u(u32) = scal
+// b += alpha a (flag 0) or b -= alpha a (flag 1):  u(u32) = scal
 @compute @workgroup_size(256)
 fn cg_axpy_u(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = gid1(g, nwg); if (i >= p.w * p.h) { return; }
-    b[i] += bitcast<f32>(u[1]) * a[i];
-}
-// r -= alpha Ap; z = r * diag:  a = Ap, b = [r|diag] (2n), o = z, u = scal
-@compute @workgroup_size(256)
-fn cg_update_rz(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
-    let i = gid1(g, nwg); let n = p.w * p.h; if (i >= n) { return; }
-    let r = b[i] - bitcast<f32>(u[1]) * a[i];
-    b[i] = r; o[i] = r * b[n + i];
+    b[i] += select(1.0, -1.0, p.flag == 1u) * bitcast<f32>(u[1]) * a[i];
 }
 // p = z + beta p:  a = z, b = p, u = scal
 @compute @workgroup_size(256)

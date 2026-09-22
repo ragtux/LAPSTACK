@@ -31,8 +31,9 @@
 //!    pixels (flat, noisy, or ambiguous profiles) take their depth from
 //!    confident neighbours along paths that do not cross image edges. The
 //!    separable *fast global smoother* of Min et al. (IEEE TIP 2014) gives the
-//!    initial guess and a Jacobi-preconditioned conjugate gradient solves the
-//!    2-D system exactly. Regularising in the depth domain with confidence
+//!    initial guess and a conjugate gradient preconditioned by a multigrid
+//!    V-cycle (`WlsSolver`) solves the 2-D system to a relative residual of
+//!    1e-5. Regularising in the depth domain with confidence
 //!    weights is the 2-D counterpart of the focus-volume WLS of Ali & Mahmood
 //!    (Information Sciences, 2020).
 //! 5. **Upsampling** back to full resolution with the guided filter (the
@@ -42,7 +43,7 @@
 //! Output: a per-pixel frame index in `[0, n−1]` (fractional) plus a
 //! confidence map in `[0, 1]`.
 
-use crate::pyramid::{Img3, for_rows, reflect};
+use crate::pyramid::{Img3, for_rows, half, reflect};
 use rayon::prelude::*;
 use crate::stack::FrameSource;
 use std::time::Instant;
@@ -220,6 +221,15 @@ pub fn upsample_bilinear(g: &[f32], dw: usize, dh: usize, w: usize, h: usize, k:
 struct ColPtr(*mut f32);
 unsafe impl Send for ColPtr {}
 unsafe impl Sync for ColPtr {}
+impl ColPtr {
+    /// The element `off` in; a method so a closure captures the whole
+    /// (`Sync`) wrapper and not its raw pointer.
+    #[inline]
+    fn at(self, off: usize) -> *mut f32 {
+        // SAFETY: callers index inside the buffer the wrapper was made from.
+        unsafe { self.0.add(off) }
+    }
+}
 
 const COL_BLOCK: usize = 64;
 
@@ -235,11 +245,17 @@ fn par_col_blocks<F: Fn(usize, usize, ColPtr) + Sync>(out: &mut [f32], w: usize,
 }
 
 /// Box filter (mean over a `(2r+1)²` window clipped at the image border).
+///
+/// It owns its scratch plane and writes into a caller's buffer: a fresh
+/// working-grid plane is 45 MB at 45 MP, and faulting one in from a hundred
+/// threads at once costs more than the sums do (170 ms against 20 ms), so
+/// the depth pass's filters keep their planes from one slice to the next.
 pub struct BoxFilter {
     w: usize,
     h: usize,
     r: usize,
     inv_count: Vec<f32>,
+    tmp: Vec<f32>,
 }
 
 impl BoxFilter {
@@ -252,15 +268,17 @@ impl BoxFilter {
                 *o = 1.0 / (cy * cnt(w, x));
             }
         });
-        BoxFilter { w, h, r, inv_count }
+        BoxFilter { w, h, r, inv_count, tmp: vec![0f32; w * h] }
     }
 
-    /// Window sums (not normalised).
-    pub fn sum(&self, src: &[f32]) -> Vec<f32> {
+    /// Window sums (not normalised) into `out`.
+    pub fn sum_into(&mut self, src: &[f32], out: &mut [f32]) {
         let (w, h, r) = (self.w, self.h, self.r);
+        assert_eq!(src.len(), w * h);
+        assert_eq!(out.len(), w * h);
         // horizontal moving sum
-        let mut tmp = vec![0f32; w * h];
-        for_rows(&mut tmp, w, |y, row| {
+        let tmp = &mut self.tmp;
+        for_rows(tmp, w, |y, row| {
             let s = &src[y * w..y * w + w];
             let mut acc: f32 = s[..(r + 1).min(w)].iter().sum();
             for x in 0..w {
@@ -274,10 +292,11 @@ impl BoxFilter {
             }
         });
         // vertical moving sum, per column block
-        let mut out = vec![0f32; w * h];
-        par_col_blocks(&mut out, w, |x0, x1, p| {
+        let tmp: &[f32] = tmp;
+        par_col_blocks(out, w, |x0, x1, p| {
             let bw = x1 - x0;
-            let mut acc = vec![0f32; bw];
+            let mut acc = [0f32; COL_BLOCK];
+            let acc = &mut acc[..bw];
             for y in 0..(r + 1).min(h) {
                 for (a, v) in acc.iter_mut().zip(&tmp[y * w + x0..y * w + x1]) {
                     *a += v;
@@ -287,7 +306,7 @@ impl BoxFilter {
                 // SAFETY: this block owns columns x0..x1 of every row; no other
                 // worker touches them, and `out` outlives the parallel loop.
                 let dst = unsafe { std::slice::from_raw_parts_mut(p.0.add(y * w + x0), bw) };
-                dst.copy_from_slice(&acc);
+                dst.copy_from_slice(acc);
                 if y + r + 1 < h {
                     for (a, v) in acc.iter_mut().zip(&tmp[(y + r + 1) * w + x0..(y + r + 1) * w + x1]) {
                         *a += v;
@@ -300,54 +319,82 @@ impl BoxFilter {
                 }
             }
         });
-        out
     }
 
-    pub fn mean(&self, src: &[f32]) -> Vec<f32> {
-        let mut s = self.sum(src);
-        s.par_iter_mut().zip(&self.inv_count).for_each(|(v, c)| *v *= c);
-        s
+    /// Window means into `out`.
+    pub fn mean_into(&mut self, src: &[f32], out: &mut [f32]) {
+        self.sum_into(src, out);
+        out.par_iter_mut().zip(&self.inv_count).for_each(|(v, c)| *v *= c);
+    }
+
+    pub fn mean(&mut self, src: &[f32]) -> Vec<f32> {
+        let mut out = vec![0f32; src.len()];
+        self.mean_into(src, &mut out);
+        out
     }
 }
 
-/// Guided filter (He, Sun & Tang 2013) with a fixed grayscale guide.
+/// Guided filter (He, Sun & Tang 2013) with a fixed grayscale guide. Made
+/// once per guide and radius, it keeps the guide's statistics and the four
+/// planes a filtering needs, so a slice costs only the arithmetic.
 pub struct GuidedFilter {
     guide: Vec<f32>,
     mean_i: Vec<f32>,
     var_i: Vec<f32>,
     bf: BoxFilter,
     eps: f32,
+    /// mean_p / mean_b, I·p / corr_Ip, a, b
+    s: [Vec<f32>; 4],
 }
 
 impl GuidedFilter {
     pub fn new(guide: Vec<f32>, w: usize, h: usize, r: usize, eps: f32) -> GuidedFilter {
-        let bf = BoxFilter::new(w, h, r);
-        let mean_i = bf.mean(&guide);
-        let ii: Vec<f32> = guide.par_iter().map(|v| v * v).collect();
-        let mut var_i = bf.mean(&ii);
+        let n = w * h;
+        let mut bf = BoxFilter::new(w, h, r);
+        let mut mean_i = vec![0f32; n];
+        bf.mean_into(&guide, &mut mean_i);
+        let mut var_i = vec![0f32; n];
+        let mut ii = vec![0f32; n];
+        ii.par_iter_mut().zip(&guide).for_each(|(o, v)| *o = v * v);
+        bf.mean_into(&ii, &mut var_i);
         var_i.par_iter_mut().zip(&mean_i).for_each(|(v, m)| *v = (*v - m * m).max(0.0));
-        GuidedFilter { guide, mean_i, var_i, bf, eps }
+        let s = [ii, vec![0f32; n], vec![0f32; n], vec![0f32; n]];
+        GuidedFilter { guide, mean_i, var_i, bf, eps, s }
     }
 
-    /// Linear coefficients `(a, b)` such that `q ≈ a·I + b` (already box-averaged).
-    pub fn coeffs(&self, p: &[f32]) -> (Vec<f32>, Vec<f32>) {
-        let mean_p = self.bf.mean(p);
-        let ip: Vec<f32> = self.guide.par_iter().zip(p).map(|(i, p)| i * p).collect();
-        let corr_ip = self.bf.mean(&ip);
-        let mut a = vec![0f32; p.len()];
-        let mut b = vec![0f32; p.len()];
-        a.par_iter_mut().zip(b.par_iter_mut()).enumerate().for_each(|(k, (a, b))| {
-            let cov = corr_ip[k] - self.mean_i[k] * mean_p[k];
-            *a = cov / (self.var_i[k] + self.eps);
-            *b = mean_p[k] - *a * self.mean_i[k];
+    /// The box-averaged linear coefficients, `q ≈ ā·I + b̄`, left in the
+    /// scratch planes `s[1]` (ā) and `s[0]` (b̄).
+    fn coeffs_into(&mut self, p: &[f32]) {
+        let [s0, s1, s2, s3] = &mut self.s;
+        let (eps, guide, mean_i, var_i) = (self.eps, &self.guide, &self.mean_i, &self.var_i);
+        self.bf.mean_into(p, s0); // mean_p
+        s1.par_iter_mut().zip(guide).zip(p).for_each(|((o, i), p)| *o = i * p);
+        self.bf.mean_into(s1, s2); // corr_Ip
+        s2.par_iter_mut().zip(s3.par_iter_mut()).zip(s0.par_iter()).enumerate().for_each(|(k, ((a, b), mp))| {
+            let cov = *a - mean_i[k] * mp;
+            *a = cov / (var_i[k] + eps); // a
+            *b = mp - *a * mean_i[k]; // b
         });
-        (self.bf.mean(&a), self.bf.mean(&b))
+        self.bf.mean_into(s2, s1); // ā
+        self.bf.mean_into(s3, s0); // b̄
     }
 
-    pub fn filter(&self, p: &[f32]) -> Vec<f32> {
-        let (a, b) = self.coeffs(p);
+    /// Linear coefficients `(ā, b̄)` such that `q ≈ ā·I + b̄` (already box-averaged).
+    pub fn coeffs(&mut self, p: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        self.coeffs_into(p);
+        (self.s[1].clone(), self.s[0].clone())
+    }
+
+    /// The filtered plane into `out`.
+    pub fn filter_into(&mut self, p: &[f32], out: &mut [f32]) {
+        self.coeffs_into(p);
+        let (a, b) = (&self.s[1], &self.s[0]);
+        out.par_iter_mut().enumerate().for_each(|(k, o)| *o = a[k] * self.guide[k] + b[k]);
+    }
+
+    pub fn filter(&mut self, p: &[f32]) -> Vec<f32> {
         let mut q = vec![0f32; p.len()];
-        q.par_iter_mut().enumerate().for_each(|(k, o)| *o = a[k] * self.guide[k] + b[k]);
+        self.filter_into(p, &mut q);
         q
     }
 }
@@ -641,13 +688,21 @@ fn solve_rows(u: &mut [f32], f: &[f32], wd: &[f32], a: &[f32], w: usize, lam: f3
 }
 
 /// Same as [`solve_rows`] along columns (`a` = weight between `y` and `y+1`),
-/// processed in column blocks for cache locality.
-fn solve_cols(u: &mut [f32], f: &[f32], wd: &[f32], a: &[f32], w: usize, h: usize, lam: f32) {
+/// processed in column blocks for cache locality. `scratch` holds two planes
+/// (the sweep's `cp` and `dp`); each block uses its own columns of them.
+fn solve_cols(u: &mut [f32], f: &[f32], wd: &[f32], a: &[f32], w: usize, h: usize, lam: f32, scratch: &mut [f32]) {
+    let n = w * h;
+    assert!(scratch.len() >= 2 * n);
+    let sp = ColPtr(scratch.as_mut_ptr());
     par_col_blocks(u, w, |x0, x1, p| {
         let bw = x1 - x0;
-        let mut cp = vec![0f32; h * bw];
-        let mut dp = vec![0f32; h * bw];
+        // SAFETY: this block owns columns x0..x1 of every row of `u` and of
+        // both scratch planes; the row slices below are disjoint.
+        let cp = |y: usize| unsafe { std::slice::from_raw_parts_mut(sp.at(y * w + x0), bw) };
+        let dp = |y: usize| unsafe { std::slice::from_raw_parts_mut(sp.at(n + y * w + x0), bw) };
         for y in 0..h {
+            let (cprev, dprev): (&[f32], &[f32]) = if y > 0 { (cp(y - 1), dp(y - 1)) } else { (&[], &[]) };
+            let (cpy, dpy) = (cp(y), dp(y));
             for (j, x) in (x0..x1).enumerate() {
                 let i = y * w + x;
                 let prev_a = if y > 0 { a[i - w] } else { 0.0 };
@@ -655,135 +710,365 @@ fn solve_cols(u: &mut [f32], f: &[f32], wd: &[f32], a: &[f32], w: usize, h: usiz
                 let diag = wd[i] + lam * (prev_a + ai);
                 let lower = -lam * prev_a;
                 let upper = -lam * ai;
-                let (cprev, dprev) = if y > 0 { (cp[(y - 1) * bw + j], dp[(y - 1) * bw + j]) } else { (0.0, 0.0) };
-                let m = diag - lower * cprev;
+                let (c0, d0) = if y > 0 { (cprev[j], dprev[j]) } else { (0.0, 0.0) };
+                let m = diag - lower * c0;
                 let m = if m.abs() < 1e-12 { 1e-12 } else { m };
-                cp[y * bw + j] = upper / m;
-                dp[y * bw + j] = (wd[i] * f[i] - lower * dprev) / m;
+                cpy[j] = upper / m;
+                dpy[j] = (wd[i] * f[i] - lower * d0) / m;
             }
         }
-        // SAFETY: this block owns columns x0..x1 of every row of `u`.
-        let col = |y: usize| unsafe { std::slice::from_raw_parts_mut(p.0.add(y * w + x0), bw) };
-        col(h - 1).copy_from_slice(&dp[(h - 1) * bw..h * bw]);
+        let col = |y: usize| unsafe { std::slice::from_raw_parts_mut(p.at(y * w + x0), bw) };
+        col(h - 1).copy_from_slice(dp(h - 1));
         for y in (0..h - 1).rev() {
             // rows y and y+1 are disjoint memory
-            let next = unsafe { std::slice::from_raw_parts(p.0.add((y + 1) * w + x0), bw) };
+            let next = unsafe { std::slice::from_raw_parts(p.at((y + 1) * w + x0), bw) };
             let row = col(y);
+            let (cpy, dpy) = (cp(y), dp(y));
             for j in 0..bw {
-                row[j] = dp[y * bw + j] - cp[y * bw + j] * next[j];
+                row[j] = dpy[j] - cpy[j] * next[j];
             }
         }
     });
 }
 
-/// Edge-aware WLS: argmin_u Σ w_p (u_p − d_p)² + λ Σ a_pq (u_p − u_q)².
-/// Fast-global-smoother initial guess (Min et al. 2014) + preconditioned CG.
-/// Returns the solution and the final relative residual.
-pub fn wls_solve(d: &[f32], conf: &[f32], guide: &[f32], w: usize, h: usize, lambda: f32, sigma_c: f32, max_iters: usize) -> (Vec<f32>, f32) {
-    let n = w * h;
-    let (ax, ay) = edge_weights(guide, w, h, sigma_c);
-    const EPS_DATA: f32 = 1e-4;
-    let wd: Vec<f32> = conf.iter().map(|c| c.max(0.0) + EPS_DATA).collect();
-    if w == 1 || h == 1 {
-        // degenerate: 1-D exact solve
-        let mut u = vec![0f32; n];
-        if h == 1 {
-            solve_rows(&mut u, d, &wd, &ax, w, lambda);
-        } else {
-            solve_cols(&mut u, d, &wd, &ay, w, h, lambda);
-        }
-        return (u, 0.0);
+// ------------------------------------------------------------- WLS solver
+
+/// The WLS operator `A = W + Σ a_pq` (the smoothness weight folded into the
+/// edge weights) on one grid of the multigrid hierarchy, with the planes a
+/// V-cycle needs there.
+struct MgLevel {
+    w: usize,
+    h: usize,
+    /// Data weight per cell; on the coarse grids the sum over the block.
+    wd: Vec<f32>,
+    /// λ·a between (x, y) and (x+1, y), and between (x, y) and (x, y+1); on
+    /// the coarse grids the sum of the fine edges the block boundary cuts.
+    ax: Vec<f32>,
+    ay: Vec<f32>,
+    /// 1 / diag(A).
+    dinv: Vec<f32>,
+    x: Vec<f32>,
+    b: Vec<f32>,
+    r: Vec<f32>,
+}
+
+/// Damped-Jacobi weight (4/5 is the smoothing optimum of the 5-point stencil).
+pub const MG_OMEGA: f32 = 0.8;
+/// Smoothing sweeps before and after the coarse correction, and on the
+/// coarsest grid (where they are the solve).
+pub const MG_PRE: usize = 1;
+pub const MG_POST: usize = 1;
+pub const MG_COARSE: usize = 32;
+/// Coarsen until the grid is this small on its longer side.
+pub const MG_MIN: usize = 16;
+
+impl MgLevel {
+    fn new(w: usize, h: usize) -> MgLevel {
+        let n = w * h;
+        MgLevel { w, h, wd: vec![0.0; n], ax: vec![0.0; n], ay: vec![0.0; n], dinv: vec![0.0; n], x: vec![0.0; n], b: vec![0.0; n], r: vec![0.0; n] }
     }
 
-    // --- initial guess: separable FGS sweeps with the λ_t schedule.
-    // Pass 1 uses the confidence-weighted data term so holes get filled by
-    // interpolation; later passes carry the previous output (unit weight).
-    const T: usize = 3;
-    let ones = vec![1f32; n];
-    let mut u = vec![0f32; n];
-    let mut f = d.to_vec();
-    for t in 1..=T {
-        let lam_t = 1.5 * lambda * 4f32.powi((T - t) as i32) / (4f32.powi(T as i32) - 1.0);
-        let wt: &[f32] = if t == 1 { &wd } else { &ones };
-        solve_rows(&mut u, &f, wt, &ax, w, lam_t);
-        f.copy_from_slice(&u);
-        solve_cols(&mut u, &f, &ones, &ay, w, h, lam_t);
-        f.copy_from_slice(&u);
-    }
-
-    // --- Jacobi-PCG on (W + λ L) u = W d
-    let matvec = |x: &[f32], out: &mut [f32]| {
+    /// `out_i = f(i, (A x)_i)` over the grid.
+    fn apply<F: Fn(usize, f32) -> f32 + Sync>(&self, x: &[f32], out: &mut [f32], f: F) {
+        let (w, h) = (self.w, self.h);
+        let (wd, ax, ay) = (&self.wd, &self.ax, &self.ay);
         for_rows(out, w, |y, row| {
             let o = y * w;
             for i in 0..w {
                 let k = o + i;
-                let mut v = wd[k] * x[k];
+                let xk = x[k];
+                let mut v = wd[k] * xk;
                 if i > 0 {
-                    v += lambda * ax[k - 1] * (x[k] - x[k - 1]);
+                    v += ax[k - 1] * (xk - x[k - 1]);
                 }
                 if i + 1 < w {
-                    v += lambda * ax[k] * (x[k] - x[k + 1]);
+                    v += ax[k] * (xk - x[k + 1]);
                 }
                 if y > 0 {
-                    v += lambda * ay[k - w] * (x[k] - x[k - w]);
+                    v += ay[k - w] * (xk - x[k - w]);
                 }
                 if y + 1 < h {
-                    v += lambda * ay[k] * (x[k] - x[k + w]);
+                    v += ay[k] * (xk - x[k + w]);
                 }
-                row[i] = v;
+                row[i] = f(k, v);
             }
         });
-    };
-    let dot = |a: &[f32], b: &[f32]| -> f64 { a.par_iter().zip(b).map(|(x, y)| (*x as f64) * (*y as f64)).sum() };
-    let mut diag = vec![0f32; n];
-    for_rows(&mut diag, w, |y, row| {
-        for i in 0..w {
-            let k = y * w + i;
-            let mut v = wd[k];
-            if i > 0 {
-                v += lambda * ax[k - 1];
+    }
+
+    fn set_dinv(&mut self) {
+        let (w, h) = (self.w, self.h);
+        let (wd, ax, ay) = (&self.wd, &self.ax, &self.ay);
+        for_rows(&mut self.dinv, w, |y, row| {
+            for i in 0..w {
+                let k = y * w + i;
+                let mut v = wd[k];
+                if i > 0 {
+                    v += ax[k - 1];
+                }
+                if i + 1 < w {
+                    v += ax[k];
+                }
+                if y > 0 {
+                    v += ay[k - w];
+                }
+                if y + 1 < h {
+                    v += ay[k];
+                }
+                row[i] = 1.0 / v.max(1e-12);
             }
-            if i + 1 < w {
-                v += lambda * ax[k];
+        });
+    }
+
+    /// One damped-Jacobi sweep on `x` for `b`: x += ω D⁻¹ (b − A x).
+    fn jacobi(&mut self, zero_start: bool) {
+        let dinv = &self.dinv;
+        if zero_start {
+            self.x.par_iter_mut().zip(&self.b).zip(dinv).for_each(|((x, b), d)| *x = MG_OMEGA * d * b);
+            return;
+        }
+        let (x, b) = (&self.x, &self.b);
+        let mut r = std::mem::take(&mut self.r);
+        self.apply(x, &mut r, |k, ax| x[k] + MG_OMEGA * dinv[k] * (b[k] - ax));
+        self.r = std::mem::replace(&mut self.x, r);
+    }
+
+    /// The 2×2 aggregation of this grid: the Galerkin operator of a
+    /// piecewise-constant prolongation (data weights summed over the block,
+    /// the fine edges cut by a block boundary summed into the coarse edge).
+    fn coarsen(&self) -> MgLevel {
+        let (w, h) = (self.w, self.h);
+        let (cw, ch) = (half(w), half(h));
+        let mut c = MgLevel::new(cw, ch);
+        let (wd, ax, ay) = (&self.wd, &self.ax, &self.ay);
+        for_rows(&mut c.wd, cw, |yy, row| {
+            for y in 2 * yy..(2 * yy + 2).min(h) {
+                for (xx, o) in row.iter_mut().enumerate() {
+                    *o += wd[y * w..y * w + w][2 * xx..(2 * xx + 2).min(w)].iter().sum::<f32>();
+                }
             }
-            if y > 0 {
-                v += lambda * ay[k - w];
+        });
+        for_rows(&mut c.ax, cw, |yy, row| {
+            for y in 2 * yy..(2 * yy + 2).min(h) {
+                for (xx, o) in row.iter_mut().enumerate() {
+                    if xx + 1 < cw {
+                        *o += ax[y * w + 2 * xx + 1];
+                    }
+                }
             }
-            if y + 1 < h {
-                v += lambda * ay[k];
+        });
+        for_rows(&mut c.ay, cw, |yy, row| {
+            if yy + 1 < ch {
+                let y = 2 * yy + 1;
+                for (xx, o) in row.iter_mut().enumerate() {
+                    *o = ay[y * w..y * w + w][2 * xx..(2 * xx + 2).min(w)].iter().sum::<f32>();
+                }
             }
-            row[i] = 1.0 / v.max(1e-12);
+        });
+        c
+    }
+
+    /// The data weights of the coarse grid `c` from this grid's (after a
+    /// reweighting; the edges do not change).
+    fn coarsen_wd_into(&self, c: &mut MgLevel) {
+        let (w, h, cw) = (self.w, self.h, c.w);
+        let wd = &self.wd;
+        for_rows(&mut c.wd, cw, |yy, row| {
+            row.fill(0.0);
+            for y in 2 * yy..(2 * yy + 2).min(h) {
+                for (xx, o) in row.iter_mut().enumerate() {
+                    *o += wd[y * w..y * w + w][2 * xx..(2 * xx + 2).min(w)].iter().sum::<f32>();
+                }
+            }
+        });
+    }
+}
+
+/// `x += P x_c`: the coarse correction injected (piecewise constant).
+fn prolong_add(x: &mut [f32], w: usize, xc: &[f32], cw: usize) {
+    for_rows(x, w, |y, row| {
+        let c = &xc[(y / 2) * cw..(y / 2) * cw + cw];
+        for (i, o) in row.iter_mut().enumerate() {
+            *o += c[i / 2];
         }
     });
-    let b: Vec<f32> = wd.par_iter().zip(d).map(|(w, d)| w * d).collect();
-    let bnorm = dot(&b, &b).sqrt().max(1e-30);
-    let mut r = vec![0f32; n];
-    matvec(&u, &mut r);
-    r.par_iter_mut().zip(&b).for_each(|(r, b)| *r = b - *r);
-    let mut z: Vec<f32> = r.par_iter().zip(&diag).map(|(r, d)| r * d).collect();
-    let mut p = z.clone();
-    let mut rz = dot(&r, &z);
-    let mut ap = vec![0f32; n];
-    let mut rel = (dot(&r, &r).sqrt() / bnorm) as f32;
-    for _ in 0..max_iters {
-        if rel < 1e-5 {
-            break;
+}
+
+/// `b_c = Pᵀ r`: the residual summed over each block.
+fn restrict(r: &[f32], w: usize, h: usize, bc: &mut [f32], cw: usize) {
+    for_rows(bc, cw, |yy, row| {
+        row.fill(0.0);
+        for y in 2 * yy..(2 * yy + 2).min(h) {
+            let s = &r[y * w..y * w + w];
+            for (xx, o) in row.iter_mut().enumerate() {
+                *o += s[2 * xx..(2 * xx + 2).min(w)].iter().sum::<f32>();
+            }
         }
-        matvec(&p, &mut ap);
-        let pap = dot(&p, &ap);
-        if pap <= 0.0 {
-            break;
+    });
+}
+
+/// One V-cycle from `levels[0]` (whose `b` is set) into its `x`.
+fn vcycle(levels: &mut [MgLevel]) {
+    let Some((top, rest)) = levels.split_first_mut() else { return };
+    if rest.is_empty() {
+        for k in 0..MG_COARSE {
+            top.jacobi(k == 0);
         }
-        let alpha = (rz / pap) as f32;
-        u.par_iter_mut().zip(&p).for_each(|(u, p)| *u += alpha * p);
-        r.par_iter_mut().zip(&ap).for_each(|(r, ap)| *r -= alpha * ap);
-        z.par_iter_mut().zip(&r).zip(&diag).for_each(|((z, r), d)| *z = r * d);
-        let rz_new = dot(&r, &z);
-        let beta = (rz_new / rz) as f32;
-        rz = rz_new;
-        p.par_iter_mut().zip(&z).for_each(|(p, z)| *p = z + beta * *p);
-        rel = (dot(&r, &r).sqrt() / bnorm) as f32;
+        return;
     }
+    for k in 0..MG_PRE {
+        top.jacobi(k == 0);
+    }
+    {
+        let (x, b) = (&top.x, &top.b);
+        let mut r = std::mem::take(&mut top.r);
+        top.apply(x, &mut r, |k, ax| b[k] - ax);
+        top.r = r;
+    }
+    restrict(&top.r, top.w, top.h, &mut rest[0].b, rest[0].w);
+    vcycle(rest);
+    prolong_add(&mut top.x, top.w, &rest[0].x, rest[0].w);
+    for _ in 0..MG_POST {
+        top.jacobi(false);
+    }
+}
+
+/// Edge-aware WLS: argmin_u Σ w_p (u_p − d_p)² + λ Σ a_pq (u_p − u_q)², the
+/// 2-D system `(W + λL) u = W d` solved by conjugate gradients from the
+/// separable fast-global-smoother guess of Min et al. 2014, preconditioned
+/// by one multigrid V-cycle (2×2 aggregation, damped Jacobi). A plain
+/// Jacobi preconditioner left the low modes to the CG: on a 4140×2760 grid
+/// it needed 300 iterations for a residual of 1e-5 (a few tens with the
+/// V-cycle), and where the confidence is low over a large area (a flat
+/// wall) it did not converge at all. The solver keeps its planes between
+/// solves, so the robust reweighting's second solve costs no allocation.
+pub struct WlsSolver {
+    w: usize,
+    h: usize,
+    lambda: f32,
+    /// Edge weights exp(−|ΔI|/σ) (without λ), for the separable sweeps.
+    ex: Vec<f32>,
+    ey: Vec<f32>,
+    levels: Vec<MgLevel>,
+    /// Column sweeps' scratch (two planes), CG vectors.
+    cd: Vec<f32>,
+    r: Vec<f32>,
+    z: Vec<f32>,
+    p: Vec<f32>,
+    ap: Vec<f32>,
+    f: Vec<f32>,
+}
+
+impl WlsSolver {
+    pub fn new(guide: &[f32], w: usize, h: usize, lambda: f32, sigma_c: f32) -> WlsSolver {
+        let n = w * h;
+        let (ex, ey) = edge_weights(guide, w, h, sigma_c);
+        let mut top = MgLevel::new(w, h);
+        top.ax.par_iter_mut().zip(&ex).for_each(|(a, e)| *a = lambda * e);
+        top.ay.par_iter_mut().zip(&ey).for_each(|(a, e)| *a = lambda * e);
+        let mut levels = vec![top];
+        while levels.last().unwrap().w.max(levels.last().unwrap().h) > MG_MIN {
+            let c = levels.last().unwrap().coarsen();
+            levels.push(c);
+        }
+        WlsSolver { w, h, lambda, ex, ey, levels, cd: vec![0.0; 2 * n], r: vec![0.0; n], z: vec![0.0; n], p: vec![0.0; n], ap: vec![0.0; n], f: vec![0.0; n] }
+    }
+
+    /// The data weights: the confidence (plus a floor so the system is
+    /// definite where nothing is known), aggregated down the hierarchy.
+    pub fn set_weights(&mut self, conf: &[f32]) {
+        const EPS_DATA: f32 = 1e-4;
+        self.levels[0].wd.par_iter_mut().zip(conf).for_each(|(w, c)| *w = c.max(0.0) + EPS_DATA);
+        for l in 0..self.levels.len() {
+            if l > 0 {
+                let (fine, coarse) = self.levels.split_at_mut(l);
+                fine[l - 1].coarsen_wd_into(&mut coarse[0]);
+            }
+            self.levels[l].set_dinv();
+        }
+    }
+
+    /// Solve for the data `d` into `u`; returns the final relative residual
+    /// and the CG iterations taken.
+    pub fn solve(&mut self, d: &[f32], max_iters: usize, u: &mut [f32]) -> (f32, usize) {
+        let (w, h, lambda) = (self.w, self.h, self.lambda);
+        let wd = &self.levels[0].wd;
+        if w == 1 || h == 1 {
+            // degenerate: 1-D exact solve
+            if h == 1 {
+                solve_rows(u, d, wd, &self.ex, w, lambda);
+            } else {
+                solve_cols(u, d, wd, &self.ey, w, h, lambda, &mut self.cd);
+            }
+            return (0.0, 0);
+        }
+
+        // --- initial guess: separable FGS sweeps with the λ_t schedule.
+        // Pass 1 uses the confidence-weighted data term so holes get filled by
+        // interpolation; later passes carry the previous output (unit weight).
+        const T: usize = 3;
+        self.p.fill(1.0);
+        let ones = &self.p; // all ones for the sweeps' unit data weight
+        let f = &mut self.f;
+        f.copy_from_slice(d);
+        for t in 1..=T {
+            let lam_t = 1.5 * lambda * 4f32.powi((T - t) as i32) / (4f32.powi(T as i32) - 1.0);
+            let wt: &[f32] = if t == 1 { wd } else { ones };
+            solve_rows(u, f, wt, &self.ex, w, lam_t);
+            f.copy_from_slice(u);
+            solve_cols(u, f, ones, &self.ey, w, h, lam_t, &mut self.cd);
+            f.copy_from_slice(u);
+        }
+
+        // --- multigrid-preconditioned CG on (W + λL) u = W d
+        let dot = |a: &[f32], b: &[f32]| -> f64 { a.par_iter().zip(b).map(|(x, y)| (*x as f64) * (*y as f64)).sum() };
+        let b = &mut self.f;
+        b.par_iter_mut().zip(wd).zip(d).for_each(|((b, w), d)| *b = w * d);
+        let bnorm = dot(b, b).sqrt().max(1e-30);
+        let top = &self.levels[0];
+        top.apply(u, &mut self.r, |k, au| b[k] - au);
+        let precond = |levels: &mut Vec<MgLevel>, r: &[f32], z: &mut [f32]| {
+            levels[0].b.copy_from_slice(r);
+            vcycle(levels);
+            z.copy_from_slice(&levels[0].x);
+        };
+        precond(&mut self.levels, &self.r, &mut self.z);
+        self.p.copy_from_slice(&self.z);
+        let mut rz = dot(&self.r, &self.z);
+        let mut rel = (dot(&self.r, &self.r).sqrt() / bnorm) as f32;
+        let mut iters = 0;
+        for _ in 0..max_iters {
+            if rel < 1e-5 {
+                break;
+            }
+            iters += 1;
+            self.levels[0].apply(&self.p, &mut self.ap, |_, v| v);
+            let pap = dot(&self.p, &self.ap);
+            if pap <= 0.0 {
+                break;
+            }
+            let alpha = (rz / pap) as f32;
+            u.par_iter_mut().zip(&self.p).for_each(|(u, p)| *u += alpha * p);
+            self.r.par_iter_mut().zip(&self.ap).for_each(|(r, ap)| *r -= alpha * ap);
+            rel = (dot(&self.r, &self.r).sqrt() / bnorm) as f32;
+            if rel < 1e-5 {
+                break;
+            }
+            precond(&mut self.levels, &self.r, &mut self.z);
+            let rz_new = dot(&self.r, &self.z);
+            let beta = (rz_new / rz) as f32;
+            rz = rz_new;
+            self.p.par_iter_mut().zip(&self.z).for_each(|(p, z)| *p = z + beta * *p);
+        }
+        (rel, iters)
+    }
+}
+
+/// [`WlsSolver`] in one call: the solution and its final relative residual.
+pub fn wls_solve(d: &[f32], conf: &[f32], guide: &[f32], w: usize, h: usize, lambda: f32, sigma_c: f32, max_iters: usize) -> (Vec<f32>, f32) {
+    let mut s = WlsSolver::new(guide, w, h, lambda, sigma_c);
+    s.set_weights(conf);
+    let mut u = vec![0f32; w * h];
+    let (rel, _) = s.solve(d, max_iters, &mut u);
     (u, rel)
 }
 
@@ -829,7 +1114,8 @@ pub fn depth_from_slices(
     let t = Instant::now();
     let y_full = luma(fused);
     let (guide, dw, dh) = block_mean(&y_full, w, h, k);
-    let gf = GuidedFilter::new(guide.clone(), dw, dh, p.agg_radius, p.agg_eps);
+    let mut gf = GuidedFilter::new(guide.clone(), dw, dh, p.agg_radius, p.agg_eps);
+    let mut agg = vec![0f32; dw * dh];
     log(format!(
         "depth: {n} frames, focus {:?}, working grid {dw}x{dh} (1/{k}), aggregation r={} eps={}",
         p.focus, p.agg_radius, p.agg_eps
@@ -840,11 +1126,16 @@ pub fn depth_from_slices(
         if c.len() != dw * dh {
             return Err(format!("depth: slice {m} has {} cells, the working grid {dw}x{dh}", c.len()));
         }
-        let c = if p.agg_radius > 0 { gf.filter(&c) } else { c };
         // the guided filter can undershoot; the profile statistics assume ≥ 0
-        let c: Vec<f32> = c.into_par_iter().map(|v| v.max(0.0)).collect();
-        tracker.push(&c);
+        if p.agg_radius > 0 {
+            gf.filter_into(&c, &mut agg);
+            agg.par_iter_mut().for_each(|v| *v = v.max(0.0));
+            tracker.push(&agg);
+        } else {
+            tracker.push(&c);
+        }
     }
+    drop(agg);
     log(format!("depth: {n} slices aggregated  ({:.1}s)", t.elapsed().as_secs_f64()));
     let (mut depth_w, mut conf) = tracker.finish(p.gate);
     if p.median {
@@ -853,21 +1144,25 @@ pub fn depth_from_slices(
     let p90 = normalize_conf(&mut conf);
     let mean_conf = conf.iter().map(|&c| c as f64).sum::<f64>() / conf.len() as f64;
     log(format!("depth: peaks found, confidence p90 {p90:.3}, mean (normalised) {mean_conf:.3}  ({:.1}s)", t.elapsed().as_secs_f64()));
-    let (depth_w, rel) = if p.lambda > 0.0 {
-        let (u, rel) = wls_solve(&depth_w, &conf, &guide, dw, dh, p.lambda, p.sigma_c, p.cg_iters);
+    let (depth_w, rel, iters) = if p.lambda > 0.0 {
+        let mut solver = WlsSolver::new(&guide, dw, dh, p.lambda, p.sigma_c);
+        solver.set_weights(&conf);
+        let mut u = vec![0f32; dw * dh];
+        let (rel, iters) = solver.solve(&depth_w, p.cg_iters, &mut u);
         if p.robust > 0.0 {
             // one IRLS step with a Huber loss on the data residual
             let w2: Vec<f32> = conf.par_iter().zip(&depth_w).zip(&u).map(|((c, d), u)| c * (p.robust / (d - u).abs()).min(1.0)).collect();
-            let (u2, rel2) = wls_solve(&depth_w, &w2, &guide, dw, dh, p.lambda, p.sigma_c, p.cg_iters);
-            log(format!("depth: robust reweighting (tau={} frames), first residual {rel:.1e}", p.robust));
-            (u2, rel2)
+            solver.set_weights(&w2);
+            let (rel2, iters2) = solver.solve(&depth_w, p.cg_iters, &mut u);
+            log(format!("depth: robust reweighting (tau={} frames), first solve {iters} iterations, residual {rel:.1e}", p.robust));
+            (u, rel2, iters2)
         } else {
-            (u, rel)
+            (u, rel, iters)
         }
     } else {
-        (depth_w, 0.0)
+        (depth_w, 0.0, 0)
     };
-    log(format!("depth: WLS lambda={} sigma_c={} solved, residual {rel:.1e}  ({:.1}s)", p.lambda, p.sigma_c, t.elapsed().as_secs_f64()));
+    log(format!("depth: WLS lambda={} sigma_c={} solved in {iters} iterations, residual {rel:.1e}  ({:.1}s)", p.lambda, p.sigma_c, t.elapsed().as_secs_f64()));
     let max_d = (n - 1) as f32;
     let mut depth = match p.upsample {
         Upsample::Bilinear => upsample_bilinear(&depth_w, dw, dh, w, h, k),
@@ -904,7 +1199,7 @@ mod tests {
         let (w, h, r) = (23, 17, 3);
         let mut s = 5u64;
         let src: Vec<f32> = (0..w * h).map(|_| lcg(&mut s)).collect();
-        let bf = BoxFilter::new(w, h, r);
+        let mut bf = BoxFilter::new(w, h, r);
         let m = bf.mean(&src);
         for y in 0..h {
             for x in 0..w {
@@ -925,10 +1220,11 @@ mod tests {
         let (w, h) = (40, 30);
         let mut s = 9u64;
         let p: Vec<f32> = (0..w * h).map(|_| lcg(&mut s)).collect();
-        let gf = GuidedFilter::new(vec![0.5; w * h], w, h, 2, 1e-3);
+        let mut gf = GuidedFilter::new(vec![0.5; w * h], w, h, 2, 1e-3);
         let q = gf.filter(&p);
-        let bf = BoxFilter::new(w, h, 2);
-        let m = bf.mean(&bf.mean(&p)); // a = 0, b = mean_p, q = mean(b)
+        let mut bf = BoxFilter::new(w, h, 2);
+        let m = bf.mean(&p);
+        let m = bf.mean(&m); // a = 0, b = mean_p, q = mean(b)
         for i in 0..w * h {
             assert!((q[i] - m[i]).abs() < 1e-4);
         }
@@ -1092,5 +1388,75 @@ mod tests {
         // two-frame profiles cap the prominence term at 0.5
         let mean_conf = dm.conf.iter().sum::<f32>() / (w * h) as f32;
         assert!(mean_conf > 0.2, "mean confidence {mean_conf}");
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    /// `cargo test --release -p lapstack-core bench_depth -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_depth_stages() {
+        let (w, h) = (4140usize, 2760usize);
+        let n = w * h;
+        let mut s = 1u64;
+        let mut lcg = || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((s >> 33) % 10000) as f32 / 10000.0
+        };
+        let guide: Vec<f32> = (0..n).map(|i| ((i % w) as f32 / w as f32) * 0.5 + 0.25 * lcg()).collect();
+        let slice: Vec<f32> = (0..n).map(|_| lcg()).collect();
+        let t = Instant::now();
+        let mut gf = GuidedFilter::new(guide.clone(), w, h, 3, 1e-4);
+        eprintln!("gf new: {:.3}s", t.elapsed().as_secs_f64());
+        for _ in 0..3 {
+            let t = Instant::now();
+            let q = gf.filter(&slice);
+            let t1 = t.elapsed().as_secs_f64();
+            let c: Vec<f32> = q.into_par_iter().map(|v| v.max(0.0)).collect();
+            eprintln!("gf filter: {t1:.3}s  clamp {:.3}s", t.elapsed().as_secs_f64() - t1);
+            let _ = c;
+        }
+        let mut bf = BoxFilter::new(w, h, 3);
+        for _ in 0..3 {
+            let t = Instant::now();
+            let _ = bf.mean(&slice);
+            eprintln!("box mean: {:.3}s", t.elapsed().as_secs_f64());
+        }
+        let mut tr = PeakTracker::new(n);
+        for m in 0..4 {
+            let t = Instant::now();
+            tr.push(&slice);
+            eprintln!("push {m}: {:.3}s", t.elapsed().as_secs_f64());
+        }
+        let (d, mut conf) = tr.finish(1.0);
+        normalize_conf(&mut conf);
+        let d: Vec<f32> = d.iter().enumerate().map(|(i, v)| v + 3.0 * guide[i] + lcg()).collect();
+        let t = Instant::now();
+        let m = median3(&d, w, h);
+        eprintln!("median3: {:.3}s", t.elapsed().as_secs_f64());
+        let t = Instant::now();
+        let mut solver = WlsSolver::new(&guide, w, h, 3.0, 0.04);
+        eprintln!("wls new: {:.3}s ({} levels)", t.elapsed().as_secs_f64(), solver.levels.len());
+        let t = Instant::now();
+        solver.set_weights(&conf);
+        eprintln!("wls weights: {:.3}s", t.elapsed().as_secs_f64());
+        let mut u = vec![0f32; n];
+        let t = Instant::now();
+        let (rel, it) = solver.solve(&m, 200, &mut u);
+        eprintln!("wls: {:.3}s rel {rel:.2e} in {it} iterations", t.elapsed().as_secs_f64());
+        let w2: Vec<f32> = conf.par_iter().zip(&m).zip(&u).map(|((c, d), u)| c * (1.0 / (d - u).abs()).min(1.0)).collect();
+        let t = Instant::now();
+        solver.set_weights(&w2);
+        let (rel, it) = solver.solve(&m, 200, &mut u);
+        eprintln!("wls 2: {:.3}s rel {rel:.2e} in {it} iterations", t.elapsed().as_secs_f64());
+        // a confident, smooth field: the regime of real data
+        let conf2: Vec<f32> = (0..n).map(|i| if (i / w / 200 + i % w / 200) % 3 == 0 { 0.0 } else { 0.5 }).collect();
+        solver.set_weights(&conf2);
+        let t = Instant::now();
+        let (rel, it) = solver.solve(&m, 200, &mut u);
+        eprintln!("wls (patchy confidence): {:.3}s rel {rel:.2e} in {it} iterations", t.elapsed().as_secs_f64());
     }
 }

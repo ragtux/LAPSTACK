@@ -445,10 +445,23 @@ written from the papers:
    2008) with the confidence as data weight: flat, noisy or ambiguous
    pixels take their depth from confident neighbours without crossing image
    edges. The separable fast global smoother (Min et al. 2014) gives the
-   initial guess, a Jacobi-preconditioned conjugate gradient solves the 2-D
-   system (`--depth-lambda`, `--depth-sigma`, `--depth-cg`), and one Huber
-   reweighting pass (`--depth-robust`, default 1 frame) removes outliers
-   that a least-squares fit would otherwise average in.
+   initial guess, and a conjugate gradient solves the 2-D system
+   (`--depth-lambda`, `--depth-sigma`, `--depth-cg`) to a relative residual
+   of 1e-5, preconditioned by one multigrid V-cycle: the system is
+   aggregated 2×2 down to a 16-px grid (the data weights summed over each
+   block, the edges a block boundary cuts summed into the coarse edge — the
+   Galerkin operator of a piecewise-constant prolongation, so the
+   preconditioner stays symmetric) with one damped-Jacobi sweep before and
+   after each coarse correction. A Jacobi-preconditioned CG left the low
+   modes to the CG itself: on the 4140×2760 half grid of a 45 MP stack it
+   needed 300 iterations for 1e-5 (the `--depth-cg 200` cap stopped it at
+   7e-5, 0.4 frames off the converged map in places), and where the
+   confidence is low over a large area — a flat wall, a synthetic stack
+   with no peaks — it did not converge at all; the V-cycle takes the same
+   solve to 1e-5 in about 20 iterations (50 on the pathological case),
+   3.5 s to 1 s on the CPU. One Huber reweighting pass (`--depth-robust`,
+   default 1 frame) then removes outliers that a least-squares fit would
+   otherwise average in; the second solve reuses the hierarchy.
 5. **Upsampling** — guided-filter upsampling on the full-resolution luma
    (`--depth-upsample guided:R:EPS` | `bilinear`), so depth edges land on
    image edges.
@@ -465,10 +478,10 @@ included:
 
 | run | wall | of which fold (align + fuse + focus measure) / depth | peak RSS |
 |---|--:|--:|--:|
-| 25 frames, `lapstack --align-coarsen 2` (CPU) | 71 s | 40 s (1.6 s per frame) / 30 s | 6.8 GB |
-| 25 frames, `lapstack --gpu --gpu-align --align-coarsen 2` | 38 s | 6.5 s (0.26 s per frame) / 29 s | 3.7 GB |
-| 100 frames, CPU | 251 s | 164 s (1.6 s per frame) / 84 s | 12.0 GB |
-| 100 frames, `--gpu --gpu-align` | 114 s | 28 s (0.28 s per frame) / 83 s | 7.0 GB |
+| 25 frames, `lapstack --align-coarsen 2` (CPU) | 51 s | 41 s (1.6 s per frame) / 6.0 s | 6.8 GB |
+| 25 frames, `lapstack --gpu --gpu-align --align-coarsen 2` | 13 s | 6.5 s (0.26 s per frame) / 1.7 s | 3.7 GB |
+| 100 frames, CPU | 183 s | 169 s (1.7 s per frame) / 10 s | 12.0 GB |
+| 100 frames, `--gpu --gpu-align` | 34 s | 28 s (0.28 s per frame) / 2.3 s | 7.0 GB |
 | 25 frames, `lapstack --no-align` on the aligned 16-bit PNGs, CPU or GPU | 26 s | 24 s / – (no depth pass then) | 4.4 GB |
 
 Before the aligner's cost was fused into one pass and its search put on the
@@ -482,8 +495,21 @@ depth pass then decoded and warped every frame a second
 time to take its focus measure, 1.2 s per frame on either path (42 s of the
 25-frame runs); now the fold takes each frame's focus slice as it passes
 (0.15 s per frame) and the depth pass is the guided-filter aggregation of
-the slices (0.75 s each at the half grid), the WLS solve (9 s) and the
-upsampling (1 s). The peak RSS swings between runs by how far the read-ahead
+the slices, the WLS solve and the upsampling. That pass was 29 s of the
+25-frame runs and 83 s of the 100-frame ones on either path, the aggregation
+0.75 s per slice and the WLS 9 s: the box filters allocated four fresh
+45 MB planes per slice, and faulting a fresh plane in from 128 threads at
+once costs 150 ms (the sums themselves 20 ms), so the filters now keep
+their planes from one slice to the next (0.045 s per slice, 16×), and the
+CG is preconditioned by the multigrid V-cycle above (2.8 s for both solves
+instead of 9 s, and converged). With `--gpu` the whole pass runs on the
+device (`gpu::depth_from_slices`, the same stages as the browser's, the
+multigrid included): the slices are uploaded one at a time, only the two
+medians (noise floor, confidence scale) are taken on the host, and the
+maps come back — 1.7 s for 25 frames, 2.3 s for 100, the maps within
+4e-4 of full scale of the CPU's (a few pixels in a million of the
+confidence differ, where a near-tie in the peak search falls the other
+way in float order). The peak RSS swings between runs by how far the read-ahead
 decoders (four frames) get ahead of the fold; the slices add 45 MB per
 frame. Otherwise memory is flat over the stack's length since the frames
 stream through the alignment: before that, when every frame was loaded and
@@ -700,7 +726,9 @@ during the run, block-averaged to a working grid of 1/2^N the frame size
 collapse the slices are aggregated with the guided filter (fused luma as
 guide), the peaks are tracked with sub-frame interpolation and confidence,
 the confidence-weighted WLS with its robust reweight runs as fast-global-
-smoother sweeps plus conjugate gradient on the device, and the map is
+smoother sweeps plus the multigrid-preconditioned conjugate gradient on
+the device (the residual read back every 8 iterations, so the solve stops
+when it has converged instead of at the iteration cap), and the map is
 guided-upsampled to full resolution for saving. The viewer shows the
 working-grid map under **Depth → Focus depth** and its confidence under
 **Depth → Confidence** — the peak-ratio confidence of each pixel's focus

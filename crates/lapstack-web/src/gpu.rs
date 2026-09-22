@@ -31,14 +31,14 @@ const SLOT: u64 = 256;
 const XFER_SLICE: usize = 16 << 20;
 const UPLOAD_SLOTS: usize = 4;
 const SLOTS: usize = 2048;
-const KERNELS: [&str; 57] = [
+const KERNELS: [&str; 59] = [
     "red_h", "red_v", "exp_h", "exp_v", "energy", "win_h", "win_v", "sel", "wgt", "wacc", "wnorm", "fill", "clamp01", "copy_plane",
     "warp", "cost", "to_rgba8", "to_rgb16", "proxy", "luma_u16", "luma_f32", "down1", "blk_mean", "bright", "gain3",
     // depth from focus (depth.rs)
     "conv_taps", "box_h", "box_v", "mul", "gf_ab", "gf_apply", "gf_var", "unpack_u16", "pack_u16",
     "peak_init", "peak_push", "peak_finish", "median3", "scale_clamp", "edge_w", "fgs_rows", "fgs_cols",
-    "cg_matvec", "cg_resid", "cg_zp", "dot_partial", "reduce_scal", "cg_axpy_u", "cg_update_rz",
-    "cg_update_p", "robust_w", "up_apply",
+    "mg_coarsen", "mg_dinv", "mg_stencil", "mg_jac0", "mg_restrict", "mg_prolong",
+    "dot_partial", "reduce_scal", "cg_axpy_u", "cg_update_p", "robust_w", "up_apply",
     // depth-map rendering, In focus
     "dmap_acc", "dmap_norm", "wav_acc", "wav_norm", "focus_out",
 ];

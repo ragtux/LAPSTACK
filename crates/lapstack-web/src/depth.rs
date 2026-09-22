@@ -3,7 +3,8 @@
 
 //! Depth from focus on WebGPU — the pipeline of `lapstack_core::depth`
 //! (ring difference filter, guided-filter aggregation, streamed sub-frame peak
-//! search, confidence-weighted WLS with a Huber reweight, guided upsampling)
+//! search, confidence-weighted WLS with a Huber reweight — the conjugate
+//! gradient preconditioned by a multigrid V-cycle — guided upsampling)
 //! as WGSL kernels (`shaders.wgsl`, "Depth from focus" section).
 //!
 //! During the run every frame's focus measure is block-averaged to the
@@ -14,7 +15,7 @@
 //! peak tracker, and the rest of the pass runs entirely on the device.
 
 use crate::gpu::{Gpu, P, Rec, grid1, grid2};
-use lapstack_core::depth::{DepthParams, FocusMeasure, Upsample, rdf_taps};
+use lapstack_core::depth::{DepthParams, FocusMeasure, MG_COARSE, MG_MIN, MG_OMEGA, MG_POST, MG_PRE, Upsample, rdf_taps};
 
 const EPS_DATA: f32 = 1e-4;
 
@@ -33,12 +34,26 @@ pub struct DepthGpu {
     wgrid: wgpu::Buffer,
 }
 
+/// One grid of the WLS multigrid hierarchy (`lapstack_core::depth::MgLevel`):
+/// `[wd | dinv]` and `[ax | ay]` (two planes each, λ in the edges), and the
+/// V-cycle's solution, right-hand side and residual planes.
+struct Lv {
+    w: usize,
+    h: usize,
+    x: wgpu::Buffer,
+    b: wgpu::Buffer,
+    r: wgpu::Buffer,
+    wdd: wgpu::Buffer,
+    e2: wgpu::Buffer,
+}
+
 /// Working-grid buffers for the finish stage (allocated only then).
 struct Work {
     t: Vec<wgpu::Buffer>, // 8 planes
     rt: wgpu::Buffer,     // box-filter row sums
-    x2a: wgpu::Buffer,    // 2 planes
     x2b: wgpu::Buffer,    // 2 planes
+    /// The WLS system's multigrid hierarchy, the working grid first.
+    levels: Vec<Lv>,
     state: wgpu::Buffer,  // 9 planes (peak tracker)
     guide: wgpu::Buffer,
     d: wgpu::Buffer,
@@ -138,11 +153,32 @@ impl DepthGpu {
         }
         let p = self.params.clone();
         let (gx, gy) = grid1(n);
-        let wk = Work {
+        let mut wk = Work {
             t: (0..8).map(|i| g.buffer_f32(&format!("dff t{i}"), n)).collect(),
             rt: g.buffer_f32("dff rowsum", n),
-            x2a: g.buffer_f32("dff x2a", 2 * n),
             x2b: g.buffer_f32("dff x2b", 2 * n),
+            levels: {
+                let mut levels = Vec::new();
+                let (mut lw, mut lh) = (dw, dh);
+                loop {
+                    let m = lw * lh;
+                    let l = levels.len();
+                    levels.push(Lv {
+                        w: lw,
+                        h: lh,
+                        x: g.buffer_f32(&format!("mg x{l}"), m),
+                        b: g.buffer_f32(&format!("mg b{l}"), m),
+                        r: g.buffer_f32(&format!("mg r{l}"), m),
+                        wdd: g.buffer_f32(&format!("mg wdd{l}"), 2 * m),
+                        e2: g.buffer_f32(&format!("mg e{l}"), 2 * m),
+                    });
+                    if lw.max(lh) <= MG_MIN {
+                        break;
+                    }
+                    (lw, lh) = (lw.div_ceil(2), lh.div_ceil(2));
+                }
+                levels
+            },
             state: g.buffer_f32("dff state", 9 * n),
             guide: g.buffer_f32("dff guide", n),
             d: g.buffer_f32("dff d", n),
@@ -150,7 +186,7 @@ impl DepthGpu {
             u: g.buffer_f32("dff u", n),
             ones: g.buffer_init("dff ones", bytemuck::cast_slice(&vec![1f32; n])),
             partials: g.buffer_f32("dff partials", (gx * gy) as usize),
-            scal: g.buffer_init("dff scal", bytemuck::cast_slice(&[0f32; 4])),
+            scal: g.buffer_init("dff scal", bytemuck::cast_slice(&[0f32; 8])),
             npart: gx * gy,
         };
         let pw = P { w: dw as u32, h: dh as u32, ..Default::default() };
@@ -165,13 +201,14 @@ impl DepthGpu {
             grid2(dw, dh),
         );
         let r_agg = p.agg_radius;
-        let guide_stats = |rec: &mut Rec<'_>, r: usize| {
-            self.boxf(rec, &wk, &wk.guide, &t[1], r);
+        let guide_stats = |rec: &mut Rec<'_>, wk: &Work, r: usize| {
+            let t = &wk.t;
+            self.boxf(rec, wk, &wk.guide, &t[1], r);
             rec.dispatch("mul", [Some(&wk.guide), None, Some(&t[2]), None, Some(&wk.guide), None], pw, grid1(n));
-            self.boxf(rec, &wk, &t[2], &t[3], r);
+            self.boxf(rec, wk, &t[2], &t[3], r);
             rec.dispatch("gf_var", [Some(&t[1]), None, None, Some(&wk.x2b), Some(&t[3]), None], pw, grid1(n));
         };
-        guide_stats(&mut rec, r_agg);
+        guide_stats(&mut rec, &wk, r_agg);
         rec.dispatch("peak_init", [None, None, Some(&wk.state), None, None, None], pw, grid1(n));
         rec.submit();
 
@@ -228,20 +265,35 @@ impl DepthGpu {
         let mean_conf = conf_w.iter().map(|&c| c as f64).sum::<f64>() / n as f64;
         log(&format!("[lapstack] depth: {nf} slices folded on the {dw}x{dh} grid, confidence p90 {p90:.3}, mean {mean_conf:.3}"));
 
-        // ---- WLS (+ one robust reweight)
+        // ---- WLS (+ one robust reweight): the normalised confidence (t0), the
+        // data weight with its floor, the edges with lambda in them
         let mut rec = g.rec();
-        rec.dispatch("scale_clamp", [Some(&t[1]), None, Some(&wk.wd), None, None, None], P { f0: 1.0 / p90.max(1e-6), f1: EPS_DATA, ..pw }, grid1(n));
+        rec.dispatch("scale_clamp", [Some(&wk.t[1]), None, Some(&wk.t[0]), None, None, None], P { f0: 1.0 / p90.max(1e-6), f1: 0.0, ..pw }, grid1(n));
+        rec.dispatch("scale_clamp", [Some(&wk.t[0]), None, Some(&wk.wd), None, None, None], P { f0: 1.0, f1: EPS_DATA, ..pw }, grid1(n));
         if p.lambda > 0.0 {
-            rec.dispatch("edge_w", [Some(&wk.guide), None, Some(&wk.x2a), None, None, None], P { f0: p.sigma_c, ..pw }, grid2(dw, dh));
-            self.wls(&mut rec, &wk, &wk.wd, &p);
-            if p.robust > 0.0 {
-                rec.dispatch("robust_w", [Some(&wk.d), None, Some(&t[7]), Some(&wk.u), Some(&wk.wd), None], P { f0: p.robust, f1: EPS_DATA, ..pw }, grid1(n));
-                self.wls(&mut rec, &wk, &t[7], &p);
-            }
+            let l0 = &wk.levels[0];
+            rec.dispatch("edge_w", [Some(&wk.guide), None, Some(&l0.e2), None, None, None], P { f0: p.sigma_c, f1: p.lambda, ..pw }, grid2(dw, dh));
+            rec.copy(&wk.wd, 0, &l0.wdd, 0, (n * 4) as u64);
+            Self::set_weights(&mut rec, &wk);
+            rec.submit();
+            let (rel, iters) = self.wls(g, &mut wk, &p).await?;
+            let (rel, iters) = if p.robust > 0.0 {
+                // one IRLS step with a Huber loss on the data residual
+                let mut rec = g.rec();
+                rec.dispatch("robust_w", [Some(&wk.d), None, Some(&wk.levels[0].wdd), Some(&wk.u), Some(&wk.t[0]), None], P { f0: p.robust, f1: EPS_DATA, ..pw }, grid1(n));
+                Self::set_weights(&mut rec, &wk);
+                rec.submit();
+                let (rel2, iters2) = self.wls(g, &mut wk, &p).await?;
+                log(&format!("[lapstack] depth: robust reweighting (tau={} frames), first solve {iters} iterations, residual {rel:.1e}", p.robust));
+                (rel2, iters2)
+            } else {
+                (rel, iters)
+            };
+            log(&format!("[lapstack] depth: WLS lambda={} sigma_c={} solved in {iters} iterations, residual {rel:.1e}", p.lambda, p.sigma_c));
         } else {
             rec.copy(&wk.d, 0, &wk.u, 0, (n * 4) as u64);
+            rec.submit();
         }
-        rec.submit();
         let max_d = (nf - 1) as f32;
         let mut depth_w = g.read_f32(&wk.u, n).await?;
         for v in depth_w.iter_mut() {
@@ -249,10 +301,11 @@ impl DepthGpu {
         }
 
         // ---- guided upsampling to full resolution
+        let t = &wk.t;
         let mut rec = g.rec();
         match p.upsample {
             Upsample::Guided { radius, eps } => {
-                guide_stats(&mut rec, radius);
+                guide_stats(&mut rec, &wk, radius);
                 self.boxf(&mut rec, &wk, &wk.u, &t[1], radius);
                 rec.dispatch("mul", [Some(&wk.guide), None, Some(&t[2]), None, Some(&wk.u), None], pw, grid1(n));
                 self.boxf(&mut rec, &wk, &t[2], &t[3], radius);
@@ -293,41 +346,134 @@ impl DepthGpu {
         rec.dispatch("box_v", [None, Some(&wk.rt), Some(dst), None, None, None], pw, grid2(self.dw, self.dh));
     }
 
-    /// WLS solve of (W + λL) u = W d with data weights `wd`: FGS initial guess
-    /// (3 alternating row/column sweeps) + Jacobi-PCG. Result in wk.u.
-    fn wls(&self, rec: &mut Rec<'_>, wk: &Work, wd: &wgpu::Buffer, p: &DepthParams) {
+    /// The data weights are in `levels[0]`'s `wd` half: aggregate them (with
+    /// the edges) down the hierarchy and take every grid's diagonal.
+    fn set_weights(rec: &mut Rec<'_>, wk: &Work) {
+        for l in 0..wk.levels.len() {
+            let c = &wk.levels[l];
+            if l > 0 {
+                let f = &wk.levels[l - 1];
+                let pc = P { w: f.w as u32, h: f.h as u32, ow: c.w as u32, oh: c.h as u32, ..Default::default() };
+                rec.dispatch("mg_coarsen", [Some(&f.wdd), Some(&c.wdd), Some(&c.e2), None, Some(&f.e2), None], pc, grid2(c.w, c.h));
+            }
+            rec.dispatch("mg_dinv", [None, Some(&c.wdd), None, Some(&c.e2), None, None], P { w: c.w as u32, h: c.h as u32, ..Default::default() }, grid2(c.w, c.h));
+        }
+    }
+
+    /// `o = f(A x)` on grid `lv` by `mg_stencil`'s flag (0: A x, 1: rhs − A x,
+    /// 2: the damped-Jacobi sweep).
+    fn stencil(rec: &mut Rec<'_>, lv: &Lv, x: &wgpu::Buffer, rhs: &wgpu::Buffer, o: &wgpu::Buffer, flag: u32) {
+        let pc = P { w: lv.w as u32, h: lv.h as u32, flag, f0: MG_OMEGA, ..Default::default() };
+        rec.dispatch("mg_stencil", [Some(x), Some(&lv.wdd), Some(o), Some(&lv.e2), Some(rhs), None], pc, grid2(lv.w, lv.h));
+    }
+
+    /// One damped-Jacobi sweep on `lv.x` for `lv.b` (from zero when `zero_start`).
+    fn jacobi(rec: &mut Rec<'_>, lv: &mut Lv, zero_start: bool) {
+        if zero_start {
+            let pc = P { w: lv.w as u32, h: lv.h as u32, f0: MG_OMEGA, ..Default::default() };
+            rec.dispatch("mg_jac0", [Some(&lv.b), Some(&lv.wdd), Some(&lv.x), None, None, None], pc, grid1(lv.w * lv.h));
+        } else {
+            Self::stencil(rec, lv, &lv.x, &lv.b, &lv.r, 2);
+            std::mem::swap(&mut lv.x, &mut lv.r);
+        }
+    }
+
+    /// One V-cycle from `levels[0]` (its `b` set) into its `x`.
+    fn vcycle(rec: &mut Rec<'_>, levels: &mut [Lv]) {
+        let Some((top, rest)) = levels.split_first_mut() else { return };
+        if rest.is_empty() {
+            for k in 0..MG_COARSE {
+                Self::jacobi(rec, top, k == 0);
+            }
+            return;
+        }
+        for k in 0..MG_PRE {
+            Self::jacobi(rec, top, k == 0);
+        }
+        let pc = P { w: top.w as u32, h: top.h as u32, ow: rest[0].w as u32, oh: rest[0].h as u32, ..Default::default() };
+        Self::stencil(rec, top, &top.x, &top.b, &top.r, 1);
+        rec.dispatch("mg_restrict", [Some(&top.r), None, Some(&rest[0].b), None, None, None], pc, grid2(rest[0].w, rest[0].h));
+        Self::vcycle(rec, rest);
+        rec.dispatch("mg_prolong", [Some(&rest[0].x), None, Some(&top.x), None, None, None], pc, grid2(top.w, top.h));
+        for _ in 0..MG_POST {
+            Self::jacobi(rec, top, false);
+        }
+    }
+
+    /// `scal` by `reduce_scal`'s mode from the dot product of two planes.
+    fn dot(rec: &mut Rec<'_>, wk: &Work, a: &wgpu::Buffer, b: &wgpu::Buffer, mode: u32) {
+        let pw = P { w: wk.levels[0].w as u32, h: wk.levels[0].h as u32, ..Default::default() };
+        rec.dispatch("dot_partial", [Some(a), None, Some(&wk.partials), None, Some(b), None], pw, grid1(wk.levels[0].w * wk.levels[0].h));
+        rec.dispatch("reduce_scal", [Some(&wk.partials), None, Some(&wk.scal), None, None, None], P { klen: wk.npart, flag: mode, ..pw }, (1, 1));
+    }
+
+    /// WLS solve of (W + λL) u = W d, the data weights in `levels[0]`
+    /// (`lapstack_core::depth::WlsSolver`): the FGS guess (3 alternating
+    /// row/column sweeps), then CG preconditioned by one multigrid V-cycle,
+    /// the residual read back every few iterations. Result in `wk.u`; the
+    /// final relative residual and the iterations taken.
+    async fn wls(&self, g: &Gpu, wk: &mut Work, p: &DepthParams) -> Result<(f32, usize), String> {
         let (dw, dh, n) = (self.dw, self.dh, self.dw * self.dh);
         let pw = P { w: dw as u32, h: dh as u32, ..Default::default() };
-        let t = &wk.t;
-        let f = &t[2];
         let bytes = (n * 4) as u64;
-        // FGS
+        let mut rec = g.rec();
+        // FGS: f = t2, scratch [cp|dp] = x2b; the schedule's lambda_t as a ratio of the
+        // lambda in the edges
         const T: usize = 3;
-        rec.copy(&wk.d, 0, f, 0, bytes);
-        for it in 1..=T {
-            let lam_t = 1.5 * p.lambda * 4f32.powi((T - it) as i32) / (4f32.powi(T as i32) - 1.0);
-            let wt: &wgpu::Buffer = if it == 1 { wd } else { &wk.ones };
-            rec.dispatch("fgs_rows", [Some(f), Some(&wk.u), Some(&wk.x2b), Some(&wk.x2a), Some(wt), None], P { f0: lam_t, ..pw }, (dh.div_ceil(64) as u32, 1));
-            rec.copy(&wk.u, 0, f, 0, bytes);
-            rec.dispatch("fgs_cols", [Some(f), Some(&wk.u), Some(&wk.x2b), Some(&wk.x2a), Some(&wk.ones), None], P { f0: lam_t, ..pw }, (dw.div_ceil(64) as u32, 1));
-            rec.copy(&wk.u, 0, f, 0, bytes);
+        {
+            let (t, l0) = (&wk.t, &wk.levels[0]);
+            let f = &t[2];
+            rec.copy(&wk.d, 0, f, 0, bytes);
+            for it in 1..=T {
+                let lam_t = 1.5 * 4f32.powi((T - it) as i32) / (4f32.powi(T as i32) - 1.0);
+                let wt: &wgpu::Buffer = if it == 1 { &l0.wdd } else { &wk.ones };
+                rec.dispatch("fgs_rows", [Some(f), Some(&wk.u), Some(&wk.x2b), Some(&l0.e2), Some(wt), None], P { f0: lam_t, ..pw }, (dh.div_ceil(64) as u32, 1));
+                rec.copy(&wk.u, 0, f, 0, bytes);
+                rec.dispatch("fgs_cols", [Some(f), Some(&wk.u), Some(&wk.x2b), Some(&l0.e2), Some(&wk.ones), None], P { f0: lam_t, ..pw }, (dw.div_ceil(64) as u32, 1));
+                rec.copy(&wk.u, 0, f, 0, bytes);
+            }
+            // CG: bvec = t3, r = t4, p = t5, Ap = t6; z is the V-cycle's output, levels[0].x
+            rec.dispatch("mul", [Some(&wk.d), None, Some(&t[3]), None, Some(&l0.wdd), None], pw, grid1(n));
         }
-        // PCG: rdiag = x2b, z = t4, pp = t5, ap = t6
-        let (rdiag, z, pp, ap) = (&wk.x2b, &t[4], &t[5], &t[6]);
-        let pl = P { f0: p.lambda, ..pw };
-        rec.dispatch("cg_resid", [Some(&wk.u), Some(&wk.d), Some(rdiag), Some(&wk.x2a), Some(wd), None], pl, grid2(dw, dh));
-        rec.dispatch("cg_zp", [Some(rdiag), Some(z), Some(pp), None, None, None], pw, grid1(n));
-        rec.dispatch("dot_partial", [Some(rdiag), None, Some(&wk.partials), None, Some(z), None], pw, grid1(n));
-        rec.dispatch("reduce_scal", [Some(&wk.partials), None, Some(&wk.scal), None, None, None], P { klen: wk.npart, flag: 0, ..pw }, (1, 1));
+        Self::dot(&mut rec, wk, &wk.t[3], &wk.t[3], 3);
+        rec.submit();
+        let bnorm = g.read_range_f32(&wk.scal, 4, 1).await?[0].sqrt().max(1e-30);
+        let mut rec = g.rec();
+        Self::stencil(&mut rec, &wk.levels[0], &wk.u, &wk.t[3], &wk.t[4], 1);
+        rec.copy(&wk.t[4], 0, &wk.levels[0].b, 0, bytes);
+        Self::vcycle(&mut rec, &mut wk.levels);
+        rec.copy(&wk.levels[0].x, 0, &wk.t[5], 0, bytes);
+        Self::dot(&mut rec, wk, &wk.t[4], &wk.levels[0].x, 0);
+        Self::dot(&mut rec, wk, &wk.t[4], &wk.t[4], 3);
+        rec.submit();
+        let mut rel = g.read_range_f32(&wk.scal, 4, 1).await?[0].sqrt() / bnorm;
+        let mut iters = 0;
+        let mut rec = g.rec();
         for _ in 0..p.cg_iters {
-            rec.dispatch("cg_matvec", [Some(pp), Some(ap), None, Some(&wk.x2a), Some(wd), None], pl, grid2(dw, dh));
-            rec.dispatch("dot_partial", [Some(pp), None, Some(&wk.partials), None, Some(ap), None], pw, grid1(n));
-            rec.dispatch("reduce_scal", [Some(&wk.partials), None, Some(&wk.scal), None, None, None], P { klen: wk.npart, flag: 1, ..pw }, (1, 1));
-            rec.dispatch("cg_axpy_u", [Some(pp), Some(&wk.u), None, None, None, Some(&wk.scal)], pw, grid1(n));
-            rec.dispatch("cg_update_rz", [Some(ap), Some(rdiag), Some(z), None, None, Some(&wk.scal)], pw, grid1(n));
-            rec.dispatch("dot_partial", [Some(rdiag), None, Some(&wk.partials), None, Some(z), None], pw, grid1(n));
-            rec.dispatch("reduce_scal", [Some(&wk.partials), None, Some(&wk.scal), None, None, None], P { klen: wk.npart, flag: 2, ..pw }, (1, 1));
-            rec.dispatch("cg_update_p", [Some(z), Some(pp), None, None, None, Some(&wk.scal)], pw, grid1(n));
+            if rel < 1e-5 {
+                break;
+            }
+            iters += 1;
+            Self::stencil(&mut rec, &wk.levels[0], &wk.t[5], &wk.t[3], &wk.t[6], 0);
+            Self::dot(&mut rec, wk, &wk.t[5], &wk.t[6], 1);
+            rec.dispatch("cg_axpy_u", [Some(&wk.t[5]), Some(&wk.u), None, None, None, Some(&wk.scal)], P { flag: 0, ..pw }, grid1(n));
+            rec.dispatch("cg_axpy_u", [Some(&wk.t[6]), Some(&wk.t[4]), None, None, None, Some(&wk.scal)], P { flag: 1, ..pw }, grid1(n));
+            Self::dot(&mut rec, wk, &wk.t[4], &wk.t[4], 3);
+            if iters % 8 == 0 {
+                rec.submit();
+                rel = g.read_range_f32(&wk.scal, 4, 1).await?[0].sqrt() / bnorm;
+                rec = g.rec();
+                if rel < 1e-5 {
+                    break;
+                }
+            }
+            rec.copy(&wk.t[4], 0, &wk.levels[0].b, 0, bytes);
+            Self::vcycle(&mut rec, &mut wk.levels);
+            Self::dot(&mut rec, wk, &wk.t[4], &wk.levels[0].x, 2);
+            rec.dispatch("cg_update_p", [Some(&wk.levels[0].x), Some(&wk.t[5]), None, None, None, Some(&wk.scal)], pw, grid1(n));
         }
+        rec.submit();
+        rel = g.read_range_f32(&wk.scal, 4, 1).await?[0].sqrt() / bnorm;
+        Ok((rel, iters))
     }
 }

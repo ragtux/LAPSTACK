@@ -48,7 +48,7 @@ pub fn weighted_average(src: &mut dyn FrameSource, dp: &DepthParams, wp: &WavPar
     let (dw, dh) = (blocks(w, k), blocks(h, k));
     let power = wp.power.max(0.0);
     let floor = 1e-4f32.powf(power);
-    let bf = (wp.smooth > 0).then(|| BoxFilter::new(dw, dh, wp.smooth));
+    let mut bf = (wp.smooth > 0).then(|| BoxFilter::new(dw, dh, wp.smooth));
     log(format!("weighted average: {n} frames, contrast {:?} on the {dw}x{dh} grid, power {power}, smoothing {}", dp.focus, wp.smooth));
     let t = Instant::now();
     let mut acc = Img3::zeros(w, h);
@@ -57,7 +57,7 @@ pub fn weighted_average(src: &mut dyn FrameSource, dp: &DepthParams, wp: &WavPar
         let f = src.get(m)?;
         let y = luma(&f);
         let (g, _, _) = block_mean(&focus_measure(&y, w, h, dp.focus), w, h, k);
-        let g = match &bf {
+        let g = match &mut bf {
             Some(b) => b.mean(&g),
             None => g,
         };
