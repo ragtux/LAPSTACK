@@ -17,7 +17,7 @@ stacking on the Laplacian pyramid, written from two papers kept in `docs/`:
 ## Layout
 
 ```
-crates/lapstack-core   library: pyramid, fusion, depth from focus, aligner, dust map, stereo views, 3D model, batch splitting, I/O, CUDA path
+crates/lapstack-core   library: pyramid, fusion, depth from focus, aligner, dust map, stereo views, 3D model, batch splitting, I/O, CUDA path, pooling allocator
 crates/lapstack-cli    `lapstack` command-line tool
 crates/lapstack-web    wasm32 + WebGPU engine for the browser app
 web/                   the browser app (static files) and its headless test
@@ -478,14 +478,17 @@ included:
 
 | run | wall | of which fold (align + fuse + focus measure) / depth | peak RSS |
 |---|--:|--:|--:|
-| 25 frames, `lapstack --align-coarsen 2` (CPU) | 51 s | 41 s (1.6 s per frame) / 6.0 s | 6.8 GB |
-| 25 frames, `lapstack --gpu --gpu-align --align-coarsen 2` | 13 s | 6.5 s (0.26 s per frame) / 1.7 s | 3.7 GB |
-| 100 frames, CPU | 183 s | 169 s (1.7 s per frame) / 10 s | 12.0 GB |
-| 100 frames, `--gpu --gpu-align` | 34 s | 28 s (0.28 s per frame) / 2.3 s | 7.0 GB |
+| 25 frames, `lapstack --align-coarsen 2` (CPU) | 26 s | 19 s (0.75 s per frame) / 6.0 s | 8.7 GB |
+| 25 frames, `lapstack --gpu --gpu-align --align-coarsen 2` | 9.6 s | 5.1 s (0.20 s per frame) / 1.0 s | 6.2 GB |
+| 100 frames, CPU | 85 s | 74 s (0.74 s per frame) / 8.0 s | 12.0 GB |
+| 100 frames, `--gpu --gpu-align` | 26 s | 21 s (0.21 s per frame) / 1.9 s | 9.4 GB |
 | 25 frames, `lapstack --no-align` on the aligned 16-bit PNGs, CPU or GPU | 26 s | 24 s / – (no depth pass then) | 4.4 GB |
 
-Before the aligner's cost was fused into one pass and its search put on the
-per-level schedule (above), the same rows read 118 s (75 s align + fuse,
+Before the pooling allocator below, the same rows read 51 s (41 s fold,
+1.6 s per frame, 6.8 GB), 13 s (6.5 s, 0.26 s, 3.7 GB), 183 s (169 s, 1.7 s)
+and 34 s (28 s, 0.28 s, 7.0 GB): more than half of the CPU fold was page
+faults on fresh planes. Before the aligner's cost was fused into one pass
+and its search put on the per-level schedule, the rows read 118 s (75 s align + fuse,
 3.0 s per frame), 74 s (30 s, 1.2 s), 449 s (310 s, 3.1 s) and 265 s (126 s,
 1.3 s): the CPU search alone was 1.2 s of every frame, the two registration
 pyramids 0.5 s; and until the frames moved onto the device with
@@ -532,6 +535,24 @@ frame is the decode and the upload, and the host holds no warped copies,
 which is where the peak memory went. The `--no-align` row is 16-bit PNG
 decode-bound (~1 s per frame with four decoder threads); uncompressed TIFF
 input decodes an order of magnitude faster.
+
+The CLI runs under a pooling allocator (`pool.rs`, installed as the
+process's global allocator): a block of 4 MB or more is not returned to the
+system on free but kept, up to 64 blocks and 4 GB, and the next request of
+its size class gets it back with its pages still mapped. Every stage of the
+fold makes fresh planes — the decoder's buffers, the warp, the luma, the
+Laplacian pyramid's levels, the energies, the focus slice — and glibc
+unmaps a block above its mmap threshold on free, so each frame took the
+page faults again; with 128 threads first-touching a plane at once that is
+~150 ms per 45 MB plane, and it was more than half of the fold: the 25-frame
+CPU fold is 18.7 s with the pool and 40.8 s with it switched off
+(`LAPSTACK_NO_POOL=1`, same binary), the output bit-identical, for 1.8 GB
+more peak memory (the idle blocks). A 2 GB cap loses most of the gain (the
+frame's working set of planes is larger than that); 6 GB gains nothing over
+4. The CUDA rows gain too — the decode and the slices are host planes —
+and the depth pass's host side with them (1.7 s to 1.0 s for 25 frames).
+The browser build does not use it. Zeroed requests on a recycled block
+are cleared with memset, ~4 ms per 45 MB.
 
 GPU fusion output is bit-exact with the CPU output (one run out of four
 differed in 637 of 45.7 M pixels on energy ties and could not be

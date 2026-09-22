@@ -13,12 +13,20 @@ use lapstack_core::pyramid::Img3;
 use lapstack_core::view;
 use std::time::Instant;
 
+/// Large blocks are recycled between frames (`pool.rs`): the fold's planes
+/// would otherwise be mapped and page-faulted afresh for every frame.
+#[global_allocator]
+static ALLOC: lapstack_core::pool::PoolAlloc = lapstack_core::pool::PoolAlloc::new();
+
 fn fail(msg: &str) -> ! {
     eprintln!("{msg}");
     std::process::exit(1);
 }
 
 fn main() {
+    if std::env::var_os("LAPSTACK_NO_POOL").is_some() {
+        lapstack_core::pool::DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut inputs = Vec::new();
     let mut output = "stacked.png".to_string();

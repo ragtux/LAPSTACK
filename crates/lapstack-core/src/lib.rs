@@ -31,6 +31,7 @@ pub mod dust;
 pub mod fuse;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+pub mod pool;
 pub mod io;
 pub mod mesh;
 pub mod meta;
