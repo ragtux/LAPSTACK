@@ -116,11 +116,11 @@ const PK = 'lapstack.settings';
 const INTERPS = ['nearest', 'bilinear', 'bicubic', 'spline4x4', 'spline6x6', 'lanczos3'];
 const stepDefaults = { 'p-dust-thr': 3, 'p-dust-margin': 3, 'p-kept': 1536, 'p-wav-pow': 2, 'p-wav-smooth': 1, 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5, 'p-dslab-size': 10, 'p-dslab-ov': 2, 'p-split-n': 30, 'p-split-gap': 10 };
 function readParams() {
-  const n = (id) => Number($(id).textContent === 'auto' ? 0 : $(id).textContent);
+  const n = (id) => Number($(id).textContent) || 0; // a stepper's zero word ('auto', 'off') reads as 0
   return {
     align: $('p-align').checked, shift: $('p-shift').checked, scale: $('p-scale').checked, rotation: $('p-rotation').checked, brightness: $('p-bright').checked,
-    coarsen: n('p-coarsen'), interp: $('p-interp').value, levels: n('p-levels') || null, energy_radius: n('p-energy'), top: $('p-top').value,
-    top_radius: n('p-topr'), use_chroma: $('p-chroma').checked, proxy_edge: n('p-proxy'),
+    coarsen: n('p-coarsen'), interp: $('p-interp').value, model: $('p-model').value, levels: n('p-levels') || null, energy_radius: n('p-energy'), top: $('p-top').value,
+    top_radius: n('p-topr'), use_chroma: $('p-chroma').checked, halo: n('p-halo'), proxy_edge: n('p-proxy'),
     depth_scale: n('p-depthscale'), depth_level: n('p-depthlevel'), render_dmap: $('p-dmap').checked,
     render_wav: $('p-wav').checked, wav_power: n('p-wav-pow'), wav_smooth: n('p-wav-smooth'),
     render_slabs: $('p-dslabs').checked, slab_size: n('p-dslab-size'), slab_overlap: n('p-dslab-ov'),
@@ -139,8 +139,9 @@ function applyParams(p) {
   if (!p) return;
   $('p-align').checked = p.align ?? true; $('p-shift').checked = p.shift ?? true; $('p-scale').checked = p.scale ?? true; $('p-rotation').checked = p.rotation ?? true; $('p-bright').checked = p.brightness ?? true;
   setStep('p-coarsen', p.coarsen ?? 2); $('p-interp').value = INTERPS.includes(p.interp) ? p.interp : 'spline4x4';
+  $('p-model').value = ['affine', 'projective'].includes(p.model) ? p.model : 'similarity';
   setStep('p-levels', p.levels ?? 0); setStep('p-energy', p.energy_radius ?? 1);
-  $('p-top').value = p.top ?? 'de'; setStep('p-topr', p.top_radius ?? 2); $('p-chroma').checked = p.use_chroma ?? false;
+  $('p-top').value = p.top ?? 'de'; setStep('p-topr', p.top_radius ?? 2); $('p-chroma').checked = p.use_chroma ?? false; setStep('p-halo', p.halo ?? 0);
   setStep('p-proxy', p.proxy_edge ?? 1400); st.turbo = p.turbo ?? false;
   setStep('p-depthscale', p.depth_scale ?? 2); setStep('p-depthlevel', p.depth_level ?? 2); $('p-dmap').checked = p.render_dmap ?? false; st.cmpMode = p.cmp_mode ?? 'swipe';
   $('p-dslabs').checked = p.render_slabs ?? false; setStep('p-dslab-size', p.slab_size ?? 10); setStep('p-dslab-ov', p.slab_overlap ?? 2);
@@ -531,8 +532,8 @@ const keptSummary = (k) => k.kind === 'file' ? `${k.name} · ${k.w}×${k.h}, ${k
 function keptTip(k) {
   if (k.kind === 'file') return `${k.name}\n${k.w}×${k.h}, ${k.bits}-bit${k.meta && k.meta.text ? `\n${k.meta.text}` : ''}`;
   const p = k.params || {};
-  const fus = `levels ${p.levels || 'auto'}, energy radius ${p.energy_radius}, top ${p.top} r${p.top_radius}${p.use_chroma ? ', chroma' : ''}`;
-  const al = p.align ? `aligned (coarsen ${p.coarsen}${p.interp && p.interp !== 'spline4x4' ? `, ${p.interp}` : ''}${!p.shift ? ', no shift' : ''}${!p.scale ? ', no scale' : ''}${!p.rotation ? ', no rotation' : ''})` : 'not aligned';
+  const fus = `levels ${p.levels || 'auto'}, energy radius ${p.energy_radius}, top ${p.top} r${p.top_radius}${p.use_chroma ? ', chroma' : ''}${p.halo ? `, halo control ${p.halo}` : ''}`;
+  const al = p.align ? `aligned (${p.model && p.model !== 'similarity' ? `${p.model}, ` : ''}coarsen ${p.coarsen}${p.interp && p.interp !== 'spline4x4' ? `, ${p.interp}` : ''}${!p.shift ? ', no shift' : ''}${!p.scale ? ', no scale' : ''}${!p.rotation ? ', no rotation' : ''})` : 'not aligned';
   return `run ${k.run}: ${k.frames} frames, ${k.first} .. ${k.last}\n${al}${p.brightness ? ', brightness equalised' : ''}${k.dust ? `, dust map ${k.dust}` : ''}\n${fus}\ndepth scale ${p.depth_scale}${p.render_dmap ? `, DFR${p.render_slabs ? ` from slabs of ${p.slab_size} (overlap ${p.slab_overlap})` : ''}` : ''}${p.render_wav ? `, WAV (power ${p.wav_power}, smoothing ${p.wav_smooth})` : ''}\n${k.w}×${k.h}, ${k.bits}-bit, ${k.secs} s, ${k.when.toLocaleTimeString()}`;
 }
 function keepResult(why) {
@@ -1018,7 +1019,7 @@ function onFrame(m) {
   st.peak.pixmax = null;
   st.frames[m.index] = { name: m.name, w: m.w, h: m.h, bits: m.bits, proxy: m.proxy, strip: m.strip, sim: m.sim, gain: m.gain || null, peak };
   setProgress('fusing', m.done, m.total);
-  log(`[lapstack]   frame ${String(m.index).padStart(3)}: dx=${m.sim[0].toFixed(2)}px dy=${m.sim[1].toFixed(2)}px scale=${m.sim[2].toFixed(5)} rot=${m.sim[3].toFixed(3)}°` + (m.gain ? ` gain=${m.gain.map((v) => v.toFixed(3)).join('/')}` : '') + `  (${m.ms.toFixed(0)} ms)`);
+  log(`[lapstack]   frame ${String(m.index).padStart(3)}: dx=${m.sim[0].toFixed(2)}px dy=${m.sim[1].toFixed(2)}px scale=${m.sim[2].toFixed(5)} rot=${m.sim[3].toFixed(3)}°` + (m.sim.length > 4 && (m.sim[4] !== 1 || m.sim[5] !== 0) ? ` aspect=${m.sim[4].toFixed(5)} shear=${m.sim[5].toFixed(5)}` : '') + (m.sim.length > 6 && (m.sim[6] !== 0 || m.sim[7] !== 0) ? ` persp=${m.sim[6].toFixed(5)}/${m.sim[7].toFixed(5)}` : '') + (m.gain ? ` gain=${m.gain.map((v) => v.toFixed(3)).join('/')}` : '') + `  (${m.ms.toFixed(0)} ms)`);
   renderThumb(m.index);
   if (st.view === 'source' && st.selected === m.index) draw();
 }
@@ -1599,7 +1600,7 @@ async function signBlob(blob, o, name, mime) {
     title: name,
     assertions: [
       { label: 'c2pa.actions', data: { actions: [{ action: 'c2pa.created', digitalSourceType: 'http://cv.iptc.org/newscodes/digitalsourcetype/compositeCapture', softwareAgent: { name: 'lapstack', version: '0.1.0' } }] } },
-      { label: 'org.lapstack.stack', data: { output: o.token, frames: st.files.map((f) => f.name), align: p.align, levels: p.levels, energy_radius: p.energy_radius, top: p.top, top_radius: p.top_radius, use_chroma: p.use_chroma, brightness: p.brightness, retouch_strokes: R.undo, crop: cropArea() ? [cropArea().x, cropArea().y, cropArea().w, cropArea().h] : null } },
+      { label: 'org.lapstack.stack', data: { output: o.token, frames: st.files.map((f) => f.name), align: p.align, levels: p.levels, energy_radius: p.energy_radius, top: p.top, top_radius: p.top_radius, use_chroma: p.use_chroma, halo: p.halo, brightness: p.brightness, retouch_strokes: R.undo, crop: cropArea() ? [cropArea().x, cropArea().y, cropArea().w, cropArea().h] : null } },
     ],
   };
   const bytes = await blob.arrayBuffer();

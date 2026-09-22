@@ -12,8 +12,10 @@ const align = q.get('align') === '1';
 const listDir = q.get('list') || 'test/frames';       // directory with list.json
 const expectedUrl = q.has('expected') ? q.get('expected') : 'test/expected.png'; // '' = skip the comparison
 const coarsen = Number(q.get('coarsen') || 1);
-const interp = q.get('interp') || 'spline4x4';          // the warp's kernel (nearest | bilinear | bicubic | spline4x4 | spline6x6 | lanczos3)
+const interp = q.get('interp') || 'spline4x4';
+const model = q.get('model') || 'similarity';           // the alignment model (similarity | affine | projective)          // the warp's kernel (nearest | bilinear | bicubic | spline4x4 | spline6x6 | lanczos3)
 const depthMode = q.get('depth') || 'dff';                 // dff | winner
+const halo = Number(q.get('halo') || 0);                    // halo control hardness (0 = off)
 const depthScale = Number(q.get('depth_scale') || 2);
 const render = q.get('render') === '1';                     // also render from the depth map (second pass)
 const expectedDff = q.has('expected_dff') ? q.get('expected_dff') : 'test/expected_dff.u16'; // raw u16 LE, '' = skip
@@ -50,7 +52,7 @@ try {
   const done = wait('done');
   const done2 = render ? wait('done2') : null;
   // brightness off: the native reference was fused from the frames as they are
-  worker.postMessage({ type: 'run', files, params: { align, coarsen, interp, brightness: false, proxy_edge: 400, depth: depthMode, depth_scale: depthScale, render_dmap: render } });
+  worker.postMessage({ type: 'run', files, params: { align, coarsen, interp, model, halo, brightness: false, proxy_edge: 400, depth: depthMode, depth_scale: depthScale, render_dmap: render } });
   const res = await done;
   log(`done: ${res.w}x${res.h} ${res.frames} frames, ${res.ms.toFixed(0)} ms`);
   let dmap = null;
@@ -93,6 +95,7 @@ try {
   let cmin = Infinity, cmax = -Infinity, csum = 0; for (const v of conf) { cmin = Math.min(cmin, v); cmax = Math.max(cmax, v); csum += v; }
   if (conf.length && (cmin < 0 || cmax > 1)) throw new Error(`confidence out of [0, 1]: ${cmin}..${cmax}`);
   const pngP = wait('png'); worker.postMessage({ type: 'save', kind: 'fused' }); const png = await pngP;
+  if (q.get('dump') === '1') { const u8 = new Uint8Array(png.bytes); let b64 = ''; for (let i = 0; i < u8.length; i += 0x8000) b64 += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); window.__png = btoa(b64); }   // ?dump=1: the fused PNG as base64 for the harness (PRINT_EXPR='window.__png')
   // depth from focus: full-res map vs the native reference (same frames, same scale)
   let dff = null;
   if (depthMode === 'dff') {
@@ -129,7 +132,7 @@ try {
   // slabs give a different image. Each is a run of its own (the engine keeps one).
   const runWith = async (extra) => {
     const d1 = wait('done'), d2 = wait('done2');
-    worker.postMessage({ type: 'run', files, params: { align, coarsen, interp, brightness: false, proxy_edge: 400, depth: depthMode, depth_scale: depthScale, ...extra } });
+    worker.postMessage({ type: 'run', files, params: { align, coarsen, interp, model, halo, brightness: false, proxy_edge: 400, depth: depthMode, depth_scale: depthScale, ...extra } });
     const a = await d1, b = await d2; return [new Uint8Array(a.rgba), new Uint8Array(b.rgba), b.ms];
   };
   const [lapA, oneSlab, msA] = await runWith({ render_dmap: true, render_slabs: true, slab_size: res.frames, slab_overlap: 0 });
@@ -161,7 +164,7 @@ try {
   // with the first run's registration given, so the warps are the same and only the spots differ
   // (the search itself lands a little elsewhere once the spots are filled, and every pixel moves)
   const dustDone = wait('done');
-  worker.postMessage({ type: 'run', files, params: { align, coarsen, interp, brightness: false, proxy_edge: 400, depth: depthMode, depth_scale: depthScale }, sims: frames.slice(0, res.frames).map((f) => f.sim) });
+  worker.postMessage({ type: 'run', files, params: { align, coarsen, interp, model, halo, brightness: false, proxy_edge: 400, depth: depthMode, depth_scale: depthScale }, sims: frames.slice(0, res.frames).map((f) => f.sim) });
   const dres = await dustDone;
   const dgot = new Uint8Array(dres.rgba);
   if (dres.w !== res.w || dres.h !== res.h) throw new Error(`the run with the dust map is ${dres.w}x${dres.h}, the plain one ${res.w}x${res.h}`);

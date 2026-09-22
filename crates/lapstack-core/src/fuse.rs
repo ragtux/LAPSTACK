@@ -21,9 +21,25 @@
 //! coefficients — the pyramid is linear, so that *is* the luma pyramid) and
 //! applied to all three channels, so colour never splits at a selection edge.
 //!
+//! * **Halo control** (`halo` > 0) — the levels coarser than `depth_level`
+//!   do not pick their own winners. Each level's winner-take-all is blind to
+//!   the others, and a bright object's defocused copy, spread over the
+//!   background in the frames that focus behind it, carries strong coarse
+//!   energy where the sharp frame has none, so the coarse levels collect the
+//!   glow from one frame after another while the fine levels take the sharp
+//!   background — the halo of the pyramid method. With halo control the
+//!   level `depth_level` (the guide) still selects by region energy, and every
+//!   coarser level, the residual included, is the mean of the frames weighed
+//!   by `w = ((RE_guide + ε) / ρ)^halo`, the guide's region energy raised to the
+//!   hardness `halo` and REDUCEd to the level's size (the Gaussian pyramid of a
+//!   weight mask, as a multiresolution spline blends with it). The coarse
+//!   structure then follows the frames the guide found sharp, and where none
+//!   is (a flat area) the frames average. `halo` = 1 weighs by the energy
+//!   itself, higher values approach a hard pick; 0 is off.
+//!
 //! The accumulator folds frames in one at a time: only the running fused
-//! pyramid, one best-energy plane per level and the tiny per-frame residuals
-//! are held, so memory does not grow with the stack size.
+//! pyramid, one best-energy (or weight-sum) plane per level and the tiny
+//! per-frame residuals are held, so memory does not grow with the stack size.
 
 use crate::pyramid::{self, Img3, for_rows, reflect};
 use rayon::prelude::*;
@@ -67,7 +83,12 @@ pub struct FuseParams {
     /// Pyramid level whose winner map is reported as the depth map (0 = the
     /// finest, which is noise wherever the scene is flat; 2 = quarter
     /// resolution, a usable index map). Clamped to the last band-pass level.
+    /// With halo control it is also the guide level.
     pub depth_level: usize,
+    /// Halo control: hardness of the weights the levels coarser than
+    /// `depth_level` blend with (the guide's region energy to this power);
+    /// 0 = off, every level picks its own winner.
+    pub halo: f32,
 }
 
 impl Default for FuseParams {
@@ -80,8 +101,38 @@ impl Default for FuseParams {
             entropy_bins: 256,
             use_chroma: false,
             depth_level: 2,
+            halo: 0.0,
         }
     }
+}
+
+/// Reference energy the halo-control weights are taken relative to (a
+/// well-textured level-2 band), so that `(RE / ρ)^p` stays within f32 for
+/// hardness up to `HALO_MAX`.
+pub const HALO_REF: f32 = 1e-4;
+/// Floor added to the energy before weighing: below it the frames average.
+pub const HALO_FLOOR: f32 = 1e-8;
+/// Largest useful hardness (the weights' exponent is clamped to ±60, a span
+/// of 1e52, which hardness 8 uses over the practical range of energies).
+pub const HALO_MAX: f32 = 8.0;
+
+/// Halo control: the guide level `depth_level` and the hardness, when on.
+pub fn halo_guide(params: &FuseParams, levels: usize) -> Option<(usize, f32)> {
+    (params.halo > 0.0).then(|| (params.depth_level.min(levels - 1), params.halo.min(HALO_MAX)))
+}
+
+/// The weight a coarse coefficient gets from the guide's region energy `re`
+/// at hardness `p`: `((re + floor) / ref)^p`, its exponent clamped to ±60.
+#[inline]
+pub fn halo_weight(re: f32, p: f32) -> f32 {
+    (p * ((re + HALO_FLOOR) / HALO_REF).ln()).clamp(-60.0, 60.0).exp()
+}
+
+/// Plane `w` of halo weights from the region energy `re`.
+pub fn halo_weights(re: &[f32], p: f32) -> Vec<f32> {
+    let mut w = vec![0f32; re.len()];
+    w.par_iter_mut().zip(re.par_iter()).for_each(|(o, &e)| *o = halo_weight(e, p));
+    w
 }
 
 /// Binomial window weights of radius `r` (row 2r of Pascal's triangle / 4^r).
@@ -273,15 +324,19 @@ pub struct Fuser {
     pub h: usize,
     pub levels: usize,
     params: FuseParams,
-    /// Fused band-pass levels `L_0 … L_{N-1}` (empty until the first push).
+    /// Fused band-pass levels `L_0 … L_{N-1}` (empty until the first push);
+    /// with halo control also the residual `G_N`, as `Σ w·G_N`.
     acc: Vec<Img3>,
-    /// Winning region energy per level.
+    /// Winning region energy per level; with halo control, at the levels
+    /// coarser than the guide (the residual included), the weight sum `Σ w`.
     best: Vec<Vec<f32>>,
     /// Winning frame index at level `depth_level`.
     winner: Vec<u16>,
     depth_level: usize,
-    /// Every frame's residual `G_N` (tiny).
+    /// Every frame's residual `G_N` (tiny); unused with halo control.
     tops: Vec<Img3>,
+    /// Halo control: (guide level, hardness).
+    halo: Option<(usize, f32)>,
     count: usize,
 }
 
@@ -289,6 +344,7 @@ impl Fuser {
     pub fn new(w: usize, h: usize, params: FuseParams) -> Fuser {
         let levels = params.levels.unwrap_or_else(|| pyramid::auto_levels(w, h, 32)).max(1);
         let depth_level = params.depth_level.min(levels - 1);
+        let halo = halo_guide(&params, levels);
         Fuser {
             w,
             h,
@@ -299,8 +355,15 @@ impl Fuser {
             winner: Vec::new(),
             depth_level,
             tops: Vec::new(),
+            halo,
             count: 0,
         }
+    }
+
+    /// The band-pass levels that pick their own winner: all of them, or up
+    /// to the guide with halo control.
+    fn select_levels(&self) -> usize {
+        self.halo.map_or(self.levels, |(g, _)| g + 1)
     }
 
     pub fn count(&self) -> usize {
@@ -311,19 +374,17 @@ impl Fuser {
     pub fn push(&mut self, frame: &Img3) {
         assert!(frame.w == self.w && frame.h == self.h, "frame size mismatch");
         let mut pyr = pyramid::build(frame, self.levels);
-        let top = pyr.pop().unwrap();
+        let nsel = self.select_levels();
         let idx = self.count as u16;
-        if self.count == 0 {
-            self.best = pyr
-                .iter()
-                .map(|l| region_energy(l, self.params.energy_radius, self.params.use_chroma))
-                .collect();
+        let first = self.count == 0;
+        // region energy of the levels that select (with halo control the guide's also makes the weights)
+        let energies: Vec<Vec<f32>> = pyr[..nsel].par_iter().map(|l| region_energy(l, self.params.energy_radius, self.params.use_chroma)).collect();
+        if first {
             let d = &pyr[self.depth_level];
             self.winner = vec![0; d.w * d.h];
-            self.acc = pyr;
+            self.best = energies.clone();
         } else {
-            for (li, l) in pyr.iter().enumerate() {
-                let en = region_energy(l, self.params.energy_radius, self.params.use_chroma);
+            for (li, (l, en)) in pyr.iter().zip(&energies).enumerate() {
                 let (w, best, acc) = (l.w, &mut self.best[li], &mut self.acc[li]);
                 let [a0, a1, a2] = &mut acc.p;
                 let [n0, n1, n2] = &l.p;
@@ -362,7 +423,36 @@ impl Fuser {
                 }
             }
         }
-        self.tops.push(top);
+        if let Some((guide, p)) = self.halo {
+            // the coarser levels (residual included): Σ w·L and Σ w, the guide's
+            // weights REDUCEd down to each level's size
+            let mut wgt = halo_weights(&energies[guide], p);
+            let (mut ww, mut wh) = (pyr[guide].w, pyr[guide].h);
+            for li in guide + 1..=self.levels {
+                (wgt, ww, wh) = pyramid::reduce(&wgt, ww, wh);
+                debug_assert!(ww == pyr[li].w && wh == pyr[li].h);
+                if first {
+                    for c in 0..3 {
+                        pyr[li].p[c].par_iter_mut().zip(&wgt).for_each(|(a, &k)| *a *= k);
+                    }
+                    self.best.push(wgt.clone());
+                } else {
+                    self.best[li].par_iter_mut().zip(&wgt).for_each(|(b, &k)| *b += k);
+                    for c in 0..3 {
+                        self.acc[li].p[c].par_iter_mut().zip(&pyr[li].p[c]).zip(&wgt).for_each(|((a, &v), &k)| *a += k * v);
+                    }
+                }
+            }
+            if first {
+                self.acc = pyr;
+            }
+        } else {
+            let top = pyr.pop().unwrap();
+            if first {
+                self.acc = pyr;
+            }
+            self.tops.push(top);
+        }
         self.count += 1;
     }
 
@@ -371,10 +461,19 @@ impl Fuser {
     /// at `depth_level`, nearest-upsampled to full resolution, as f32.
     pub fn finish(mut self) -> (Img3, Vec<f32>) {
         assert!(self.count > 0, "no frames pushed");
-        let top = fuse_residuals(&self.tops, &self.params);
         let (dw, dh) = (self.acc[self.depth_level].w, self.acc[self.depth_level].h);
         let mut pyr = std::mem::take(&mut self.acc);
-        pyr.push(top);
+        match self.halo {
+            Some((guide, _)) => {
+                // the weighted means: Σ w·L / Σ w
+                for li in guide + 1..=self.levels {
+                    for c in 0..3 {
+                        pyr[li].p[c].par_iter_mut().zip(&self.best[li]).for_each(|(a, &k)| *a /= k);
+                    }
+                }
+            }
+            None => pyr.push(fuse_residuals(&self.tops, &self.params)),
+        }
         let mut img = pyramid::collapse(pyr);
         for c in 0..3 {
             img.p[c].par_iter_mut().for_each(|v| *v = v.clamp(0.0, 1.0));
@@ -482,6 +581,67 @@ mod tests {
             assert!(left as f32 > 0.9 * (n / 2 - 8 * h) as f32, "{params:?}: left {left}");
             assert!(right as f32 > 0.9 * (n / 2 - 8 * h) as f32, "{params:?}: right {right}");
         }
+    }
+
+    #[test]
+    fn halo_weight_is_monotonic_and_bounded() {
+        assert!((halo_weight(HALO_REF - HALO_FLOOR, 3.0) - 1.0).abs() < 1e-5);
+        assert!(halo_weight(1e-3, 2.0) > halo_weight(1e-4, 2.0));
+        assert!(halo_weight(1e-4, 4.0) / halo_weight(1e-5, 4.0) > 9e3);
+        assert!(halo_weight(0.0, 8.0) > 0.0 && halo_weight(0.0, 8.0).is_finite());
+        assert!(halo_weight(1e3, 8.0).is_finite());
+        assert_eq!(halo_guide(&FuseParams::default(), 5), None);
+        assert_eq!(halo_guide(&FuseParams { halo: 2.0, ..Default::default() }, 2), Some((1, 2.0)));
+    }
+
+    #[test]
+    fn halo_control_keeps_identical_frames() {
+        let im = checker(70, 50, 7);
+        let p = FuseParams { halo: 2.0, levels: Some(3), depth_level: 1, ..Default::default() };
+        let mut f = Fuser::new(70, 50, p);
+        for _ in 0..3 {
+            f.push(&im);
+        }
+        let (out, depth) = f.finish();
+        assert!(rms(&out, &im) < 1e-5);
+        assert!(depth.iter().all(|&d| d == 0.0));
+    }
+
+    /// The halo mechanism in one piece: frame A is sharp fine texture; frame
+    /// B is the texture defocused with a broad bright bump on it — coarse
+    /// structure only, as a defocused copy of a bright object has. Every level
+    /// picking its own winner takes the bump (B alone has energy at the coarse
+    /// levels); with halo control the guide finds A sharp everywhere, so the
+    /// coarse levels follow A and the bump stays out.
+    #[test]
+    fn halo_control_coarse_levels_follow_the_guide() {
+        let (w, h) = (192, 144);
+        let a = checker(w, h, 6); // a 12 px period: the guide (level 2, scale 4 px) sees it
+        let mut b = blur(&a, 64); // σ = 8 px: the texture is gone
+        for y in 0..h {
+            for x in 0..w {
+                let d2 = (x as f32 - 96.0).powi(2) + (y as f32 - 72.0).powi(2);
+                let bump = 0.35 * (-d2 / (2.0 * 20.0f32.powi(2))).exp();
+                for c in 0..3 {
+                    b.p[c][y * w + x] = (b.p[c][y * w + x] + bump).min(1.0);
+                }
+            }
+        }
+        let fuse = |halo: f32, order: [&Img3; 2]| {
+            let p = FuseParams { levels: Some(5), depth_level: 2, halo, ..Default::default() };
+            let mut f = Fuser::new(w, h, p);
+            f.push(order[0]);
+            f.push(order[1]);
+            f.finish().0
+        };
+        let off = rms(&fuse(0.0, [&a, &b]), &a);
+        assert!(off > 0.05, "without halo control the bump gets in: rms {off}");
+        for halo in [1.0, 2.0, 4.0, 8.0] {
+            let on = rms(&fuse(halo, [&a, &b]), &a);
+            assert!(on < 0.15 * off, "halo {halo}: rms {on} vs {off} without");
+        }
+        // the frames' order makes no difference
+        assert!(rms(&fuse(2.0, [&b, &a]), &a) < 0.15 * off);
     }
 
     #[test]

@@ -14,12 +14,12 @@ mod depth;
 mod gif;
 mod gpu;
 
-use align::{Aligner, LumaPyr, Sim, affine_inv};
+use align::{Aligner, LumaPyr, Sim};
 use gpu::{Gpu, P, Rec, grid1, grid2};
 use depth::DepthGpu;
 use lapstack_core::depth::{DepthParams, FocusMeasure, Upsample};
-use lapstack_core::fuse::{FuseParams, TopRule, binomial, fuse_residuals, upsample_index};
-use lapstack_core::align::{Interp, Rect, common_area};
+use lapstack_core::fuse::{FuseParams, HALO_FLOOR, HALO_REF, TopRule, binomial, fuse_residuals, halo_guide, upsample_index};
+use lapstack_core::align::{AlignModel, Interp, Rect, common_area, free_mask, inverse, shifted};
 use lapstack_core::dust::{self, DustMap, DustMode, DustParams};
 use lapstack_core::pyramid::{Img3, auto_levels, half};
 use lapstack_core::view::{self, Layout, View};
@@ -44,12 +44,16 @@ pub struct Params {
     pub entropy_bins: usize,
     pub use_chroma: bool,
     pub depth_level: usize,
+    /// Halo control hardness (`lapstack_core::fuse::FuseParams::halo`); 0 = off.
+    pub halo: f32,
     pub align: bool,
     /// Bring every frame to frame 0's brightness (one gain per channel, see lapstack_core::brightness).
     pub brightness: bool,
     pub shift: bool,
     pub scale: bool,
     pub rotation: bool,
+    /// similarity | affine | projective (`lapstack_core::align::AlignModel` by name).
+    pub model: String,
     pub coarsen: usize,
     /// The kernel the aligned frames are resampled with (`lapstack_core::align::Interp` by name).
     pub interp: String,
@@ -101,11 +105,13 @@ impl Default for Params {
             entropy_bins: 256,
             use_chroma: false,
             depth_level: 2,
+            halo: 0.0,
             brightness: true,
             align: true,
             shift: true,
             scale: true,
             rotation: true,
+            model: AlignModel::default().name().into(),
             coarsen: 2,
             interp: Interp::default().name().into(),
             proxy_edge: 1400,
@@ -135,11 +141,15 @@ struct Run {
     params: Params,
     /// `params.interp`, parsed.
     interp: Interp,
+    /// `params.model`, parsed.
+    model: AlignModel,
     levels: usize,
     depth_level: usize,
     dims: Vec<(usize, usize)>,
     cur: Vec<wgpu::Buffer>,
     acc: Vec<wgpu::Buffer>,
+    /// Best energy per band-pass level (levels + 1 buffers; with halo control
+    /// the weight sum at the levels coarser than the guide, the residual's included).
     best: Vec<wgpu::Buffer>,
     tmp_half: wgpu::Buffer,
     tmp_full: wgpu::Buffer,
@@ -302,7 +312,7 @@ impl Run {
             Some((a, b)) => (&a[..], &b[..]),
             None => (&self.acc[..], &self.best[..]),
         };
-        FoldBufs { dims: &rf.dims, levels: rf.levels, cur, acc, best, tmp_half, en }
+        FoldBufs { dims: &rf.dims, levels: rf.levels, halo: halo_guide(&rf.fp, rf.levels), cur, acc, best, tmp_half, en }
     }
     fn refold_scratch(&self) -> &wgpu::Buffer {
         match &self.refold.as_ref().unwrap().work {
@@ -532,10 +542,9 @@ fn record_rewarp(g: &Gpu, run: &Run, rec: &mut Rec<'_>, index: usize, dx: f32) -
     let identity = !registered && dx == 0.0;
     let mut p = P { w: w as u32, h: h as u32, flag: identity as u32, klen: run.interp.id(), ..Default::default() };
     if !identity {
-        let inv = affine_inv(if registered { sim } else { Sim::id() }.matrix(w, h));
-        // the output moves dx right, so its source is taken dx to the left: t' = t − A·(dx, 0)
-        let t = [inv[0][2] - inv[0][0] * dx as f64, inv[1][2] - inv[1][0] * dx as f64];
-        g.queue.write_buffer(&run.aff, 0, bytemuck::cast_slice(&[t[0] as f32, t[1] as f32, 0.0, 0.0]));
+        // the output moves dx right, so its source is taken dx to the left
+        let inv = shifted(inverse(if registered { sim } else { Sim::id() }.matrix(w, h)), dx as f64);
+        g.queue.write_buffer(&run.aff, 0, bytemuck::cast_slice(&[inv[0][2] as f32, inv[1][2] as f32, inv[2][0] as f32, inv[2][1] as f32]));
         p.f0 = inv[0][0] as f32;
         p.f1 = inv[0][1] as f32;
         p.f2 = inv[1][0] as f32;
@@ -555,6 +564,8 @@ fn record_rewarp(g: &Gpu, run: &Run, rec: &mut Rec<'_>, index: usize, dx: f32) -
 struct FoldBufs<'a> {
     dims: &'a [(usize, usize)],
     levels: usize,
+    /// Halo control: (guide level, hardness).
+    halo: Option<(usize, f32)>,
     cur: &'a [wgpu::Buffer],
     acc: &'a [wgpu::Buffer],
     best: &'a [wgpu::Buffer],
@@ -564,7 +575,22 @@ struct FoldBufs<'a> {
 
 impl Run {
     fn fold_bufs(&self) -> FoldBufs<'_> {
-        FoldBufs { dims: &self.dims, levels: self.levels, cur: &self.cur, acc: &self.acc, best: &self.best, tmp_half: &self.tmp_half, en: &self.en }
+        FoldBufs { dims: &self.dims, levels: self.levels, halo: halo_guide(&self.fp, self.levels), cur: &self.cur, acc: &self.acc, best: &self.best, tmp_half: &self.tmp_half, en: &self.en }
+    }
+}
+
+/// Record the reset of a fold's accumulators for a new fold: the best
+/// energies to -1 (any energy wins, so the first frame fills the
+/// accumulator); with halo control the coarser levels' weight sums and
+/// accumulators to 0.
+fn record_reset(fb: &FoldBufs<'_>, rec: &mut Rec<'_>) {
+    for l in 0..=fb.levels {
+        let (lw, lh) = fb.dims[l];
+        let sel = fb.halo.is_none_or(|(g, _)| l <= g);
+        rec.dispatch("fill", [None, None, Some(&fb.best[l]), None, None, None], P { w: (lw * lh) as u32, f0: if sel { -1.0 } else { 0.0 }, ..Default::default() }, grid1(lw * lh));
+        if !sel {
+            rec.dispatch("fill", [None, None, Some(&fb.acc[l]), None, None, None], P { w: (3 * lw * lh) as u32, ..Default::default() }, grid1(3 * lw * lh));
+        }
     }
 }
 
@@ -602,12 +628,11 @@ fn record_fold_in(
             rec.dispatch("exp_v", [None, Some(fb.tmp_half), Some(&fb.cur[l]), None, None, None], pe, grid2(fw, fh));
         }
     }
-    // region energy + winner-take-all per band-pass level
-    for l in 0..fb.levels {
+    // the region energy of level `l` into `en` (and the peaking map from it)
+    let energy = |rec: &mut Rec<'_>, l: usize| {
         let (lw, lh) = fb.dims[l];
-        let ln = lw * lh;
         let pl = P { w: lw as u32, h: lh as u32, klen, flag: use_chroma as u32, ..Default::default() };
-        rec.dispatch("energy", [Some(&fb.cur[l]), None, None, Some(fb.en), None, None], pl, grid1(ln));
+        rec.dispatch("energy", [Some(&fb.cur[l]), None, None, Some(fb.en), None, None], pl, grid1(lw * lh));
         if klen > 1 {
             rec.dispatch("win_h", [None, Some(scratch), None, Some(fb.en), Some(wt), None], pl, grid2(lw, lh));
             rec.dispatch("win_v", [None, Some(scratch), None, Some(fb.en), Some(wt), None], pl, grid2(lw, lh));
@@ -621,14 +646,38 @@ fn record_fold_in(
                 grid2(kw, kh),
             );
         }
+    };
+    // region energy + winner-take-all per band-pass level (up to the guide with halo control)
+    let nsel = fb.halo.map_or(fb.levels, |(g, _)| g + 1);
+    if let Some(pk) = peak.filter(|pk| pk.4 >= nsel) {
+        energy(rec, pk.4); // the peaking level beyond the guide: its energy alone
+    }
+    for l in 0..nsel {
+        let (lw, lh) = fb.dims[l];
+        energy(rec, l);
         let ps = P { w: lw as u32, h: lh as u32, flag: winner.is_some_and(|(_, dl)| l == dl) as u32, f0: winner.map_or(0.0, |(i, _)| i as f32), ..Default::default() };
-        rec.dispatch("sel", [Some(&fb.cur[l]), Some(&fb.best[l]), Some(&fb.acc[l]), Some(fb.en), None, None], ps, grid1(ln));
+        rec.dispatch("sel", [Some(&fb.cur[l]), Some(&fb.best[l]), Some(&fb.acc[l]), Some(fb.en), None, None], ps, grid1(lw * lh));
+    }
+    if let Some((g, p)) = fb.halo {
+        // halo control: the guide's weights in place of its energy, REDUCEd level
+        // by level, fold the coarser levels and the residual as Σ w·L and Σ w
+        let (mut lw, mut lh) = fb.dims[g];
+        rec.dispatch("wgt", [None, None, None, Some(fb.en), None, None], P { w: lw as u32, h: lh as u32, f0: p, f1: HALO_FLOOR, f2: HALO_REF, ..Default::default() }, grid1(lw * lh));
+        for l in g + 1..=fb.levels {
+            let (cw, ch) = fb.dims[l];
+            let pr = P { w: lw as u32, h: lh as u32, ow: cw as u32, oh: ch as u32, ..Default::default() };
+            rec.dispatch("red_h", [Some(fb.en), Some(fb.tmp_half), None, None, None, None], pr, grid2(cw, lh));
+            rec.dispatch("red_v", [None, Some(fb.tmp_half), Some(fb.en), None, None, None], pr, grid2(cw, ch));
+            rec.dispatch("wacc", [Some(&fb.cur[l]), Some(&fb.best[l]), Some(&fb.acc[l]), Some(fb.en), None, None], P { w: cw as u32, h: ch as u32, ..Default::default() }, grid1(cw * ch));
+            (lw, lh) = (cw, ch);
+        }
     }
 }
 
 /// Record the collapse: fuse the residuals `tops` (on the CPU) into
-/// `acc[levels]`, expand-and-add down the accumulator pyramid, and clamp
-/// the image left in `acc[0]` to [0, 1].
+/// `acc[levels]` — or, with halo control, turn the coarse levels' sums into
+/// their weighted means — expand-and-add down the accumulator pyramid, and
+/// clamp the image left in `acc[0]` to [0, 1].
 fn record_collapse(g: &Gpu, run: &Run, rec: &mut Rec<'_>, tops: &[Img3]) {
     record_collapse_in(g, &run.fold_bufs(), &run.fp, rec, tops);
 }
@@ -636,13 +685,23 @@ fn record_collapse(g: &Gpu, run: &Run, rec: &mut Rec<'_>, tops: &[Img3]) {
 fn record_collapse_in(g: &Gpu, fb: &FoldBufs<'_>, fp: &FuseParams, rec: &mut Rec<'_>, tops: &[Img3]) {
     let (w, h) = fb.dims[0];
     let n = w * h;
-    let top = fuse_residuals(tops, fp);
-    let (tw, th) = fb.dims[fb.levels];
-    let mut flat = Vec::with_capacity(3 * tw * th);
-    for c in 0..3 {
-        flat.extend_from_slice(&top.p[c]);
+    match fb.halo {
+        Some((guide, _)) => {
+            for l in guide + 1..=fb.levels {
+                let (lw, lh) = fb.dims[l];
+                rec.dispatch("wnorm", [None, Some(&fb.best[l]), Some(&fb.acc[l]), None, None, None], P { w: lw as u32, h: lh as u32, ..Default::default() }, grid1(lw * lh));
+            }
+        }
+        None => {
+            let top = fuse_residuals(tops, fp);
+            let (tw, th) = fb.dims[fb.levels];
+            let mut flat = Vec::with_capacity(3 * tw * th);
+            for c in 0..3 {
+                flat.extend_from_slice(&top.p[c]);
+            }
+            g.queue.write_buffer(&fb.acc[fb.levels], 0, bytemuck::cast_slice(&flat));
+        }
     }
-    g.queue.write_buffer(&fb.acc[fb.levels], 0, bytemuck::cast_slice(&flat));
     for l in (0..fb.levels).rev() {
         let (fw, fh) = fb.dims[l];
         let (cw, ch) = fb.dims[l + 1];
@@ -852,7 +911,7 @@ impl Engine {
 
     /// Decode, align (chained to frame 0) and fold one frame. The first call
     /// sets up the run from `params_json`. Returns {index, w, h, bits,
-    /// proxy_w, proxy_h, proxy: Uint8Array (RGBA8), sim: [dx_px, dy_px, scale, rot_deg], ms}.
+    /// proxy_w, proxy_h, proxy: Uint8Array (RGBA8), sim: [dx_px, dy_px, scale, rot_deg, aspect, shear, px, py], ms}.
     /// `given`: the frame's registration in that same form, from a project file,
     /// used in place of the search (empty = search).
     /// `raw`: the bytes are a camera raw's, developed rather than decoded (so everywhere below).
@@ -889,15 +948,20 @@ impl Engine {
         // ---- align: luma pyramid of the new frame, NM search against the previous (warped) frame
         let mut sim = Sim::id();
         let mut t_align = now();
-        if run.params.align && run.count > 0 && given.len() == 4 {
-            sim = Sim { xoff: given[0] / w as f64, yoff: given[1] / h as f64, scale: given[2], rot: given[3].to_radians() };
+        if run.params.align && run.count > 0 && (given.len() == 4 || given.len() == Sim::N) {
+            // a project's registration: the four similarity terms, and the affine and perspective ones when it has them
+            let more = |k: usize, id: f64| given.get(k).copied().unwrap_or(id);
+            sim = Sim {
+                xoff: given[0] / w as f64, yoff: given[1] / h as f64, scale: given[2], rot: given[3].to_radians(),
+                aspect: more(4, 1.0), shear: more(5, 0.0), px: more(6, 0.0), py: more(7, 0.0),
+            };
         } else if run.params.align && run.count > 0 {
             let tgt = run.tgt_pyr.as_ref().unwrap();
             let mut rec = g.rec();
             rec.dispatch("luma_u16", [None, None, Some(&tgt.lv[0].0), None, None, Some(&run.up)], P { w: w as u32, h: h as u32, ..Default::default() }, grid1(n));
             tgt.reduce_chain(&mut rec, &run.tmp_half);
             rec.submit();
-            let free = [run.params.shift, run.params.shift, run.params.scale, run.params.rotation];
+            let free = free_mask(run.params.shift, run.params.scale, run.params.rotation, run.model);
             sim = run.aligner.as_ref().unwrap().align(g, run.ref_pyr.as_ref().unwrap(), tgt, run.guess, free, run.params.coarsen).await;
             t_align = now();
         }
@@ -907,8 +971,8 @@ impl Engine {
         let identity = !run.params.align || run.count == 0;
         let mut p = P { w: w as u32, h: h as u32, flag: identity as u32, klen: run.interp.id(), ..Default::default() };
         if !identity {
-            let inv = affine_inv(sim.matrix(w, h));
-            g.queue.write_buffer(&run.aff, 0, bytemuck::cast_slice(&[inv[0][2] as f32, inv[1][2] as f32, 0.0, 0.0]));
+            let inv = inverse(sim.matrix(w, h));
+            g.queue.write_buffer(&run.aff, 0, bytemuck::cast_slice(&[inv[0][2] as f32, inv[1][2] as f32, inv[2][0] as f32, inv[2][1] as f32]));
             p.f0 = inv[0][0] as f32;
             p.f1 = inv[0][1] as f32;
             p.f2 = inv[1][0] as f32;
@@ -998,7 +1062,7 @@ impl Engine {
         set(&o, "peak_h", kh as u32);
         set(&o, "peak", js_sys::Float32Array::from(&peak[..]));
         let sv = js_sys::Array::new();
-        for v in [sim.xoff * w as f64, sim.yoff * h as f64, sim.scale, sim.rot.to_degrees()] {
+        for v in [sim.xoff * w as f64, sim.yoff * h as f64, sim.scale, sim.rot.to_degrees(), sim.aspect, sim.shear, sim.px, sim.py] {
             sv.push(&JsValue::from_f64(v));
         }
         set(&o, "sim", sv);
@@ -1342,10 +1406,7 @@ impl Engine {
             return Err(JsValue::from_str(&format!("slab {lo}..={hi} is not within the run's {} frames", run.count)));
         }
         let mut rec = g.rec();
-        for (l, b) in run.best.iter().enumerate() {
-            let (lw, lh) = run.dims[l];
-            rec.dispatch("fill", [None, None, Some(b), None, None, None], P { w: (lw * lh) as u32, f0: -1.0, ..Default::default() }, grid1(lw * lh));
-        }
+        record_reset(&run.fold_bufs(), &mut rec);
         rec.submit();
         run.slab = Some(Slab { lo, hi, tops: Vec::new() });
         Ok(())
@@ -1847,7 +1908,7 @@ impl Engine {
             }
             (dims, levels, FuseParams { levels: Some(levels), ..run.fp.clone() })
         };
-        let per_view = 4 * (3 * dims.iter().map(|&(a, b)| a * b).sum::<usize>() + dims[..levels].iter().map(|&(a, b)| a * b).sum::<usize>());
+        let per_view = 4 * 4 * dims.iter().map(|&(a, b)| a * b).sum::<usize>();
         let owned = (REFOLD_BUDGET / per_view).max(if k == 1 { 0 } else { 1 });
         let per_pass = (owned + (k == 1) as usize).min(shifts.len()).max(1);
         let work = (k > 1).then(|| {
@@ -1859,7 +1920,7 @@ impl Engine {
                 let own = !(k == 1 && v == 0);
                 let bufs = own.then(|| {
                     let acc: Vec<_> = dims.iter().enumerate().map(|(l, &(lw, lh))| g.buffer_f32(&format!("refold acc{l}"), 3 * lw * lh)).collect();
-                    let best: Vec<_> = dims[..levels].iter().map(|&(lw, lh)| g.buffer_f32("refold best", lw * lh)).collect();
+                    let best: Vec<_> = dims.iter().map(|&(lw, lh)| g.buffer_f32("refold best", lw * lh)).collect();
                     (acc, best)
                 });
                 (bufs, Vec::new())
@@ -1902,11 +1963,7 @@ impl Engine {
         };
         let mut rec = g.rec();
         for v in 0..count {
-            let fb = run.refold_bufs(v);
-            for (l, b) in fb.best.iter().enumerate() {
-                let (lw, lh) = fb.dims[l];
-                rec.dispatch("fill", [None, None, Some(b), None, None, None], P { w: (lw * lh) as u32, f0: -1.0, ..Default::default() }, grid1(lw * lh));
-            }
+            record_reset(&run.refold_bufs(v), &mut rec);
         }
         rec.submit();
         let rf = run.refold.as_mut().unwrap();
@@ -2074,6 +2131,7 @@ impl Engine {
         }
         let top_rule = TopRule::parse(&params.top).ok_or_else(|| format!("unknown top rule '{}'", params.top))?;
         let interp = Interp::parse(&params.interp).ok_or_else(|| format!("unknown interpolation '{}'", params.interp))?;
+        let model = AlignModel::parse(&params.model).ok_or_else(|| format!("unknown alignment model '{}'", params.model))?;
         let fp = FuseParams {
             levels: params.levels,
             energy_radius: params.energy_radius,
@@ -2082,9 +2140,11 @@ impl Engine {
             entropy_bins: params.entropy_bins,
             use_chroma: params.use_chroma,
             depth_level: params.depth_level,
+            halo: params.halo,
         };
         let levels = params.levels.unwrap_or_else(|| auto_levels(w, h, 32)).max(1);
         let depth_level = params.depth_level.min(levels - 1);
+        let halo = halo_guide(&fp, levels);
         let mut dims = vec![(w, h)];
         for _ in 0..levels {
             let (cw, ch) = *dims.last().unwrap();
@@ -2096,9 +2156,12 @@ impl Engine {
             .enumerate()
             .map(|(l, &(lw, lh))| g.buffer_f32(&format!("acc{l}"), if l == depth_level { 4 } else { 3 } * lw * lh))
             .collect();
-        let best: Vec<_> = dims[..levels]
+        // -1: any energy wins, so the first frame fills the accumulator; the
+        // levels coarser than the halo-control guide sum weights from 0
+        let best: Vec<_> = dims
             .iter()
-            .map(|&(lw, lh)| g.buffer_init("best", bytemuck::cast_slice(&vec![-1.0f32; lw * lh])))
+            .enumerate()
+            .map(|(l, &(lw, lh))| g.buffer_init("best", bytemuck::cast_slice(&vec![if halo.is_none_or(|(g, _)| l <= g) { -1.0f32 } else { 0.0 }; lw * lh])))
             .collect();
         let wtv = binomial(params.energy_radius);
         let klen = wtv.len() as u32;
@@ -2121,8 +2184,10 @@ impl Engine {
             (None, None, None)
         };
         log(&format!(
-            "[lapstack] run: {w}x{h} {bits}-bit, {levels} levels (residual {}x{}), window {klen}x{klen}, top {:?}, align {} ({}), depth {}",
-            dims[levels].0, dims[levels].1, top_rule, params.align, interp.name(),
+            "[lapstack] run: {w}x{h} {bits}-bit, {levels} levels (residual {}x{}), window {klen}x{klen}, top {:?}{}, align {} ({}, {}), depth {}",
+            dims[levels].0, dims[levels].1, top_rule,
+            match halo { Some((g, p)) => format!(", halo control {p} above level {g}"), None => String::new() },
+            params.align, model.name(), interp.name(),
             match &dff { Some(d) => format!("from focus on a {}x{} grid", d.dw, d.dh), None => format!("winner map of level {depth_level}") }
         ));
         Ok(Run {
@@ -2132,6 +2197,7 @@ impl Engine {
             fp,
             params,
             interp,
+            model,
             levels,
             depth_level,
             dims,

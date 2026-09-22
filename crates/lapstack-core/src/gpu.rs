@@ -8,6 +8,8 @@
 //! planes cross the bus up and the residual level (a few KB) comes back; the
 //! accumulator pyramid, best-energy planes and winner map live on the device.
 //! The residual rule (deviation + entropy over N tiny planes) stays on the CPU.
+//! With halo control (`fuse.rs`) the guide's weights are made, REDUCEd and
+//! folded on the device too (`wgtk`, `wacck`, `wnormk`), the residual included.
 //!
 //! cudarc with `dynamic-loading` (libcuda + libnvrtc found at runtime, no
 //! toolkit at build time), kernels compiled by NVRTC once per run.
@@ -17,8 +19,8 @@
 //! per-frame warp stay on the CPU (each is cheap next to the ~200-iteration
 //! cost search); every cost evaluation is one `warp_cost` launch.
 
-use crate::align::{Sim, affine_inv, gauss_pyramid, nelder_mead};
-use crate::fuse::{FuseParams, binomial, fuse_residuals, upsample_index};
+use crate::align::{Sim, gauss_pyramid, inverse, nelder_mead};
+use crate::fuse::{FuseParams, HALO_FLOOR, HALO_REF, binomial, fuse_residuals, halo_guide, upsample_index};
 use crate::pyramid::{Img3, auto_levels, half};
 use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, LaunchConfig, PushKernelArg};
 use std::sync::Arc;
@@ -94,6 +96,22 @@ extern "C" __global__ void selk(const float* en,float* best,float* a0,float* a1,
     int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=n) return;
     if(en[i]>best[i]){ best[i]=en[i]; a0[i]=n0[i]; a1[i]=n1[i]; a2[i]=n2[i]; if(rec) win[i]=idx; }
 }
+// halo control: the guide's weights ((en + floor) / ref)^p, exponent clamped to +-60
+extern "C" __global__ void wgtk(const float* en,float* w,float p,float floor_,float ref,int n){
+    int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=n) return;
+    w[i]=expf(fminf(fmaxf(p*logf((en[i]+floor_)/ref),-60.f),60.f));
+}
+// weighted fold: acc += w * new, wsum += w
+extern "C" __global__ void wacck(const float* w,float* a0,float* a1,float* a2,
+        const float* n0,const float* n1,const float* n2,float* ws,int n){
+    int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=n) return;
+    float k=w[i]; a0[i]+=k*n0[i]; a1[i]+=k*n1[i]; a2[i]+=k*n2[i]; ws[i]+=k;
+}
+// the weighted mean: acc /= wsum
+extern "C" __global__ void wnormk(float* a0,float* a1,float* a2,const float* ws,int n){
+    int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=n) return;
+    float k=1.f/ws[i]; a0[i]*=k; a1[i]*=k; a2[i]*=k;
+}
 // ---- alignment cost (fused Spline4x4 warp + DC-removed-RMS reduction) ----
 // Warp `tgt` into `ref`'s frame with the inverse affine (ia..ity), and accumulate,
 // over valid (in-bounds) pixels, sum(d), sum(d^2), count of d=ref-warp. The host
@@ -108,7 +126,7 @@ __device__ __forceinline__ void spl4f(float t,float* w){
 }
 extern "C" __global__ void warp_cost(const float* tgt,int tw,int th,
         const float* ref,int aw,int ah,
-        float ia,float ib,float itx,float id_,float ie,float ity,double* out){
+        float ia,float ib,float itx,float id_,float ie,float ity,float ig0,float ig1,double* out){
     // float block reduction (d in [-1,1], so sums are small & exact enough), then
     // one double atomicAdd per block keeps the global sum accurate over millions of px.
     __shared__ float sd[256], sd2[256], sn[256];
@@ -116,7 +134,8 @@ extern "C" __global__ void warp_cost(const float* tgt,int tw,int th,
     int t=threadIdx.y*blockDim.x+threadIdx.x;
     float ld=0.f, ld2=0.f, ln=0.f;
     if(x<aw && y<ah){
-        float sx=ia*x+ib*y+itx, sy=id_*x+ie*y+ity;
+        float den=ig0*x+ig1*y+1.f;   // the homography's divisor (exactly 1 for an affine transform)
+        float sx=(ia*x+ib*y+itx)/den, sy=(id_*x+ie*y+ity)/den;
         if(sx>=0.f && sx<=(float)(tw-1) && sy>=0.f && sy<=(float)(th-1)){
             int x0=(int)floorf(sx), y0=(int)floorf(sy);
             float wx[4],wy[4]; spl4f(sx-x0,wx); spl4f(sy-y0,wy);
@@ -136,8 +155,8 @@ extern "C" __global__ void warp_cost(const float* tgt,int tw,int th,
 }
 "#;
 
-const KERNELS: [&str; 12] = [
-    "redH", "redV", "expH", "expV", "subk", "addk", "clampk", "energy_y", "energy_rgb", "winH", "winV", "selk",
+const KERNELS: [&str; 15] = [
+    "redH", "redV", "expH", "expV", "subk", "addk", "clampk", "energy_y", "energy_rgb", "winH", "winV", "selk", "wgtk", "wacck", "wnormk",
 ];
 
 fn cfg2(w: usize, h: usize) -> LaunchConfig {
@@ -193,7 +212,11 @@ pub struct GpuFuser {
     acc: Vec<Lvl>,
     /// Working pyramid of the frame being folded (reused).
     cur: Vec<Lvl>,
+    /// Best energy per band-pass level; with halo control the weight sum at
+    /// the levels coarser than the guide, the residual's included.
     best: Vec<CudaSlice<f32>>,
+    /// Halo control: (guide level, hardness).
+    halo: Option<(usize, f32)>,
     win: CudaSlice<f32>,
     wt: CudaSlice<f32>,
     klen: i32,
@@ -213,6 +236,7 @@ impl GpuFuser {
         let s = g.s.clone();
         let levels = params.levels.unwrap_or_else(|| auto_levels(w, h, 32)).max(1);
         let depth_level = params.depth_level.min(levels - 1);
+        let halo = halo_guide(&params, levels);
         let al = |n: usize| s.alloc_zeros::<f32>(n).map_err(|e| format!("cuda alloc: {e:?}"));
         let mut dims = vec![(w, h)];
         for _ in 0..levels {
@@ -225,12 +249,14 @@ impl GpuFuser {
         let acc = mk(&dims)?;
         let cur = mk(&dims)?;
         let mut best = Vec::new();
-        for &(lw, lh) in &dims[..levels] {
+        for (l, &(lw, lh)) in dims.iter().enumerate() {
             let mut b = al(lw * lh)?;
-            s.memset_zeros(&mut b).map_err(|e| format!("{e:?}"))?;
-            // any energy (>= 0) beats -1, so the first frame fills the accumulator
-            let neg = vec![-1.0f32; lw * lh];
-            s.memcpy_htod(&neg, &mut b).map_err(|e| format!("{e:?}"))?;
+            if halo.is_none_or(|(g, _)| l <= g) {
+                // any energy (>= 0) beats -1, so the first frame fills the accumulator
+                let neg = vec![-1.0f32; lw * lh];
+                s.memcpy_htod(&neg, &mut b).map_err(|e| format!("{e:?}"))?;
+            }
+            // else a weight sum, from zero
             best.push(b);
         }
         let (dw, dh) = dims[depth_level];
@@ -244,7 +270,7 @@ impl GpuFuser {
         let en2 = al(w * h)?;
         eprintln!("[gpu] context + nvrtc {:.2}s", t.elapsed().as_secs_f64());
         Ok(GpuFuser {
-            _ctx: ctx, g, w, h, levels, params, depth_level, acc, cur, best, win, wt, klen,
+            _ctx: ctx, g, w, h, levels, params, depth_level, acc, cur, best, halo, win, wt, klen,
             tmp_half, tmp_full, en, en2, tops: Vec::new(), count: 0,
         })
     }
@@ -281,7 +307,8 @@ impl GpuFuser {
         }
         self.build();
         let idx = self.count as f32;
-        for li in 0..self.levels {
+        let nsel = self.halo.map_or(self.levels, |(g, _)| g + 1);
+        for li in 0..nsel {
             let (lw, lh) = (self.cur[li].w, self.cur[li].h);
             let (n, ni, wi, hi) = (lw * lh, (lw * lh) as i32, lw as i32, lh as i32);
             let [n0, n1, n2] = &self.cur[li].p;
@@ -297,22 +324,59 @@ impl GpuFuser {
             b.arg(&self.en).arg(&mut self.best[li]).arg(a0).arg(a1).arg(a2).arg(n0).arg(n1).arg(n2).arg(&mut self.win).arg(&idx).arg(&rec).arg(&ni);
             unsafe { b.launch(cfg1(n)).unwrap() };
         }
-        // residual level back to the host (tiny)
-        let top = &self.cur[self.levels];
-        let mut t = Img3::zeros(top.w, top.h);
-        for c in 0..3 {
-            t.p[c] = self.g.s.memcpy_dtov(&top.p[c]).map_err(|e| format!("{e:?}"))?;
+        if let Some((guide, p)) = self.halo {
+            // the guide's weights (from its region energy, still in `en`), REDUCEd
+            // level by level into `en2`, fold the coarser levels and the residual
+            let (mut lw, mut lh) = (self.cur[guide].w, self.cur[guide].h);
+            let ni = (lw * lh) as i32;
+            { let mut b = self.g.s.launch_builder(self.g.f("wgtk")); b.arg(&self.en).arg(&mut self.en2).arg(&p).arg(&HALO_FLOOR).arg(&HALO_REF).arg(&ni); unsafe { b.launch(cfg1(lw * lh)).unwrap() }; }
+            for li in guide + 1..=self.levels {
+                let (cw, ch) = (self.cur[li].w, self.cur[li].h);
+                let (lwi, lhi, cwi, chi) = (lw as i32, lh as i32, cw as i32, ch as i32);
+                { let mut b = self.g.s.launch_builder(self.g.f("redH")); b.arg(&self.en2).arg(&mut self.tmp_half).arg(&lwi).arg(&lhi).arg(&cwi); unsafe { b.launch(cfg2(cw, lh)).unwrap() }; }
+                { let mut b = self.g.s.launch_builder(self.g.f("redV")); b.arg(&self.tmp_half).arg(&mut self.en2).arg(&lhi).arg(&cwi).arg(&chi); unsafe { b.launch(cfg2(cw, ch)).unwrap() }; }
+                let n = cw * ch;
+                let ni = n as i32;
+                let [n0, n1, n2] = &self.cur[li].p;
+                let [a0, a1, a2] = &mut self.acc[li].p;
+                let mut b = self.g.s.launch_builder(self.g.f("wacck"));
+                b.arg(&self.en2).arg(a0).arg(a1).arg(a2).arg(n0).arg(n1).arg(n2).arg(&mut self.best[li]).arg(&ni);
+                unsafe { b.launch(cfg1(n)).unwrap() };
+                (lw, lh) = (cw, ch);
+            }
+        } else {
+            // residual level back to the host (tiny)
+            let top = &self.cur[self.levels];
+            let mut t = Img3::zeros(top.w, top.h);
+            for c in 0..3 {
+                t.p[c] = self.g.s.memcpy_dtov(&top.p[c]).map_err(|e| format!("{e:?}"))?;
+            }
+            self.tops.push(t);
         }
-        self.tops.push(t);
         self.count += 1;
         Ok(())
     }
 
     pub fn finish(mut self) -> Result<(Img3, Vec<f32>), String> {
         assert!(self.count > 0, "no frames pushed");
-        let top = fuse_residuals(&self.tops, &self.params);
-        for c in 0..3 {
-            self.g.s.memcpy_htod(&top.p[c], &mut self.acc[self.levels].p[c]).map_err(|e| format!("{e:?}"))?;
+        match self.halo {
+            Some((guide, _)) => {
+                // the weighted means
+                for li in guide + 1..=self.levels {
+                    let n = self.acc[li].w * self.acc[li].h;
+                    let ni = n as i32;
+                    let [a0, a1, a2] = &mut self.acc[li].p;
+                    let mut b = self.g.s.launch_builder(self.g.f("wnormk"));
+                    b.arg(a0).arg(a1).arg(a2).arg(&self.best[li]).arg(&ni);
+                    unsafe { b.launch(cfg1(n)).unwrap() };
+                }
+            }
+            None => {
+                let top = fuse_residuals(&self.tops, &self.params);
+                for c in 0..3 {
+                    self.g.s.memcpy_htod(&top.p[c], &mut self.acc[self.levels].p[c]).map_err(|e| format!("{e:?}"))?;
+                }
+            }
         }
         // collapse: G_l = L_l + EXPAND(G_{l+1})
         for li in (0..self.levels).rev() {
@@ -359,10 +423,10 @@ impl GpuAligner {
         Ok(GpuAligner { _ctx: ctx, g, out })
     }
 
-    pub fn align_pair(&self, prev_ref: &[f32], y: &[f32], w: usize, h: usize, guess: Sim, free: [bool; 4], coarsen: usize) -> Sim {
+    pub fn align_pair(&self, prev_ref: &[f32], y: &[f32], w: usize, h: usize, guess: Sim, free: [bool; Sim::N], coarsen: usize) -> Sim {
         let stream = self.g.s.clone();
-        let free_idx: Vec<usize> = (0..4).filter(|&k| free[k]).collect();
-        let span = [0.10, 0.10, 0.10, 5.0f64.to_radians()];
+        let free_idx: Vec<usize> = (0..Sim::N).filter(|&k| free[k]).collect();
+        let span = Sim::SPAN;
         let pref = gauss_pyramid(prev_ref, w, h);
         let ptgt = gauss_pyramid(y, w, h);
         let nlv = pref.len().min(ptgt.len());
@@ -391,15 +455,16 @@ impl GpuAligner {
                 for (k, &idx) in free_idx.iter().enumerate() {
                     v[idx] = xf[k];
                 }
-                let inv = affine_inv(Sim::from_vec(&v).matrix(tw, th));
+                let inv = inverse(Sim::from_vec(&v).matrix(tw, th));
                 let (twi, thi, awi, ahi) = (tw as i32, th as i32, aw as i32, ah as i32);
                 let (ia, ib, itx) = (inv[0][0] as f32, inv[0][1] as f32, inv[0][2] as f32);
                 let (id_, ie, ity) = (inv[1][0] as f32, inv[1][1] as f32, inv[1][2] as f32);
+                let (ig0, ig1) = (inv[2][0] as f32, inv[2][1] as f32);
                 let mut ob = self.out.borrow_mut();
                 stream.memset_zeros(&mut *ob).unwrap();
                 let mut b = stream.launch_builder(self.g.f("warp_cost"));
                 b.arg(td).arg(&twi).arg(&thi).arg(rd).arg(&awi).arg(&ahi)
-                    .arg(&ia).arg(&ib).arg(&itx).arg(&id_).arg(&ie).arg(&ity).arg(&mut *ob);
+                    .arg(&ia).arg(&ib).arg(&itx).arg(&id_).arg(&ie).arg(&ity).arg(&ig0).arg(&ig1).arg(&mut *ob);
                 unsafe { b.launch(cfg2(aw, ah)).unwrap() };
                 let r = stream.memcpy_dtov(&*ob).unwrap();
                 let (sd, sd2, cnt) = (r[0], r[1], r[2]);

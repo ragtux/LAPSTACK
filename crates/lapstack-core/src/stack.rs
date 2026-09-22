@@ -298,7 +298,7 @@ impl FrameSource for LazyFrames {
 struct AlignedFrames {
     src: LazyFrames,
     a: AlignParams,
-    free: [bool; 4],
+    free: [bool; Sim::N],
     aligner: align::PairAligner,
     /// The transforms found so far (frame 0's is the identity).
     sims: Vec<Sim>,
@@ -326,7 +326,7 @@ impl AlignedFrames {
         Ok(AlignedFrames {
             src,
             a,
-            free: [a.shift, a.shift, a.scale, a.rotation],
+            free: a.free(),
             aligner,
             sims: Vec::with_capacity(n),
             prev_ref: None,
@@ -590,8 +590,8 @@ pub fn run_with(
                 log(format!("dust map applied to each frame as decoded ({}): {}", d.params.mode.name(), d.describe()));
             }
             log(format!(
-                "{} frames @ {w}x{h}, {}-bit ({} threads); streaming from disk, each frame aligned as it is folded (shift={} scale={} rot={} coarsen={} {}{})",
-                src.len(), bit_depth.bits(), rayon::current_num_threads(), a.shift, a.scale, a.rotation, a.coarsen, a.interp.name(),
+                "{} frames @ {w}x{h}, {}-bit ({} threads); streaming from disk, each frame aligned as it is folded ({} shift={} scale={} rot={} coarsen={} {}{})",
+                src.len(), bit_depth.bits(), rayon::current_num_threads(), a.model.name(), a.shift, a.scale, a.rotation, a.coarsen, a.interp.name(),
                 if a.gpu && cfg!(feature = "gpu") { ", GPU" } else { "" }
             ));
             let (image, depth, conf, levels) = fuse_and_depth(&mut src, params, log)?;

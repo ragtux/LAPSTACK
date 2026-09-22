@@ -4,7 +4,7 @@
 //! Same model and search as lapstack-core's aligner; FP32 like its CUDA path.
 
 use crate::gpu::{Gpu, P, grid2};
-pub use lapstack_core::align::{Sim, affine_inv};
+pub use lapstack_core::align::{Sim, inverse};
 use std::future::Future;
 
 /// Bounded Nelder-Mead with an async cost (transcribed from lapstack-core).
@@ -164,8 +164,8 @@ impl Aligner {
     async fn cost(&self, gpu: &Gpu, rf: &(wgpu::Buffer, usize, usize), tgt: &(wgpu::Buffer, usize, usize), v: &[f64]) -> f64 {
         let (aw, ah) = (rf.1, rf.2);
         let (tw, th) = (tgt.1, tgt.2);
-        let inv = affine_inv(Sim::from_vec(v).matrix(tw, th));
-        gpu.queue.write_buffer(&self.aff, 0, bytemuck::cast_slice(&[inv[0][2] as f32, inv[1][2] as f32, 0.0, 0.0]));
+        let inv = inverse(Sim::from_vec(v).matrix(tw, th));
+        gpu.queue.write_buffer(&self.aff, 0, bytemuck::cast_slice(&[inv[0][2] as f32, inv[1][2] as f32, inv[2][0] as f32, inv[2][1] as f32]));
         let p = P {
             w: aw as u32,
             h: ah as u32,
@@ -200,12 +200,12 @@ impl Aligner {
 
     /// Coarse-to-fine search (stopping `coarsen` levels short of full res),
     /// exactly the native `multiscale_align` schedule.
-    pub async fn align(&self, gpu: &Gpu, rf: &LumaPyr, tg: &LumaPyr, init: Sim, free: [bool; 4], coarsen: usize) -> Sim {
+    pub async fn align(&self, gpu: &Gpu, rf: &LumaPyr, tg: &LumaPyr, init: Sim, free: [bool; Sim::N], coarsen: usize) -> Sim {
         let n = rf.lv.len().min(tg.lv.len());
-        let span = [0.10, 0.10, 0.10, 5.0f64.to_radians()];
+        let span = Sim::SPAN;
         let iv = init.as_vec();
         let mut cur = iv;
-        let free_idx: Vec<usize> = (0..4).filter(|&k| free[k]).collect();
+        let free_idx: Vec<usize> = (0..Sim::N).filter(|&k| free[k]).collect();
         if free_idx.is_empty() {
             return init;
         }

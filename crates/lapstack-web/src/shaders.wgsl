@@ -1,6 +1,6 @@
 // lapstack WebGPU kernels. Same maths as lapstack-core/src/pyramid.rs + fuse.rs
 // (and the CUDA twins in gpu.rs): binomial [1 4 6 4 1]/16 taps, reflect-101
-// borders, luma energy, binomial window, winner-take-all select.
+// borders, luma energy, binomial window, winner-take-all select, halo-control weights.
 //
 // Every level's three colour planes live in ONE buffer, plane c at offset
 // c * w * h (keeps the storage-buffer count per dispatch small). Kernels take a
@@ -138,6 +138,29 @@ fn sel(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg
         if (p.flag == 1u) { o[3u * n + i] = p.f0; }
     }
 }
+// ---- halo control (fuse.rs): the guide's weights in place of its energy, e = ((e + f1) / f2)^f0, exponent clamped to +-60 ----
+@compute @workgroup_size(256)
+fn wgt(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = gid1(g, nwg); if (i >= p.w * p.h) { return; }
+    e[i] = exp(clamp(p.f0 * log((e[i] + p.f1) / p.f2), -60.0, 60.0));
+}
+// weighted fold: o (acc planes) += e (weight) * a (new planes), b (weight sum) += e
+@compute @workgroup_size(256)
+fn wacc(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = gid1(g, nwg); let n = p.w * p.h;
+    if (i >= n) { return; }
+    let k = e[i];
+    o[i] = o[i] + k * a[i]; o[n + i] = o[n + i] + k * a[n + i]; o[2u * n + i] = o[2u * n + i] + k * a[2u * n + i];
+    b[i] = b[i] + k;
+}
+// the weighted mean: o (acc planes) /= b (weight sum)
+@compute @workgroup_size(256)
+fn wnorm(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = gid1(g, nwg); let n = p.w * p.h;
+    if (i >= n) { return; }
+    let k = 1.0 / b[i];
+    o[i] = o[i] * k; o[n + i] = o[n + i] * k; o[2u * n + i] = o[2u * n + i] * k;
+}
 @compute @workgroup_size(256)
 fn fill(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = gid1(g, nwg); if (i >= p.w) { return; }
@@ -156,9 +179,10 @@ fn copy_plane(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgrou
 
 // ---- input unpack + warp ----
 // `u` holds the decoded frame as interleaved RGB u16 pairs (2 samples per u32),
-// p.w x p.h. Warp: dest (x,y) -> source (sx,sy) via inverse affine f0..f3 +
-// (wt[0], wt[1]) translation... we pass the 6 affine terms in f0..f3 + wt[0..1]:
-//   sx = f0*x + f1*y + wt[0];  sy = f2*x + f3*y + wt[1]
+// p.w x p.h. Warp: dest (x,y) -> source (sx,sy) via the inverse homography,
+// its linear terms in f0..f3, its translation in wt[0..1] and its perspective
+// row in wt[2..3] (0 for an affine transform, so the divisor is exactly 1):
+//   sx = (f0*x + f1*y + wt[0]) / den;  sy = (f2*x + f3*y + wt[1]) / den;  den = wt[2]*x + wt[3]*y + 1
 // Out-of-bounds destination pixels take the unwarped source pixel (the native
 // aligner's `valid` fallback). flag 1 = identity (plain unpack), scale = 1/65535 (16-bit
 // samples; 8-bit inputs are widened to 16-bit on the CPU). p.klen picks the
@@ -234,8 +258,9 @@ fn warp(@builtin(global_invocation_id) g: vec3<u32>) {
         o[idx] = sample_u16(0u, x, y); o[n + idx] = sample_u16(1u, x, y); o[2u * n + idx] = sample_u16(2u, x, y);
         return;
     }
-    let sx = p.f0 * f32(x) + p.f1 * f32(y) + wt[0];
-    let sy = p.f2 * f32(x) + p.f3 * f32(y) + wt[1];
+    let den = wt[2] * f32(x) + wt[3] * f32(y) + 1.0;
+    let sx = (p.f0 * f32(x) + p.f1 * f32(y) + wt[0]) / den;
+    let sy = (p.f2 * f32(x) + p.f3 * f32(y) + wt[1]) / den;
     let wm1 = f32(p.w - 1u); let hm1 = f32(p.h - 1u);
     if (sx < 0.0 || sx > wm1 || sy < 0.0 || sy > hm1) {
         o[idx] = sample_u16(0u, x, y); o[n + idx] = sample_u16(1u, x, y); o[2u * n + idx] = sample_u16(2u, x, y);
@@ -271,8 +296,9 @@ fn cost(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
     let x = g.x; let y = g.y;
     var ld = 0.0; var ld2 = 0.0; var ln = 0.0;
     if (x < p.w && y < p.h) {
-        let sx = p.f0 * f32(x) + p.f1 * f32(y) + wt[0];
-        let sy = p.f2 * f32(x) + p.f3 * f32(y) + wt[1];
+        let den = wt[2] * f32(x) + wt[3] * f32(y) + 1.0;
+        let sx = (p.f0 * f32(x) + p.f1 * f32(y) + wt[0]) / den;
+        let sy = (p.f2 * f32(x) + p.f3 * f32(y) + wt[1]) / den;
         let tw = i32(p.ow); let th = i32(p.oh);
         if (sx >= 0.0 && sx <= f32(tw - 1) && sy >= 0.0 && sy <= f32(th - 1)) {
             let x0 = i32(floor(sx)); let y0 = i32(floor(sy));
@@ -339,8 +365,9 @@ fn bright(@builtin(local_invocation_id) l: vec3<u32>, @builtin(local_invocation_
             let x = wg.x * 64u + l.x * 4u + dx; let y = wg.y * 64u + l.y * 4u + dy;
             if (x >= p.w || y >= p.h) { continue; }
             if (p.flag == 0u) {
-                let sx = p.f0 * f32(x) + p.f1 * f32(y) + wt[0];
-                let sy = p.f2 * f32(x) + p.f3 * f32(y) + wt[1];
+                let den = wt[2] * f32(x) + wt[3] * f32(y) + 1.0;
+                let sx = (p.f0 * f32(x) + p.f1 * f32(y) + wt[0]) / den;
+                let sy = (p.f2 * f32(x) + p.f3 * f32(y) + wt[1]) / den;
                 if (sx < 0.0 || sx > wm1 || sy < 0.0 || sy > hm1) { continue; }
             }
             let i = y * p.w + x;

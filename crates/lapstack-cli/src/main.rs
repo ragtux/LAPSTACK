@@ -4,7 +4,7 @@
 //! lapstack — Laplacian-pyramid focus stacking CLI.
 
 use lapstack_core::{DepthParams, DustMode, DustParams, FocusMeasure, Layout, MeshParams, Params, Split, Stack, TexFormat, TopRule, Upsample, View, run_with};
-use lapstack_core::align::Interp;
+use lapstack_core::align::{AlignModel, Interp};
 use lapstack_core::batch::{self, Names};
 use lapstack_core::mesh;
 use lapstack_core::io;
@@ -68,11 +68,16 @@ fn main() {
             }
             "--use-chroma" => p.fuse.use_chroma = true,
             "--depth-level" => p.fuse.depth_level = next(&mut i).parse().unwrap_or_else(|_| fail("--depth-level: integer")),
+            "--halo-control" => p.fuse.halo = next(&mut i).parse().unwrap_or_else(|_| fail("--halo-control: number")),
             "--no-align" => do_align = false,
             "--no-shift" => a.shift = false,
             "--no-scale" => a.scale = false,
             "--no-rotation" => a.rotation = false,
             "--align-coarsen" => a.coarsen = next(&mut i).parse().unwrap_or_else(|_| fail("--align-coarsen: integer")),
+            "--align-model" => {
+                let s = next(&mut i);
+                a.model = AlignModel::parse(&s).unwrap_or_else(|| fail(&format!("--align-model: unknown model '{s}' (similarity | affine | projective)")));
+            }
             "--interpolation" => {
                 let s = next(&mut i);
                 a.interp = Interp::parse(&s).unwrap_or_else(|| fail(&format!("--interpolation: unknown kernel '{s}' (nearest | bilinear | bicubic | spline4x4 | spline6x6 | lanczos3)")));
@@ -493,9 +498,16 @@ fn help() {
            --top-radius R         D/E window radius at the residual [2 = 5x5]\n\
            --entropy-bins N       gray levels for the entropy histogram [256]\n\
            --use-chroma           energy from R,G,B instead of luma\n\
+           --halo-control P       the levels coarser than --depth-level do not pick their own winners: each is the\n\
+                                  mean of the frames weighed by that level's region energy to the power P, REDUCEd\n\
+                                  to its size, so the coarse structure follows the frames found sharp there and a\n\
+                                  defocused copy of a bright object no longer wins the coarse levels beside it\n\
+                                  (its halo); 1 = weigh by the energy, higher = closer to a hard pick, 0 = off [0]\n\
            --no-align             frames are already registered (streams from disk)\n\
            --no-shift/scale/rotation   restrict the similarity model\n\
            --align-coarsen N      align at reduced resolution (skip N finest levels)\n\
+           --align-model M        similarity (shift, scale, rotation: Zerene's and Helicon's) | affine (+ aspect,\n\
+                                  shear) | projective (+ perspective, for a camera that tilted as it stepped) [similarity]\n\
            --interpolation K      the kernel the aligned frames are resampled with: nearest | bilinear | bicubic |\n\
                                   spline4x4 (Zerene's default) | spline6x6 | lanczos3 [spline4x4]; wider = sharper,\n\
                                   more ringing at hard edges (the registration search itself always uses spline4x4)\n\

@@ -20,7 +20,7 @@
 // same gain three times. Gains are clamped to [1/4, 4]: a larger difference
 // is not flicker.
 
-use crate::align::{Sim, affine_inv};
+use crate::align::{Sim, inverse, map};
 use crate::pyramid::Img3;
 use rayon::prelude::*;
 
@@ -66,13 +66,12 @@ impl Reference {
 /// `other`, when given, is summed over the same pixels.
 fn sums(frame: &Img3, other: Option<&Reference>, sim: &Sim) -> ([f64; 3], [f64; 3], usize) {
     let (w, h) = (frame.w, frame.h);
-    let inv = (*sim != Sim::id()).then(|| affine_inv(sim.matrix(w, h)));
+    let inv = (*sim != Sim::id()).then(|| inverse(sim.matrix(w, h)));
     let (mut sf, mut so, mut n) = ([0f64; 3], [0f64; 3], 0usize);
     for y in (0..h).step_by(STEP) {
         for x in (0..w).step_by(STEP) {
             if let Some(inv) = &inv {
-                let sx = inv[0][0] * x as f64 + inv[0][1] * y as f64 + inv[0][2];
-                let sy = inv[1][0] * x as f64 + inv[1][1] * y as f64 + inv[1][2];
+                let (sx, sy) = map(inv, x as f64, y as f64);
                 if !(sx >= 0.0 && sx <= (w - 1) as f64 && sy >= 0.0 && sy <= (h - 1) as f64) {
                     continue;
                 }
@@ -186,7 +185,7 @@ mod tests {
     fn same_frame_is_unity() {
         let a = scene(160, 120);
         assert_eq!(gains(&a, &a, &Sim::id()), [1.0; 3]);
-        assert_eq!(gains(&a, &a, &Sim { xoff: 0.05, yoff: -0.02, scale: 1.01, rot: 0.01 }), [1.0; 3]);
+        assert_eq!(gains(&a, &a, &Sim { xoff: 0.05, yoff: -0.02, scale: 1.01, rot: 0.01, ..Sim::id() }), [1.0; 3]);
     }
 
     #[test]

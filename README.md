@@ -70,19 +70,69 @@ keep the residual's short side ≥ 32 px (7 levels on 8280×5520, residual
   at least as good on both and strictly better on one, and the fused value is
   the mean of the non-dominated frames (`--top de`; `dev` = deviation only,
   `avg` = plain mean).
+- **Halo control** (`--halo-control P`, off by default): the pyramid's
+  halo comes from each level picking its own winner. Beside a bright (or
+  dark) object, the frames focused behind it carry the object's defocused
+  copy spread over the background — strong *coarse* energy where the frame
+  that has the object sharp has none — so the coarse levels collect that
+  glow from one frame after another while the fine levels take the sharp
+  background, and the result has a soft rim around the object. With halo
+  control the levels coarser than `--depth-level` (the *guide*, default 2)
+  do not select: each, the residual included, is the mean of the frames
+  weighed by `((RE_guide + ε) / ρ)^P`, the guide's region energy raised to
+  the hardness P and REDUCEd to the level's size (the Gaussian pyramid of a
+  weight mask, as a multiresolution spline blends with it). The coarse
+  structure then follows the frames the guide found sharp, and where none
+  is (a flat area) the frames average. P = 1 weighs by the energy itself,
+  higher values approach a hard pick; 8 is the cap. Checked on the halo
+  in isolation (`fuse.rs` tests): a sharp fine texture against the same
+  texture blurred away with a wide soft bump added — coarse structure
+  only, as a defocused copy of a bright object has. Every level picking
+  its own winner lets the bump in (RMS error above 0.05 of full scale);
+  with the guide finding the sharp frame everywhere the coarse levels
+  follow it and the error falls by more than 85 % at every hardness from
+  1 to 8. On the fruit stack (dark grapes on a bright table) the change is
+  about 1 % of full scale along the silhouettes and invisible elsewhere:
+  the halo is a coarse-level effect, and a deep stack of small focus steps
+  leaves little of it to remove.
 - The accumulator folds frames in one at a time: only the running fused
-  pyramid, one best-energy plane per level and the tiny residuals are held,
-  so memory does not grow with the stack. Frames are decoded on demand with
+  pyramid, one best-energy plane per level (a weight sum at the levels halo
+  control guides) and the tiny residuals are held, so memory does not grow
+  with the stack. Frames are decoded on demand with
   a bounded read-ahead, aligned or not.
 
-**Alignment** (`align.rs`): 4-DOF similarity registration (shift, scale,
+**Alignment** (`align.rs`): similarity registration (shift, scale,
 rotation), direct intensity-based, coarse-to-fine on a Gaussian pyramid of
 the luma with a DC-removed RMS objective, Spline4x4 resampling and a bounded
 Nelder-Mead search, chained sequentially to frame 0. `--align-coarsen N`
 stops N levels short of full resolution (the transform is resolution
 independent, so this is a large speed-up at sub-pixel accuracy);
 `--no-shift/--no-scale/--no-rotation` restrict the model; `--save-aligned DIR`
-writes the registered frames. The stack is streamed through the alignment
+writes the registered frames.
+
+**Alignment model** (`--align-model M`; `align::AlignModel`): how much a
+frame may be deformed to land on the previous one. `similarity` (the
+default) is shift, scale and rotation — Zerene's and Helicon's model, and
+what a focus rail or a focus ring produces: the image breathes, shifts and
+turns a little. `affine` adds an aspect ratio and a shear; `projective`
+adds the two perspective terms, for a camera that tilted against the
+subject as it stepped, so the frames keystone. The transform (`align::Sim`)
+is one 3×3 homography whichever the model, the perspective row being
+[0, 0, 1] below projective, so every warp, the crop and the brightness
+sampling read pixels through the same rational map — the division is by
+exactly 1 for the affine models, and the similarity results are unchanged to
+the bit. The search box around the previous frame's transform is 10 % of
+the frame in shift, 10 % in scale, 5° in rotation, 5 % in aspect, shear and
+each perspective term. More parameters take longer to search (the simplex
+grows with them), and on a stack that needs none the extra ones only fit
+noise, so the default stays the similarity. Checked on a frame keystoned by
+a known perspective (ImageMagick's `-distort Perspective`, the top corners
+moved 12 px inwards): against the original, the frame the projective fit
+brings back differs by an RMSE of 0.0029 of full scale over the centre,
+the floor of resampling (a pure scale and rotation, which the similarity
+model recovers exactly, leaves 0.0028), where the similarity fit leaves
+0.0076 and the affine 0.0071; the browser's aligner finds the same eight
+terms to three decimals. The stack is streamed through the alignment
 like the browser streams it (`stack::AlignedFrames`): each frame is decoded
 with the read-ahead, registered against the previous aligned frame's luma,
 warped, brought to frame 0's brightness and folded into the fusion, then
@@ -383,7 +433,9 @@ faster.
 
 GPU fusion output is bit-exact with the CPU output (one run out of four
 differed in 637 of 45.7 M pixels on energy ties and could not be
-reproduced). CPU reruns are byte-identical. GPU alignment evaluates the cost
+reproduced); with halo control the weights are made, REDUCEd and folded
+on the device too (`wgtk`, `wacck`, `wnormk`) and the output differs from
+the CPU's by float rounding only. CPU reruns are byte-identical. GPU alignment evaluates the cost
 in FP32, so `--gpu-align` results differ from CPU-aligned ones by ~0.5 % of
 pixels.
 
@@ -792,6 +844,18 @@ the project's own.
 frame (rounded), so scrolling through the stack sweeps the band through the
 depth map.
 
+**Halo control** (the panel's *halo control* stepper, the CLI's
+`--halo-control`; off by default): the fold selects only up to the depth
+level, turns that level's region energy into the weights on the GPU
+(`wgt`), REDUCEs them down the pyramid and folds every coarser level and
+the residual as Σ w·L and Σ w (`wacc`), normalised at the collapse
+(`wnorm`); no residual crosses to the host. Slabs and refolds use the same
+fold, so a slab or a stereo view is halo-controlled like the run. The
+browser result matches the native one as the plain fold does — a handful
+of pixels one 8-bit count off
+(`test.html?halo=2&expected=test/expected_halo2.png&expected_dff=&expected_conf=`,
+against `make-frames.sh`'s `expected_halo2.png`).
+
 **Focus peaking** (Source view, same magenta band): during the run every
 frame's level-1 region energy is area-averaged to proxy resolution and
 kept. A pixel is painted for frame *i* when that frame's contrast is at
@@ -805,8 +869,11 @@ a separate contrast pass.
 previous warped one like the native one, runs Nelder-Mead on the CPU side
 (an async transcription of lapstack-core's optimiser) and evaluates every
 cost on WebGPU (Spline4x4 warp + DC-removed RMS partial sums, one small
-readback per evaluation). It stops `align coarsen` levels short of full
-resolution (default 2). The final warp of the 16-bit frame also runs on the
+readback per evaluation), over the panel's *model* (the CLI's
+`--align-model`: similarity, affine, projective). It stops `align coarsen`
+levels short of full resolution (default 2). A project saved with a run
+records each frame's transform with all eight terms; older projects with
+four are read as similarities. The final warp of the 16-bit frame also runs on the
 GPU, with the kernel of the panel's *interpolation* (the CLI's
 `--interpolation`: nearest, bilinear, bicubic, spline 4×4, spline 6×6,
 Lanczos 3); a frame brought back after the run (the Source view, a slab, the

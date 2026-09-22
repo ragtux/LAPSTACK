@@ -1,7 +1,8 @@
 // Copyright (c) 2026 RAGTUX LLC
 // INTERNAL USE ONLY
 
-//! Alignment — 4-DOF similarity registration. Direct intensity-based,
+//! Alignment — similarity, affine or projective registration
+//! (`AlignModel`: 4, 6 or 8 parameters). Direct intensity-based,
 //! coarse-to-fine, DC-removed-RMS on luminance, one frame against the
 //! previous aligned one (`PairAligner`; the chaining to frame 0 is
 //! `stack::AlignedFrames`, which streams the frames). Uses a bounded
@@ -21,6 +22,8 @@ pub struct AlignParams {
     pub shift: bool,
     pub scale: bool,
     pub rotation: bool,
+    /// Similarity (the four above), affine (+ aspect, shear) or projective (+ perspective).
+    pub model: AlignModel,
     /// Skip the N finest pyramid levels during the fit (0 = full res).
     pub coarsen: usize,
     /// Run the cost search on the CUDA GPU (needs the `gpu` build feature).
@@ -31,8 +34,57 @@ pub struct AlignParams {
 
 impl Default for AlignParams {
     fn default() -> AlignParams {
-        AlignParams { shift: true, scale: true, rotation: true, coarsen: 0, gpu: false, interp: Interp::default() }
+        AlignParams { shift: true, scale: true, rotation: true, model: AlignModel::default(), coarsen: 0, gpu: false, interp: Interp::default() }
     }
+}
+
+impl AlignParams {
+    /// Which of `Sim`'s parameters the search may move.
+    pub fn free(&self) -> [bool; Sim::N] {
+        free_mask(self.shift, self.scale, self.rotation, self.model)
+    }
+}
+
+/// The transform searched for: how much a frame may be deformed to land on
+/// the previous one. Similarity is Zerene's and Helicon's (and what a focus
+/// rail or a focus ring produces: the image breathes, shifts, turns a
+/// little). Affine adds an aspect ratio and a shear; projective the two
+/// perspective terms, for a stack whose camera tilted against the subject as
+/// it stepped (keystone). More parameters take longer to search, and on a
+/// stack that needs none, the extra ones only fit noise.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AlignModel {
+    #[default]
+    Similarity,
+    Affine,
+    Projective,
+}
+
+impl AlignModel {
+    pub fn parse(s: &str) -> Option<AlignModel> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "similarity" | "sim" => Some(AlignModel::Similarity),
+            "affine" => Some(AlignModel::Affine),
+            "projective" | "perspective" | "homography" => Some(AlignModel::Projective),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            AlignModel::Similarity => "similarity",
+            AlignModel::Affine => "affine",
+            AlignModel::Projective => "projective",
+        }
+    }
+}
+
+/// The parameters of `Sim` a search over `model` may move: x and y shift,
+/// scale, rotation, then aspect and shear (affine and up), then the two
+/// perspective terms (projective).
+pub fn free_mask(shift: bool, scale: bool, rotation: bool, model: AlignModel) -> [bool; Sim::N] {
+    let affine = model != AlignModel::Similarity;
+    let projective = model == AlignModel::Projective;
+    [shift, shift, scale, rotation, affine, affine, projective, projective]
 }
 
 /// The interpolation kernel of the warp: how an aligned frame's pixel is read
@@ -109,35 +161,121 @@ impl Interp {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+/// A frame's transform onto the previous aligned frame, about the frame's
+/// centre: a similarity (shift, scale, rotation); with `aspect` and `shear`
+/// an affine transform; with `px` and `py` a projective one (`AlignModel`).
+/// Frame 0 sits at `id()`. `matrix` gives it as a 3×3 homography.
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Sim {
     pub xoff: f64, // fraction of width
     pub yoff: f64, // fraction of height
     pub scale: f64,
     pub rot: f64, // radians
+    /// Vertical over horizontal scale (1 = isotropic).
+    pub aspect: f64,
+    /// Horizontal shear per unit of height (0 = none).
+    pub shear: f64,
+    /// Perspective: the divisor 1 + px·u/w + py·v/h over the centred pixel (u, v).
+    pub px: f64,
+    pub py: f64,
 }
 
 impl Sim {
+    /// The number of parameters (the length of `as_vec`).
+    pub const N: usize = 8;
+    /// The search box's half-width around a guess, per parameter: 10 % of
+    /// the frame in shift, 10 % in scale, 5° in rotation, 5 % in aspect and
+    /// shear, 5 % in each perspective term.
+    pub const SPAN: [f64; Sim::N] = [0.10, 0.10, 0.10, 0.087266462599716474, 0.05, 0.05, 0.05, 0.05];
+
     pub fn id() -> Sim {
-        Sim { xoff: 0.0, yoff: 0.0, scale: 1.0, rot: 0.0 }
+        Sim { xoff: 0.0, yoff: 0.0, scale: 1.0, rot: 0.0, aspect: 1.0, shear: 0.0, px: 0.0, py: 0.0 }
     }
     pub fn from_vec(v: &[f64]) -> Sim {
-        Sim { xoff: v[0], yoff: v[1], scale: v[2], rot: v[3] }
+        Sim { xoff: v[0], yoff: v[1], scale: v[2], rot: v[3], aspect: v[4], shear: v[5], px: v[6], py: v[7] }
     }
-    pub fn as_vec(&self) -> [f64; 4] {
-        [self.xoff, self.yoff, self.scale, self.rot]
+    pub fn as_vec(&self) -> [f64; Sim::N] {
+        [self.xoff, self.yoff, self.scale, self.rot, self.aspect, self.shear, self.px, self.py]
+    }
+    /// No perspective: the matrix is affine.
+    pub fn is_affine(&self) -> bool {
+        self.px == 0.0 && self.py == 0.0
     }
 
-    /// Forward 2x3 affine mapping SOURCE(target) -> REFERENCE coords.
-    pub fn matrix(&self, w: usize, h: usize) -> [[f64; 3]; 2] {
+    /// Forward 3×3 homography mapping SOURCE(target) -> REFERENCE pixel
+    /// coordinates: (x, y) ↦ (X/W, Y/W) with [X, Y, W]ᵀ = M·[x, y, 1]ᵀ. The
+    /// linear part is scale · R(rot) · [[1, shear], [0, aspect]] about the
+    /// centre, the perspective terms act on the centred pixel; without them
+    /// the last row is exactly [0, 0, 1].
+    pub fn matrix(&self, w: usize, h: usize) -> [[f64; 3]; 3] {
         let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
         let (c, s) = (self.rot.cos(), self.rot.sin());
         let sc = self.scale;
-        let (a, b, d, e) = (sc * c, -sc * s, sc * s, sc * c);
-        let tx = cx + self.xoff * w as f64 - (a * cx + b * cy);
-        let ty = cy + self.yoff * h as f64 - (d * cx + e * cy);
-        [[a, b, tx], [d, e, ty]]
+        let (a, b, d, e) = (sc * c, sc * (c * self.shear - s * self.aspect), sc * s, sc * (s * self.shear + c * self.aspect));
+        let (gx, gy) = (self.px / w as f64, self.py / h as f64);
+        // T(c) · [[a, b, t], [d, e, t'], [gx, gy, 1]] · T(−c), written out
+        let (a2, b2, d2, e2) = (a + cx * gx, b + cx * gy, d + cy * gx, e + cy * gy);
+        let tx = cx + self.xoff * w as f64 - (a2 * cx + b2 * cy);
+        let ty = cy + self.yoff * h as f64 - (d2 * cx + e2 * cy);
+        [[a2, b2, tx], [d2, e2, ty], [gx, gy, 1.0 - gx * cx - gy * cy]]
     }
+}
+
+/// The inverse of a 3×3 homography, scaled so its last entry is 1; an affine
+/// matrix (last row [0, 0, 1]) inverts to one with the same last row, by the
+/// 2×3 formulas.
+pub fn inverse(m: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    if m[2] == [0.0, 0.0, 1.0] {
+        let (a, b, tx) = (m[0][0], m[0][1], m[0][2]);
+        let (d, e, ty) = (m[1][0], m[1][1], m[1][2]);
+        let det = a * e - b * d;
+        let (ia, ib, id, ie) = (e / det, -b / det, -d / det, a / det);
+        return [[ia, ib, -(ia * tx + ib * ty)], [id, ie, -(id * tx + ie * ty)], [0.0, 0.0, 1.0]];
+    }
+    let c = |i: usize, j: usize| {
+        // cofactor (i, j)
+        let (r0, r1) = ((i + 1) % 3, (i + 2) % 3);
+        let (c0, c1) = ((j + 1) % 3, (j + 2) % 3);
+        m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0]
+    };
+    // adjugate: the transposed cofactors; the determinant cancels in the normalisation
+    let mut inv = [[0f64; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            inv[i][j] = c(j, i);
+        }
+    }
+    let k = inv[2][2];
+    for row in &mut inv {
+        for v in row.iter_mut() {
+            *v /= k;
+        }
+    }
+    inv
+}
+
+/// The source point of destination pixel (x, y) under the (normalised)
+/// inverse `inv`: the division is by exactly 1 when `inv` is affine.
+#[inline]
+pub fn map(inv: &[[f64; 3]; 3], x: f64, y: f64) -> (f64, f64) {
+    let d = inv[2][0] * x + inv[2][1] * y + inv[2][2];
+    ((inv[0][0] * x + inv[0][1] * y + inv[0][2]) / d, (inv[1][0] * x + inv[1][1] * y + inv[1][2]) / d)
+}
+
+/// `inv` for an output moved `dx` pixels to the right: its source is taken
+/// `dx` to the left (inv · T(−dx)), normalised again.
+pub fn shifted(inv: [[f64; 3]; 3], dx: f64) -> [[f64; 3]; 3] {
+    let mut m = inv;
+    for row in &mut m {
+        row[2] -= row[0] * dx;
+    }
+    let k = m[2][2];
+    for row in &mut m {
+        for v in row.iter_mut() {
+            *v /= k;
+        }
+    }
+    m
 }
 
 /// An axis-aligned pixel rectangle: `x, y` its top-left corner, `w, h` its size.
@@ -166,7 +304,7 @@ impl Rect {
 /// frame is left in it. For each frame, a destination pixel is covered when its
 /// source point (the frame's inverse transform of it) lies the kernel's
 /// support (`interp.margin()`) inside the source; that is a convex
-/// quadrilateral, and its cut with a pixel row is
+/// quadrilateral (a projective image of a rectangle too), and its cut with a pixel row is
 /// one interval, so each row's common interval is an intersection over frames
 /// and the best rectangle is the largest one spanning consecutive rows. Frames
 /// at the identity are sampled straight and cover everything. Rows are pixel
@@ -177,7 +315,7 @@ pub fn common_area(sims: &[Sim], w: usize, h: usize, interp: Interp) -> Rect {
     if w == 0 || h == 0 {
         return full;
     }
-    let invs: Vec<[[f64; 3]; 2]> = sims.iter().filter(|s| **s != Sim::id()).map(|s| affine_inv(s.matrix(w, h))).collect();
+    let invs: Vec<[[f64; 3]; 3]> = sims.iter().filter(|s| **s != Sim::id()).map(|s| inverse(s.matrix(w, h))).collect();
     if invs.is_empty() {
         return full;
     }
@@ -187,15 +325,27 @@ pub fn common_area(sims: &[Sim], w: usize, h: usize, interp: Interp) -> Rect {
     let mut rows: Vec<(i64, i64)> = Vec::with_capacity(h);
     for y in 0..h {
         let (mut lo, mut hi) = (0f64, (w - 1) as f64);
+        let yf = y as f64;
         for inv in &invs {
-            // source x and y are affine in the column: s = a·x + k
-            for (a, k, smin, smax) in [(inv[0][0], inv[0][1] * y as f64 + inv[0][2], m, xmax), (inv[1][0], inv[1][1] * y as f64 + inv[1][2], m, ymax)] {
-                if a.abs() < 1e-12 {
-                    if k < smin || k > smax { lo = 1.0; hi = 0.0; }
-                } else {
-                    let (x1, x2) = ((smin - k) / a, (smax - k) / a);
-                    lo = lo.max(x1.min(x2));
-                    hi = hi.min(x1.max(x2));
+            // the homography's divisor over the row, g·x + d: positive across the
+            // frame (it is 1 for an affine transform), or the row is given up
+            let (g, d) = (inv[2][0], inv[2][1] * yf + inv[2][2]);
+            if d <= 0.0 || g * (w - 1) as f64 + d <= 0.0 {
+                lo = 1.0;
+                hi = 0.0;
+                break;
+            }
+            // source x and y are rational in the column, s = (a·x + k) / (g·x + d), so
+            // s ≥ smin ⇔ (a − smin·g)·x + (k − smin·d) ≥ 0, and s ≤ smax alike
+            for (a, k, smin, smax) in [(inv[0][0], inv[0][1] * yf + inv[0][2], m, xmax), (inv[1][0], inv[1][1] * yf + inv[1][2], m, ymax)] {
+                for (p, q) in [(a - smin * g, k - smin * d), (smax * g - a, smax * d - k)] {
+                    if p.abs() < 1e-12 {
+                        if q < 0.0 { lo = 1.0; hi = 0.0; }
+                    } else if p > 0.0 {
+                        lo = lo.max(-q / p);
+                    } else {
+                        hi = hi.min(-q / p);
+                    }
                 }
             }
         }
@@ -299,14 +449,13 @@ fn taps_of<const N: usize>(k: impl Fn(f64) -> f64, t: f64) -> [f64; N] {
 fn warp_with<const N: usize>(
     src: &[f32], w: usize, h: usize, sim: &Sim, ow: usize, oh: usize, weights: impl Fn(f64) -> [f64; N] + Sync,
 ) -> (Vec<f32>, Vec<u8>) {
-    let inv = affine_inv(sim.matrix(w, h));
+    let inv = inverse(sim.matrix(w, h));
     let start = 1 - (N / 2) as isize;
     let mut out = vec![0f32; ow * oh];
     let mut valid = vec![0u8; ow * oh];
     out.par_chunks_mut(ow).zip(valid.par_chunks_mut(ow)).enumerate().for_each(|(y, (orow, vrow))| {
         for x in 0..ow {
-            let sx = inv[0][0] * x as f64 + inv[0][1] * y as f64 + inv[0][2];
-            let sy = inv[1][0] * x as f64 + inv[1][1] * y as f64 + inv[1][2];
+            let (sx, sy) = map(&inv, x as f64, y as f64);
             vrow[x] = (sx >= 0.0 && sx <= (w - 1) as f64 && sy >= 0.0 && sy <= (h - 1) as f64) as u8;
             let x0 = sx.floor() as isize;
             let y0 = sy.floor() as isize;
@@ -566,16 +715,16 @@ pub(crate) fn multiscale_align(
     w: usize,
     h: usize,
     init: Sim,
-    free: [bool; 4],
+    free: [bool; Sim::N],
     coarsen: usize,
 ) -> Sim {
     let pref = gauss_pyramid(rf, w, h);
     let ptgt = gauss_pyramid(tg, w, h);
     let n = pref.len().min(ptgt.len());
-    let span = [0.10, 0.10, 0.10, 5.0f64.to_radians()];
+    let span = Sim::SPAN;
     let iv = init.as_vec();
     let mut cur = iv;
-    let free_idx: Vec<usize> = (0..4).filter(|&k| free[k]).collect();
+    let free_idx: Vec<usize> = (0..Sim::N).filter(|&k| free[k]).collect();
     let lo_f: Vec<f64> = free_idx.iter().map(|&k| iv[k] - span[k]).collect();
     let hi_f: Vec<f64> = free_idx.iter().map(|&k| iv[k] + span[k]).collect();
 
@@ -619,9 +768,8 @@ pub enum PairAligner {
 impl PairAligner {
     /// The transform that takes `tg` (a frame's luma) onto `rf` (the previous
     /// aligned frame's), searched from `guess` over the `free` parameters
-    /// (x shift, y shift, scale, rotation), `coarsen` levels short of full
-    /// resolution.
-    pub fn align_pair(&self, rf: &[f32], tg: &[f32], w: usize, h: usize, guess: Sim, free: [bool; 4], coarsen: usize) -> Sim {
+    /// (`free_mask`), `coarsen` levels short of full resolution.
+    pub fn align_pair(&self, rf: &[f32], tg: &[f32], w: usize, h: usize, guess: Sim, free: [bool; Sim::N], coarsen: usize) -> Sim {
         match self {
             PairAligner::Cpu => multiscale_align(rf, tg, w, h, guess, free, coarsen),
             #[cfg(feature = "gpu")]
@@ -631,13 +779,20 @@ impl PairAligner {
 }
 
 pub fn report(sim: &Sim, w: usize, h: usize) -> String {
-    format!(
+    let mut s = format!(
         "dx={:+7.2}px dy={:+7.2}px scale={:.5} rot={:+.3} deg",
         sim.xoff * w as f64,
         sim.yoff * h as f64,
         sim.scale,
         sim.rot.to_degrees()
-    )
+    );
+    if sim.aspect != 1.0 || sim.shear != 0.0 {
+        s += &format!(" aspect={:.5} shear={:+.5}", sim.aspect, sim.shear);
+    }
+    if !sim.is_affine() {
+        s += &format!(" persp={:+.5}/{:+.5}", sim.px, sim.py);
+    }
+    s
 }
 
 #[cfg(test)]
@@ -655,7 +810,7 @@ mod tests {
         // frame 1 lands 10 px to the right: its left 10 columns are smeared edge, and
         // the warp's 2 px support trims the other sides
         let (w, h) = (640, 480);
-        let s = Sim { xoff: 10.0 / w as f64, yoff: 0.0, scale: 1.0, rot: 0.0 };
+        let s = Sim { xoff: 10.0 / w as f64, ..Sim::id() };
         let r = common_area(&[Sim::id(), s], w, h, Interp::Spline4x4);
         assert_eq!(r, Rect { x: 12, y: 2, w: w - 12, h: h - 4 });
         // a wider kernel trims more, a narrower one less, nearest nothing beyond the shift
@@ -673,7 +828,7 @@ mod tests {
         for k in Interp::ALL {
             let (o, _) = warp_plane(&src, w, h, &Sim::id(), w, h, k);
             assert!(o.iter().zip(&src).all(|(a, b)| (a - b).abs() < 1e-6), "{k:?} identity");
-            let s = Sim { xoff: 3.0 / w as f64, yoff: -2.0 / h as f64, scale: 1.0, rot: 0.0 };
+            let s = Sim { xoff: 3.0 / w as f64, yoff: -2.0 / h as f64, ..Sim::id() };
             let (o, valid) = warp_plane(&src, w, h, &s, w, h, k);
             for y in 6..h - 6 {
                 for x in 6..w - 6 {
@@ -693,7 +848,7 @@ mod tests {
     fn kernels_reproduce_a_ramp() {
         let (w, h) = (48, 40);
         let ramp: Vec<f32> = (0..w * h).map(|i| (i % w) as f32 + 0.5 * (i / w) as f32).collect();
-        let s = Sim { xoff: 2.3 / w as f64, yoff: 1.6 / h as f64, scale: 1.0, rot: 0.0 };
+        let s = Sim { xoff: 2.3 / w as f64, yoff: 1.6 / h as f64, ..Sim::id() };
         for k in Interp::ALL {
             let (o, _) = warp_plane(&ramp, w, h, &s, w, h, k);
             for y in 8..h - 8 {
@@ -735,24 +890,22 @@ mod tests {
     #[test]
     fn common_area_rotation_is_inside_every_frame() {
         let (w, h) = (640, 480);
-        let sims = [Sim::id(), Sim { xoff: -0.01, yoff: 0.02, scale: 1.03, rot: 0.02 }, Sim { xoff: 0.005, yoff: -0.01, scale: 0.98, rot: -0.015 }];
+        let sims = [Sim::id(), Sim { xoff: -0.01, yoff: 0.02, scale: 1.03, rot: 0.02, ..Sim::id() }, Sim { xoff: 0.005, yoff: -0.01, scale: 0.98, rot: -0.015, ..Sim::id() }];
         let m = Interp::Spline4x4.margin();
         let r = common_area(&sims, w, h, Interp::Spline4x4);
         assert!(r.w > w / 2 && r.h > h / 2 && !r.is_full(w, h), "{r:?}");
         // every corner pixel of the rectangle maps inside every frame's sound area
         for s in &sims[1..] {
-            let inv = affine_inv(s.matrix(w, h));
+            let inv = inverse(s.matrix(w, h));
             for (x, y) in [(r.x, r.y), (r.x + r.w - 1, r.y), (r.x, r.y + r.h - 1), (r.x + r.w - 1, r.y + r.h - 1)] {
-                let sx = inv[0][0] * x as f64 + inv[0][1] * y as f64 + inv[0][2];
-                let sy = inv[1][0] * x as f64 + inv[1][1] * y as f64 + inv[1][2];
+                let (sx, sy) = map(&inv, x as f64, y as f64);
                 assert!(sx >= m && sx <= (w - 1) as f64 - m && sy >= m && sy <= (h - 1) as f64 - m, "({x},{y}) -> ({sx:.1},{sy:.1})");
             }
         }
         // and it is maximal: one more row or column on any side breaks that for some frame
         let sound = |x: usize, y: usize| sims[1..].iter().all(|s| {
-            let inv = affine_inv(s.matrix(w, h));
-            let sx = inv[0][0] * x as f64 + inv[0][1] * y as f64 + inv[0][2];
-            let sy = inv[1][0] * x as f64 + inv[1][1] * y as f64 + inv[1][2];
+            let inv = inverse(s.matrix(w, h));
+            let (sx, sy) = map(&inv, x as f64, y as f64);
             sx >= m && sx <= (w - 1) as f64 - m && sy >= m && sy <= (h - 1) as f64 - m
         });
         let row_ok = |y: usize| (r.x..r.x + r.w).all(|x| sound(x, y));
@@ -761,5 +914,67 @@ mod tests {
         assert!(r.y + r.h == h || !row_ok(r.y + r.h));
         assert!(r.x == 0 || !col_ok(r.x - 1));
         assert!(r.x + r.w == w || !col_ok(r.x + r.w));
+    }
+
+    /// The homography and its inverse round-trip, and the affine parameters
+    /// do what they say: aspect scales y, shear moves x with y, perspective
+    /// keystones (a square's top wider than its bottom).
+    #[test]
+    fn homography_round_trip_and_meaning() {
+        let (w, h) = (640, 480);
+        let s = Sim { xoff: 0.01, yoff: -0.02, scale: 1.03, rot: 0.02, aspect: 1.02, shear: 0.01, px: 0.03, py: -0.02 };
+        let m = s.matrix(w, h);
+        let inv = inverse(m);
+        assert!(!s.is_affine() && inv[2][2] == 1.0);
+        for (x, y) in [(0.0, 0.0), (100.0, 37.0), (639.0, 479.0), (320.0, 240.0)] {
+            let (fx, fy) = map(&m, x, y);
+            let (bx, by) = map(&inv, fx, fy);
+            assert!((bx - x).abs() < 1e-9 && (by - y).abs() < 1e-9, "({x},{y}) -> ({fx},{fy}) -> ({bx},{by})");
+        }
+        // the centre stays put (up to the shift); affine ones exactly
+        let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+        let a = Sim { aspect: 1.5, shear: 0.2, ..Sim::id() };
+        assert_eq!(map(&a.matrix(w, h), cx, cy), (cx, cy));
+        assert_eq!(map(&a.matrix(w, h), cx, cy + 10.0), (cx + 2.0, cy + 15.0));
+        // py > 0 divides the top half by less than 1: the top widens, the bottom narrows
+        let p = Sim { px: 0.0, py: 0.1, ..Sim::id() };
+        let (top_l, _) = map(&p.matrix(w, h), cx - 100.0, cy - 100.0);
+        let (bot_l, _) = map(&p.matrix(w, h), cx - 100.0, cy + 100.0);
+        assert!(top_l < cx - 100.0 && bot_l > cx - 100.0, "keystone: {top_l} {bot_l}");
+        // affine transforms invert by the exact 2×3 route
+        assert_eq!(inverse(Sim::id().matrix(w, h)), [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+        assert_eq!(shifted(inv, 0.0), inv);
+        let sh = shifted(inv, 5.0);
+        let (x1, y1) = map(&sh, 105.0, 37.0);
+        let (x0, y0) = map(&inv, 100.0, 37.0);
+        assert!((x1 - x0).abs() < 1e-9 && (y1 - y0).abs() < 1e-9);
+    }
+
+    /// A projective warp reads the source where the forward map says, and
+    /// the common area of a keystoned frame is inside its sound quad.
+    #[test]
+    fn projective_warp_and_common_area() {
+        let (w, h) = (64, 48);
+        let ramp: Vec<f32> = (0..w * h).map(|i| (i % w) as f32 + 0.5 * (i / w) as f32).collect();
+        let s = Sim { px: 0.04, py: -0.03, shear: 0.01, ..Sim::id() };
+        let (o, valid) = warp_plane(&ramp, w, h, &s, w, h, Interp::Bilinear);
+        let inv = inverse(s.matrix(w, h));
+        for y in 4..h - 4 {
+            for x in 4..w - 4 {
+                let (sx, sy) = map(&inv, x as f64, y as f64);
+                assert_eq!(valid[y * w + x], 1);
+                assert!((o[y * w + x] as f64 - (sx + 0.5 * sy)).abs() < 1e-3, "({x},{y})");
+            }
+        }
+        let r = common_area(&[Sim::id(), s], w, h, Interp::Bilinear);
+        assert!(!r.is_full(w, h) && r.w > w / 2 && r.h > h / 2, "{r:?}");
+        let m = Interp::Bilinear.margin();
+        for (x, y) in [(r.x, r.y), (r.x + r.w - 1, r.y), (r.x, r.y + r.h - 1), (r.x + r.w - 1, r.y + r.h - 1)] {
+            let (sx, sy) = map(&inv, x as f64, y as f64);
+            assert!(sx >= m && sx <= (w - 1) as f64 - m && sy >= m && sy <= (h - 1) as f64 - m, "({x},{y}) -> ({sx:.2},{sy:.2})");
+        }
+        assert_eq!(AlignModel::parse("perspective"), Some(AlignModel::Projective));
+        assert_eq!(free_mask(true, true, false, AlignModel::Affine), [true, true, true, false, true, true, false, false]);
+        assert_eq!(free_mask(true, true, true, AlignModel::Projective), [true; 8]);
     }
 }

@@ -198,6 +198,7 @@
       <label><input type="checkbox" id="p-shift" checked> shift</label>
       <label><input type="checkbox" id="p-scale" checked> scale</label>
       <label><input type="checkbox" id="p-rotation" checked> rotation</label>
+      <label title="how much a frame may be deformed to land on the previous one — similarity: shift, scale and rotation (Zerene's and Helicon's, what a focus rail or ring produces); affine adds an aspect ratio and a shear; projective adds perspective, for a camera that tilted against the subject as it stepped (keystone). More terms take longer to search, and on a stack that needs none they only fit noise">model <select id="p-model"><option value="similarity" selected>similarity</option><option value="affine">affine</option><option value="projective">projective</option></select></label>
       <label class="stepper">align coarsen <span><button data-step="p-coarsen" data-d="-1">−</button><span id="p-coarsen" data-min="0" data-max="5">2</span><button data-step="p-coarsen" data-d="1">+</button></span></label>
       <label title="the kernel each aligned frame is resampled with (the registration search itself always uses spline 4×4): the wider the kernel, the sharper fine detail survives a fractional shift, and the more noise and ringing at hard edges — nearest keeps the pixels as they are (jagged sub-pixel shifts), bilinear is soft, spline 4×4 is Zerene's default, spline 6×6 and Lanczos 3 are sharper">interpolation <select id="p-interp"><option value="nearest">nearest</option><option value="bilinear">bilinear</option><option value="bicubic">bicubic</option><option value="spline4x4" selected>spline 4×4</option><option value="spline6x6">spline 6×6</option><option value="lanczos3">Lanczos 3</option></select></label>
     </div>
@@ -208,6 +209,7 @@
       <label>top rule <select id="p-top"><option value="de">deviation + entropy</option><option value="dev">deviation</option><option value="avg">average</option></select></label>
       <label class="stepper">top radius <span><button data-step="p-topr" data-d="-1">−</button><span id="p-topr" data-min="1" data-max="6">2</span><button data-step="p-topr" data-d="1">+</button></span></label>
       <label><input type="checkbox" id="p-chroma"> use chroma</label>
+      <label class="stepper" title="halo control: the levels coarser than the depth level do not pick their own winners — each is the mean of the frames weighed by the depth level's region energy to this power, so the coarse structure follows the frames found sharp there and a defocused copy of a bright object no longer wins the coarse levels beside it (the pyramid's halo). 1 weighs by the energy itself, higher is closer to a hard pick; off = every level picks its own winner (the paper's rule)">halo control <span><button data-step="p-halo" data-d="-1">−</button><span id="p-halo" data-min="0" data-max="8" data-zero="off">0</span><button data-step="p-halo" data-d="1">+</button></span></label>
     </div>
     <button class="section" type="button" data-sec="depthmap">Depth map</button>
     <div class="sec-body">
