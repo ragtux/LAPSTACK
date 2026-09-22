@@ -16,10 +16,11 @@
 //!
 //! `GpuAligner` / `align_gpu` put the aligner's cost search on the GPU as
 //! well: the Nelder-Mead control flow, the Gaussian pyramids and the final
-//! per-frame warp stay on the CPU (each is cheap next to the ~200-iteration
-//! cost search); every cost evaluation is one `warp_cost` launch.
+//! per-frame warp stay on the CPU (each is cheap next to the few hundred
+//! evaluations of the cost search); every cost evaluation is one `warp_cost`
+//! launch, on the CPU search's per-level schedule (`align::level_steps`).
 
-use crate::align::{Sim, gauss_pyramid, inverse, nelder_mead};
+use crate::align::{Sim, gauss_levels, inverse, level, level_steps, nelder_mead};
 use crate::fuse::{FuseParams, HALO_FLOOR, HALO_REF, binomial, fuse_residuals, halo_guide, upsample_index};
 use crate::pyramid::{Img3, auto_levels, half};
 use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, LaunchConfig, PushKernelArg};
@@ -427,16 +428,16 @@ impl GpuAligner {
         let stream = self.g.s.clone();
         let free_idx: Vec<usize> = (0..Sim::N).filter(|&k| free[k]).collect();
         let span = Sim::SPAN;
-        let pref = gauss_pyramid(prev_ref, w, h);
-        let ptgt = gauss_pyramid(y, w, h);
-        let nlv = pref.len().min(ptgt.len());
+        let pref = gauss_levels(prev_ref, w, h);
+        let ptgt = gauss_levels(y, w, h);
+        let nlv = pref.len().min(ptgt.len()) + 1;
         let finest = coarsen.min(nlv.saturating_sub(1));
         // upload only the levels actually refined (finest..nlv)
         let mut refd: Vec<Option<CudaSlice<f32>>> = (0..nlv).map(|_| None).collect();
         let mut tgtd: Vec<Option<CudaSlice<f32>>> = (0..nlv).map(|_| None).collect();
         for lvl in finest..nlv {
-            refd[lvl] = Some(stream.memcpy_stod(&pref[lvl].0).unwrap());
-            tgtd[lvl] = Some(stream.memcpy_stod(&ptgt[lvl].0).unwrap());
+            refd[lvl] = Some(stream.memcpy_stod(level(prev_ref, w, h, &pref, lvl).0).unwrap());
+            tgtd[lvl] = Some(stream.memcpy_stod(level(y, w, h, &ptgt, lvl).0).unwrap());
         }
 
         let iv = guess.as_vec();
@@ -445,8 +446,8 @@ impl GpuAligner {
         let hi_f: Vec<f64> = free_idx.iter().map(|&k| iv[k] + span[k]).collect();
 
         for lvl in (finest..nlv).rev() {
-            let (aw, ah) = (pref[lvl].1, pref[lvl].2);
-            let (tw, th) = (ptgt[lvl].1, ptgt[lvl].2);
+            let (_, aw, ah) = level(prev_ref, w, h, &pref, lvl);
+            let (_, tw, th) = level(y, w, h, &ptgt, lvl);
             let rd = refd[lvl].as_ref().unwrap();
             let td = tgtd[lvl].as_ref().unwrap();
             let cur_snap = cur;
@@ -474,7 +475,8 @@ impl GpuAligner {
                 ((sd2 - sd * sd / cnt) / cnt).max(0.0).sqrt()
             };
             let x0: Vec<f64> = free_idx.iter().map(|&k| cur[k]).collect();
-            let best = nelder_mead(&cost, &x0, &lo_f, &hi_f);
+            let (step, tol) = level_steps(&free_idx, lvl, w, h);
+            let best = nelder_mead(&cost, &x0, &lo_f, &hi_f, &step, &tol);
             for (k, &idx) in free_idx.iter().enumerate() {
                 cur[idx] = best[k];
             }

@@ -286,7 +286,7 @@ fn warp(@builtin(global_invocation_id) g: vec3<u32>) {
 
 // ---- alignment cost: warp the target luma `a` (p.ow x p.oh) into the reference `b`
 // (p.w x p.h) and reduce (sum d, sum d^2, count) over valid pixels per workgroup
-// into e[wg*3 ..]. Host sums the partials. FP32 like the native CUDA kernel.
+// into e[p.off_out + wg*3 ..] (one region per point of a batch). Host sums the partials. FP32 like the native CUDA kernel.
 var<workgroup> sd: array<f32, 256>;
 var<workgroup> sd2: array<f32, 256>;
 var<workgroup> sn: array<f32, 256>;
@@ -324,7 +324,7 @@ fn cost(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
         workgroupBarrier();
     }
     if (t == 0u) {
-        let k = (wg.y * nwg.x + wg.x) * 3u;
+        let k = p.off_out + (wg.y * nwg.x + wg.x) * 3u;
         e[k] = sd[0]; e[k + 1u] = sd2[0]; e[k + 2u] = sn[0];
     }
 }

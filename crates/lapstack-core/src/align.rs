@@ -13,6 +13,12 @@
 //! The registration search runs on its own Gaussian pyramid (Burt's
 //! generating kernel with a = 0.33, border-renormalised, halved while
 //! `h > 64 && w > 8`), independent of the fusion pyramid in `pyramid.rs`.
+//! At each level the simplex starts one pixel of that level wide and stops
+//! at a tenth of one (`level_steps`: the same schedule drives the CUDA and
+//! WebGPU searches), so the coarse levels only hand the next one a start
+//! within its pixel and the finest level searched settles sub-pixel; every
+//! cost evaluation is one row-parallel pass that warps and reduces at once
+//! (`warp_cost`), nothing allocated.
 
 use crate::pyramid::{Img3, for_rows};
 use rayon::prelude::*;
@@ -446,32 +452,61 @@ fn taps_of<const N: usize>(k: impl Fn(f64) -> f64, t: f64) -> [f64; N] {
 /// `weights` (taps at `1 − N/2 ..` from the floor of the source point);
 /// edge-clamped, with a validity mask (1 where the source point is inside the
 /// frame).
+/// The source points along output row `y` under `inv`: `(x0, y0, dx, dy)`
+/// such that pixel `x` reads `(x0 + dx·x, y0 + dy·x)` — the case of an affine
+/// `inv`, whose divisor is exactly 1. `None` for a projective one, which
+/// `map` handles pixel by pixel.
+#[inline]
+fn affine_row(inv: &[[f64; 3]; 3], y: f64) -> Option<(f64, f64, f64, f64)> {
+    (inv[2] == [0.0, 0.0, 1.0]).then(|| (inv[0][1] * y + inv[0][2], inv[1][1] * y + inv[1][2], inv[0][0], inv[1][0]))
+}
+
 fn warp_with<const N: usize>(
     src: &[f32], w: usize, h: usize, sim: &Sim, ow: usize, oh: usize, weights: impl Fn(f64) -> [f64; N] + Sync,
 ) -> (Vec<f32>, Vec<u8>) {
     let inv = inverse(sim.matrix(w, h));
     let start = 1 - (N / 2) as isize;
+    let (xmax, ymax) = ((w - 1) as f64, (h - 1) as f64);
     let mut out = vec![0f32; ow * oh];
     let mut valid = vec![0u8; ow * oh];
     out.par_chunks_mut(ow).zip(valid.par_chunks_mut(ow)).enumerate().for_each(|(y, (orow, vrow))| {
+        let yf = y as f64;
+        let aff = affine_row(&inv, yf);
         for x in 0..ow {
-            let (sx, sy) = map(&inv, x as f64, y as f64);
-            vrow[x] = (sx >= 0.0 && sx <= (w - 1) as f64 && sy >= 0.0 && sy <= (h - 1) as f64) as u8;
+            let (sx, sy) = match aff {
+                Some((x0, y0, dx, dy)) => (x0 + dx * x as f64, y0 + dy * x as f64),
+                None => map(&inv, x as f64, yf),
+            };
+            vrow[x] = (sx >= 0.0 && sx <= xmax && sy >= 0.0 && sy <= ymax) as u8;
             let x0 = sx.floor() as isize;
             let y0 = sy.floor() as isize;
-            let wx = weights(sx - x0 as f64);
-            let wy = weights(sy - y0 as f64);
-            let mut acc = 0f64;
-            for j in 0..N {
-                let yy = (y0 + j as isize + start).clamp(0, h as isize - 1) as usize;
-                let mut r = 0f64;
-                for i in 0..N {
-                    let xx = (x0 + i as isize + start).clamp(0, w as isize - 1) as usize;
-                    r += wx[i] * src[yy * w + xx] as f64;
+            let wx = weights(sx - x0 as f64).map(|v| v as f32);
+            let wy = weights(sy - y0 as f64).map(|v| v as f32);
+            let mut acc = 0f32;
+            let (xs, ys) = (x0 + start, y0 + start);
+            if xs >= 0 && xs + N as isize <= w as isize && ys >= 0 && ys + N as isize <= h as isize {
+                // the footprint lies inside the frame: no clamps
+                let (xs, ys) = (xs as usize, ys as usize);
+                for j in 0..N {
+                    let s = &src[(ys + j) * w + xs..(ys + j) * w + xs + N];
+                    let mut r = 0f32;
+                    for i in 0..N {
+                        r += wx[i] * s[i];
+                    }
+                    acc += wy[j] * r;
                 }
-                acc += wy[j] * r;
+            } else {
+                for j in 0..N {
+                    let yy = (ys + j as isize).clamp(0, h as isize - 1) as usize;
+                    let mut r = 0f32;
+                    for i in 0..N {
+                        let xx = (xs + i as isize).clamp(0, w as isize - 1) as usize;
+                        r += wx[i] * src[yy * w + xx];
+                    }
+                    acc += wy[j] * r;
+                }
             }
-            orow[x] = acc as f32;
+            orow[x] = acc;
         }
     });
     (out, valid)
@@ -501,34 +536,88 @@ pub fn warp_img3(im: &Img3, sim: &Sim, interp: Interp) -> (Img3, Vec<u8>) {
 /// BT.601 luma plane of an RGB image.
 pub fn luma(im: &Img3) -> Vec<f32> {
     let mut y = vec![0f32; im.w * im.h];
-    for (i, o) in y.iter_mut().enumerate() {
-        *o = 0.299 * im.p[0][i] + 0.587 * im.p[1][i] + 0.114 * im.p[2][i];
-    }
+    let w = im.w.max(1);
+    y.par_chunks_mut(w).zip(im.p[0].par_chunks(w)).zip(im.p[1].par_chunks(w)).zip(im.p[2].par_chunks(w)).for_each(|(((o, r), g), b)| {
+        for i in 0..o.len() {
+            o[i] = 0.299 * r[i] + 0.587 * g[i] + 0.114 * b[i];
+        }
+    });
     y
 }
 
-/// DC-removed RMS on Y over the valid region.
-fn dc_removed_rms(a: &[f32], b: &[f32], valid: &[u8]) -> f64 {
-    let (mut sa, mut sb, mut cnt) = (0f64, 0f64, 0usize);
-    for i in 0..a.len() {
-        if valid[i] != 0 {
-            sa += a[i] as f64;
-            sb += b[i] as f64;
-            cnt += 1;
-        }
-    }
+/// The search's objective: `tgt` (tw × th) warped by `sim` onto `rf`'s grid
+/// (aw wide) with Spline4x4, and the RMS of the difference with its mean
+/// removed, over the pixels whose source point lies inside `tgt`. One pass,
+/// row-parallel, nothing allocated: each row folds Σd, Σd² and the count of
+/// d = ref − warped into three sums, and rms = √((Σd² − (Σd)²/n) / n) — the
+/// CUDA and WGSL `cost` kernels reduce the same way. Coordinates in f64 (an
+/// f32 source point is ~0.001 px off at 8K), taps and weights in f32. 1e9
+/// when fewer than 16 pixels overlap.
+fn warp_cost(rf: &[f32], aw: usize, tgt: &[f32], tw: usize, th: usize, sim: &Sim) -> f64 {
+    let inv = inverse(sim.matrix(tw, th));
+    let (xmax, ymax) = ((tw - 1) as f64, (th - 1) as f64);
+    let (sd, sd2, cnt) = rf
+        .par_chunks(aw)
+        .enumerate()
+        .map(|(y, row)| {
+            let (mut sd, mut sd2, mut cnt) = (0f64, 0f64, 0usize);
+            let yf = y as f64;
+            let aff = affine_row(&inv, yf);
+            for (x, &r) in row.iter().enumerate() {
+                let (sx, sy) = match aff {
+                    Some((x0, y0, dx, dy)) => (x0 + dx * x as f64, y0 + dy * x as f64),
+                    None => map(&inv, x as f64, yf),
+                };
+                if !(sx >= 0.0 && sx <= xmax && sy >= 0.0 && sy <= ymax) {
+                    continue;
+                }
+                let x0 = sx.floor() as isize;
+                let y0 = sy.floor() as isize;
+                let wx = spline4f((sx - x0 as f64) as f32);
+                let wy = spline4f((sy - y0 as f64) as f32);
+                let mut acc = 0f32;
+                if x0 >= 1 && x0 + 2 < tw as isize && y0 >= 1 && y0 + 2 < th as isize {
+                    // the 4×4 footprint lies inside the frame: no clamps
+                    let (x0, y0) = (x0 as usize, y0 as usize);
+                    for j in 0..4 {
+                        let s = &tgt[(y0 + j - 1) * tw + x0 - 1..(y0 + j - 1) * tw + x0 + 3];
+                        acc += wy[j] * (wx[0] * s[0] + wx[1] * s[1] + wx[2] * s[2] + wx[3] * s[3]);
+                    }
+                } else {
+                    for j in 0..4 {
+                        let yy = (y0 + j as isize - 1).clamp(0, th as isize - 1) as usize;
+                        let mut r = 0f32;
+                        for i in 0..4 {
+                            let xx = (x0 + i as isize - 1).clamp(0, tw as isize - 1) as usize;
+                            r += wx[i] * tgt[yy * tw + xx];
+                        }
+                        acc += wy[j] * r;
+                    }
+                }
+                let d = (r - acc) as f64;
+                sd += d;
+                sd2 += d * d;
+                cnt += 1;
+            }
+            (sd, sd2, cnt)
+        })
+        .reduce(|| (0.0, 0.0, 0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2));
     if cnt < 16 {
         return 1e9;
     }
-    let (ma, mb) = (sa / cnt as f64, sb / cnt as f64);
-    let mut ss = 0f64;
-    for i in 0..a.len() {
-        if valid[i] != 0 {
-            let d = (a[i] as f64 - ma) - (b[i] as f64 - mb);
-            ss += d * d;
-        }
-    }
-    (ss / cnt as f64).sqrt()
+    let n = cnt as f64;
+    ((sd2 - sd * sd / n) / n).max(0.0).sqrt()
+}
+
+/// `spline4` in f32, for the cost's inner loop.
+#[inline]
+fn spline4f(t: f32) -> [f32; 4] {
+    [
+        ((-1.0 / 3.0 * t + 0.8) * t - 0.46666667) * t,
+        ((t - 1.8) * t - 0.2) * t + 1.0,
+        ((1.2 - t) * t + 0.8) * t,
+        ((1.0 / 3.0 * t - 0.2) * t - 0.13333334) * t,
+    ]
 }
 
 /// Burt generating kernel [c,b,a,b,c] with a = 0.33 (the registration pyramid).
@@ -563,18 +652,35 @@ fn reduce_burt(src: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
     let oh = (h + 1) / 2;
     let cn = norm_full(w, &k);
     let rn = norm_full(h, &k);
+    // the column norms on the output grid, and the output columns whose 5 taps all lie inside
+    let cn2: Vec<f32> = (0..ow).map(|oj| cn[2 * oj]).collect();
+    let (j0, j1) = (1.min(ow), if w >= 5 { (w - 3) / 2 + 1 } else { 0 });
     // horizontal pass -> htmp (h x ow), unnormalized
     let mut htmp = vec![0f32; h * ow];
     for_rows(&mut htmp, ow, |y, row| {
-        for oj in 0..ow {
+        let s = &src[y * w..(y + 1) * w];
+        let edge = |oj: usize| {
             let cx = 2 * oj;
             let mut a = 0.0;
             for t in 0..5 {
-                let s = cx as isize + t as isize - 2;
-                if s >= 0 && (s as usize) < w {
-                    a += k[t] * src[y * w + s as usize];
+                let i = cx as isize + t as isize - 2;
+                if i >= 0 && (i as usize) < w {
+                    a += k[t] * s[i as usize];
                 }
             }
+            a
+        };
+        for oj in (0..j0).chain(j1.max(j0)..ow) {
+            row[oj] = edge(oj);
+        }
+        for oj in j0..j1 {
+            let c = 2 * oj;
+            let mut a = 0.0;
+            a += k[0] * s[c - 2];
+            a += k[1] * s[c - 1];
+            a += k[2] * s[c];
+            a += k[3] * s[c + 1];
+            a += k[4] * s[c + 2];
             row[oj] = a;
         }
     });
@@ -583,28 +689,38 @@ fn reduce_burt(src: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
     let htmp_ref = &htmp;
     for_rows(&mut out, ow, |oi, row| {
         let cy = 2 * oi;
-        for oj in 0..ow {
-            let mut a = 0.0;
-            for t in 0..5 {
-                let s = cy as isize + t as isize - 2;
-                if s >= 0 && (s as usize) < h {
-                    a += k[t] * htmp_ref[s as usize * ow + oj];
+        let r = rn[cy];
+        row.fill(0.0);
+        for t in 0..5 {
+            let s = cy as isize + t as isize - 2;
+            if s >= 0 && (s as usize) < h {
+                let kt = k[t];
+                let hrow = &htmp_ref[s as usize * ow..(s as usize + 1) * ow];
+                for oj in 0..ow {
+                    row[oj] += kt * hrow[oj];
                 }
             }
-            row[oj] = a / (rn[cy] * cn[2 * oj]);
+        }
+        for oj in 0..ow {
+            row[oj] /= r * cn2[oj];
         }
     });
     (out, ow, oh)
 }
 
 pub type Lvl = (Vec<f32>, usize, usize);
-pub fn gauss_pyramid(y: &[f32], w: usize, h: usize) -> Vec<Lvl> {
-    let mut levels = vec![(y.to_vec(), w, h)];
+
+/// The registration pyramid's levels above the full-resolution plane `y`:
+/// `[0]` is half size, and so on while `h > 64 && w > 8`. `level` reads any
+/// level, the plane itself as level 0.
+pub fn gauss_levels(y: &[f32], w: usize, h: usize) -> Vec<Lvl> {
+    let mut levels: Vec<Lvl> = Vec::new();
     let (mut cw, mut ch) = (w, h);
-    let mut cur = y.to_vec();
     while ch > 64 && cw > 8 {
-        let (d, ow, oh) = reduce_burt(&cur, cw, ch);
-        cur = d.clone();
+        let (d, ow, oh) = match levels.last() {
+            None => reduce_burt(y, cw, ch),
+            Some((p, _, _)) => reduce_burt(p, cw, ch),
+        };
         cw = ow;
         ch = oh;
         levels.push((d, ow, oh));
@@ -612,8 +728,47 @@ pub fn gauss_pyramid(y: &[f32], w: usize, h: usize) -> Vec<Lvl> {
     levels
 }
 
-/// Bounded Nelder-Mead. Minimizes f over the box [lo,hi]. n = 1..4.
-pub fn nelder_mead<F: Fn(&[f64]) -> f64>(f: &F, x0: &[f64], lo: &[f64], hi: &[f64]) -> Vec<f64> {
+/// Level `l` of `y`'s pyramid: the plane itself at 0, else `levels[l − 1]`.
+pub fn level<'a>(y: &'a [f32], w: usize, h: usize, levels: &'a [Lvl], l: usize) -> (&'a [f32], usize, usize) {
+    if l == 0 { (y, w, h) } else { (&levels[l - 1].0, levels[l - 1].1, levels[l - 1].2) }
+}
+
+/// Full-resolution pixels a point at the frame's edge moves per unit of each
+/// of `Sim`'s parameters (the worst case over the frame): the width and
+/// height for the shifts, the half-frame for scale and rotation, the
+/// half-height for aspect and shear, a quarter-frame for the perspective
+/// terms (their divisor changes by px/2 at the edge, moving it by w/4 · px).
+pub fn param_gain(w: usize, h: usize) -> [f64; Sim::N] {
+    let (w, h) = (w as f64, h as f64);
+    let r = w.max(h) / 2.0;
+    [w, h, r, r, h / 2.0, h / 2.0, w / 4.0, h / 4.0]
+}
+
+/// The simplex's first step at a level: one pixel of that level.
+pub const STEP_PX: f64 = 1.0;
+/// The simplex's stopping size at a level: a tenth of a pixel of that level,
+/// so the search at the finest level it runs on is sub-pixel there, and the
+/// coarser levels only hand the next one a start within its pixel.
+pub const TOL_PX: f64 = 0.1;
+
+/// The search's schedule at pyramid level `lvl` (a pixel there is `2^lvl`
+/// full-resolution pixels), over the parameters `free_idx`: the first step
+/// and the stopping size of the simplex, per parameter, in the parameter's
+/// units — `STEP_PX` and `TOL_PX` pixels of the level moved at the frame's
+/// edge (`param_gain`). The same for the CPU, CUDA and WebGPU searches.
+pub fn level_steps(free_idx: &[usize], lvl: usize, w: usize, h: usize) -> (Vec<f64>, Vec<f64>) {
+    let gain = param_gain(w, h);
+    let px = (1u64 << lvl) as f64;
+    let step = free_idx.iter().map(|&k| STEP_PX * px / gain[k]).collect();
+    let tol = free_idx.iter().map(|&k| TOL_PX * px / gain[k]).collect();
+    (step, tol)
+}
+
+/// Bounded Nelder-Mead: minimises `f` over the box `[lo, hi]` from `x0`,
+/// the first simplex `x0` moved by `step[k]` along each axis, until the
+/// vertices agree to `1e-4` relative in `f` and lie within `tol[k]` of the
+/// best along every axis (or 200 iterations). `n = 1..8`.
+pub fn nelder_mead<F: Fn(&[f64]) -> f64>(f: &F, x0: &[f64], lo: &[f64], hi: &[f64], step: &[f64], tol: &[f64]) -> Vec<f64> {
     let n = x0.len();
     if n == 0 {
         return vec![];
@@ -626,7 +781,7 @@ pub fn nelder_mead<F: Fn(&[f64]) -> f64>(f: &F, x0: &[f64], lo: &[f64], hi: &[f6
     let mut simplex: Vec<Vec<f64>> = vec![x0.to_vec()];
     for k in 0..n {
         let mut v = x0.to_vec();
-        v[k] += 0.05 * (hi[k] - lo[k]).abs().max(1e-6);
+        v[k] += step[k];
         clamp(&mut v);
         simplex.push(v);
     }
@@ -637,15 +792,8 @@ pub fn nelder_mead<F: Fn(&[f64]) -> f64>(f: &F, x0: &[f64], lo: &[f64], hi: &[f6
         idx.sort_by(|&a, &b| fv[a].partial_cmp(&fv[b]).unwrap());
         simplex = idx.iter().map(|&i| simplex[i].clone()).collect();
         fv = idx.iter().map(|&i| fv[i]).collect();
-        // convergence
-        if (fv[n] - fv[0]).abs() <= 1e-4 * (1.0 + fv[0].abs()) {
-            let mut sz = 0.0;
-            for k in 0..n {
-                sz = f64::max(sz, (simplex[n][k] - simplex[0][k]).abs());
-            }
-            if sz <= 1e-4 {
-                break;
-            }
+        if converged(&simplex, &fv, tol) {
+            break;
         }
         let mut c = vec![0.0; n];
         for i in 0..n {
@@ -709,6 +857,17 @@ pub fn nelder_mead<F: Fn(&[f64]) -> f64>(f: &F, x0: &[f64], lo: &[f64], hi: &[f6
     simplex[best].clone()
 }
 
+/// Nelder-Mead's stopping rule on a simplex sorted by `fv`: the values agree
+/// to 1e-4 relative and every vertex lies within `tol[k]` of the best along
+/// each axis.
+pub fn converged(simplex: &[Vec<f64>], fv: &[f64], tol: &[f64]) -> bool {
+    let n = tol.len();
+    if (fv[n] - fv[0]).abs() > 1e-4 * (1.0 + fv[0].abs()) {
+        return false;
+    }
+    simplex[1..].iter().all(|v| (0..n).all(|k| (v[k] - simplex[0][k]).abs() <= tol[k]))
+}
+
 pub(crate) fn multiscale_align(
     rf: &[f32],
     tg: &[f32],
@@ -718,9 +877,9 @@ pub(crate) fn multiscale_align(
     free: [bool; Sim::N],
     coarsen: usize,
 ) -> Sim {
-    let pref = gauss_pyramid(rf, w, h);
-    let ptgt = gauss_pyramid(tg, w, h);
-    let n = pref.len().min(ptgt.len());
+    let pref = gauss_levels(rf, w, h);
+    let ptgt = gauss_levels(tg, w, h);
+    let n = pref.len().min(ptgt.len()) + 1;
     let span = Sim::SPAN;
     let iv = init.as_vec();
     let mut cur = iv;
@@ -732,12 +891,12 @@ pub(crate) fn multiscale_align(
     // Sim transform is resolution-independent (fractional offset + scale + angle),
     // so a fit at reduced res applies at full res — skipping the full-res warp+RMS
     // (the dominant cost) for a large speedup at sub-px accuracy. Keep >=1 level.
+    // Each level's simplex starts a pixel of that level wide and stops at a tenth
+    // of one (`level_steps`).
     let finest = coarsen.min(n.saturating_sub(1));
     for lvl in (finest..n).rev() {
-        let a_d = &pref[lvl].0;
-        let (aw, ah) = (pref[lvl].1, pref[lvl].2);
-        let t_d = &ptgt[lvl].0;
-        let (tw, th) = (ptgt[lvl].1, ptgt[lvl].2);
+        let (a_d, aw, _) = level(rf, w, h, &pref, lvl);
+        let (t_d, tw, th) = level(tg, w, h, &ptgt, lvl);
         let cur_snap = cur;
         let cost = |xf: &[f64]| -> f64 {
             let mut v = cur_snap;
@@ -745,11 +904,11 @@ pub(crate) fn multiscale_align(
                 v[idx] = xf[k];
             }
             // the search's own kernel, whatever the frames are resampled with
-            let (bw, valid) = warp_plane(t_d, tw, th, &Sim::from_vec(&v), aw, ah, Interp::Spline4x4);
-            dc_removed_rms(a_d, &bw, &valid)
+            warp_cost(a_d, aw, t_d, tw, th, &Sim::from_vec(&v))
         };
         let x0: Vec<f64> = free_idx.iter().map(|&k| cur[k]).collect();
-        let best = nelder_mead(&cost, &x0, &lo_f, &hi_f);
+        let (step, tol) = level_steps(&free_idx, lvl, w, h);
+        let best = nelder_mead(&cost, &x0, &lo_f, &hi_f, &step, &tol);
         for (k, &idx) in free_idx.iter().enumerate() {
             cur[idx] = best[k];
         }
@@ -798,6 +957,74 @@ pub fn report(sim: &Sim, w: usize, h: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// REDUCE is border-renormalised: a constant plane stays constant at every
+    /// width, the edge columns and rows included (widths below the 5 taps go
+    /// through the edge path only).
+    #[test]
+    fn reduce_keeps_a_constant_plane() {
+        for (w, h) in [(1, 1), (2, 3), (3, 4), (4, 5), (5, 5), (6, 7), (9, 65), (10, 66), (33, 130)] {
+            let src = vec![0.75f32; w * h];
+            let (d, ow, oh) = reduce_burt(&src, w, h);
+            assert_eq!((ow, oh), ((w + 1) / 2, (h + 1) / 2));
+            assert!(d.iter().all(|v| (v - 0.75).abs() < 1e-6), "{w}x{h}: {d:?}");
+        }
+        let src = vec![0.25f32; 40 * 300];
+        let lv = gauss_levels(&src, 40, 300);
+        assert_eq!(lv.iter().map(|l| (l.1, l.2)).collect::<Vec<_>>(), vec![(20, 150), (10, 75), (5, 38)]);
+        assert!(lv.iter().all(|l| l.0.iter().all(|v| (v - 0.25).abs() < 1e-6)));
+        assert_eq!(level(&src, 40, 300, &lv, 0).1, 40);
+        assert_eq!(level(&src, 40, 300, &lv, 3).1, 5);
+    }
+
+    /// The fused cost is the DC-removed RMS of the warped difference over the
+    /// valid pixels, as the two-pass definition gives it.
+    #[test]
+    fn cost_matches_the_two_pass_definition() {
+        let (w, h) = (96, 72);
+        let a: Vec<f32> = (0..w * h).map(|i| ((i * 7919) % 1000) as f32 / 1000.0).collect();
+        let b: Vec<f32> = (0..w * h).map(|i| ((i * 104729 + 13) % 1000) as f32 / 1000.0 + 0.2).collect();
+        for s in [Sim::id(), Sim { xoff: 0.03, yoff: -0.02, scale: 1.02, rot: 0.01, ..Sim::id() }, Sim { px: 0.03, py: -0.02, shear: 0.01, ..Sim::id() }] {
+            let (bw, valid) = warp_plane(&b, w, h, &s, w, h, Interp::Spline4x4);
+            let (mut sa, mut sb, mut n) = (0f64, 0f64, 0usize);
+            for i in 0..w * h {
+                if valid[i] != 0 {
+                    sa += a[i] as f64;
+                    sb += bw[i] as f64;
+                    n += 1;
+                }
+            }
+            let (ma, mb) = (sa / n as f64, sb / n as f64);
+            let ss: f64 = (0..w * h).filter(|&i| valid[i] != 0).map(|i| ((a[i] as f64 - ma) - (bw[i] as f64 - mb)).powi(2)).sum();
+            let want = (ss / n as f64).sqrt();
+            let got = warp_cost(&a, w, &b, w, h, &s);
+            assert!((got - want).abs() < 1e-5 * want, "{s:?}: {got} vs {want}");
+        }
+        // identical planes at the identity: nothing left
+        assert!(warp_cost(&a, w, &a, w, h, &Sim::id()) < 1e-9);
+        // no overlap: the sentinel
+        assert_eq!(warp_cost(&a, w, &a, w, h, &Sim { xoff: 2.0, ..Sim::id() }), 1e9);
+    }
+
+    /// The schedule: a level's step and tolerance move the frame's edge by
+    /// `STEP_PX` and `TOL_PX` of its pixels, whatever the parameter.
+    #[test]
+    fn level_steps_move_the_edge_by_a_level_pixel() {
+        let (w, h) = (8000, 6000);
+        let all: Vec<usize> = (0..Sim::N).collect();
+        let (step, tol) = level_steps(&all, 3, w, h);
+        let gain = param_gain(w, h);
+        for k in 0..Sim::N {
+            assert!((step[k] * gain[k] - 8.0 * STEP_PX).abs() < 1e-9);
+            assert!((tol[k] * gain[k] - 8.0 * TOL_PX).abs() < 1e-9);
+        }
+        // a unit of scale moves the far corner's edge by half the frame, of xoff by the width
+        assert_eq!(step[0] * w as f64, 8.0 * STEP_PX);
+        assert_eq!(step[2] * w as f64 / 2.0, 8.0 * STEP_PX);
+        let (s2, _) = level_steps(&[0, 3], 0, w, h);
+        assert_eq!(s2.len(), 2);
+        assert_eq!(s2[0], STEP_PX / w as f64);
+    }
 
     #[test]
     fn common_area_identity_is_full() {

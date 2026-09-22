@@ -108,7 +108,16 @@ Nelder-Mead search, chained sequentially to frame 0. `--align-coarsen N`
 stops N levels short of full resolution (the transform is resolution
 independent, so this is a large speed-up at sub-pixel accuracy);
 `--no-shift/--no-scale/--no-rotation` restrict the model; `--save-aligned DIR`
-writes the registered frames.
+writes the registered frames. The search's schedule follows the pyramid:
+at each level the simplex starts one pixel of that level wide (in every
+parameter, measured by how far it moves the frame's edge) and stops at a
+tenth of one, so a coarse level only hands the next one a start within its
+pixel and the finest level searched settles sub-pixel — about 300 cost
+evaluations for a 45 MP pair at coarsen 2 (a fixed simplex and tolerance at
+every level took 450 to 700). Each evaluation is one row-parallel pass that
+warps and reduces at once, nothing allocated: 1.6 ms at level 2 of 45 MP on
+128 threads, 20 ms at full resolution. The same schedule drives the CUDA and
+browser searches.
 
 **Alignment model** (`--align-model M`; `align::AlignModel`): how much a
 frame may be deformed to land on the previous one. `similarity` (the
@@ -452,25 +461,32 @@ included:
 
 | run | wall | of which align + fuse / depth | peak RSS |
 |---|--:|--:|--:|
-| 25 frames, `lapstack --align-coarsen 2` (CPU) | 118 s | 75 s (3.0 s per frame) / 42 s | 5.0 GB |
-| 25 frames, `lapstack --gpu --gpu-align --align-coarsen 2` | 74 s | 30 s (1.2 s per frame) / 42 s | 4.9 GB |
-| 100 frames, CPU | 449 s | 310 s (3.1 s per frame) / 137 s | 5.0 GB |
-| 100 frames, `--gpu --gpu-align` | 265 s | 126 s (1.3 s per frame) / 137 s | 5.2 GB |
+| 25 frames, `lapstack --align-coarsen 2` (CPU) | 80 s | 36 s (1.4 s per frame) / 42 s | 6.3 GB |
+| 25 frames, `lapstack --gpu --gpu-align --align-coarsen 2` | 58 s | 14 s (0.5 s per frame) / 42 s | 7.8 GB |
+| 100 frames, CPU | 287 s | 148 s (1.5 s per frame) / 136 s | 7.8 GB |
+| 100 frames, `--gpu --gpu-align` | 195 s | 57 s (0.6 s per frame) / 136 s | 5.5 GB |
 | 25 frames, `lapstack --no-align` on the aligned 16-bit PNGs, CPU or GPU | 26 s | 24 s / – (no depth pass then) | 4.4 GB |
 
-Memory is flat over the stack's length since the frames stream through the
-alignment (above): before that, when every frame was loaded and aligned at
-once, the 25-frame CPU run took 56 s to align and 21 s to fuse at 31 GB
-peak, the CUDA run 32 s and 2.0 s at the same 31 GB, and 100 frames did not
-fit. The depth pass decodes and warps every frame again, about 1.3 s per
-frame here on either path, and is now the larger half of a GPU run.
+Before the aligner's cost was fused into one pass and its search put on the
+per-level schedule (above), the same rows read 118 s (75 s align + fuse,
+3.0 s per frame), 74 s (30 s, 1.2 s), 449 s (310 s, 3.1 s) and 265 s (126 s,
+1.3 s): the CPU search alone was 1.2 s of every frame, the two registration
+pyramids 0.5 s. The peak RSS swings between runs by how far the read-ahead
+decoders (four frames) get ahead of the fold. Memory is flat over the
+stack's length since the frames stream through the alignment: before that,
+when every frame was loaded and aligned at once, the 25-frame CPU run took
+56 s to align and 21 s to fuse at 31 GB peak, the CUDA run 32 s and 2.0 s at
+the same 31 GB, and 100 frames did not fit. The depth pass decodes and warps
+every frame again, about 1.3 s per frame here on either path, and is now
+the larger half of either run.
 
 With `--gpu` (build with `--features gpu`; CUDA is loaded at run time, no
 toolkit needed at build time) the fusion runs in `gpu.rs`: the same kernels
 transcribed to CUDA, the accumulator pyramid, best-energy planes and winner
 map stay on the device, and only the three RGB planes go up per frame and
 the tiny residual comes back. `--gpu-align` runs the aligner's Nelder-Mead
-cost search on the GPU; both GPU pipelines are then alignment-bound. The
+cost search on the GPU; what is left of a GPU frame is the CPU side of the
+alignment (luma, the two registration pyramids, the warps) and the decode. The
 `--no-align` row is 16-bit PNG decode-bound (~1 s per frame with four
 decoder threads); uncompressed TIFF input decodes an order of magnitude
 faster.
@@ -932,11 +948,17 @@ a separate contrast pass.
 
 **Alignment on the GPU**: the streaming aligner chains each frame to the
 previous warped one like the native one, runs Nelder-Mead on the CPU side
-(an async transcription of lapstack-core's optimiser) and evaluates every
-cost on WebGPU (Spline4x4 warp + DC-removed RMS partial sums, one small
-readback per evaluation), over the panel's *model* (the CLI's
-`--align-model`: similarity, affine, projective). It stops `align coarsen`
-levels short of full resolution (default 2). A project saved with a run
+(an async transcription of lapstack-core's optimiser, on its per-level
+schedule) and evaluates every cost on WebGPU (Spline4x4 warp + DC-removed
+RMS partial sums), over the panel's *model* (the CLI's `--align-model`:
+similarity, affine, projective). A readback is the expensive part in the
+browser — a round trip through Chrome's GPU process — so the points an
+iteration may need (the reflection, and the expansion or the contraction
+that follows it) are dispatched together and read back at once, the
+decisions made from the values as the sequential search makes them; at a
+level whose cost dispatch outweighs a round trip (above 8 MP) the reflection
+goes alone. It stops `align coarsen` levels short of full resolution
+(default 2). A project saved with a run
 records each frame's transform with all eight terms; older projects with
 four are read as similarities. The final warp of the 16-bit frame also runs on the
 GPU, with the kernel of the panel's *interpolation* (the CLI's
@@ -948,8 +970,8 @@ Measured in headless Chrome on the RTX 3060 (`web/test/headless.mjs`):
 
 | stack | browser | native (`lapstack --gpu --gpu-align`) |
 |---|--:|--:|
-| 25 × 8280×5520 16-bit TIFF, align coarsen 2 | **30 s** (≈1 s/frame: decode 0.4 s, align 0.4 s, fuse 0.1 s) | 30 s (align + fuse; the depth pass is another 42 s) |
-| 8 × 1024×768 crops, aligned | 2.0 s | – |
+| 25 × 8280×5520 16-bit TIFF, align coarsen 2 | **16 s** (≈0.65 s/frame: decode 0.4 s, align 0.2 s, fuse 0.1 s; 30 s before the search's per-level schedule and batched readbacks) | 14 s (align + fuse; the depth pass is another 42 s) |
+| 8 × 1024×768 crops, aligned | 1.2 s (2.0 s before) | – |
 
 Both stream now, and the per-frame GPU work is the same. Fusion
 output matches the native CPU path to one 8-bit step on 0.01 % of pixels
