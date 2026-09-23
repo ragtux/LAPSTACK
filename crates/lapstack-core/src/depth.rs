@@ -250,6 +250,11 @@ fn par_col_blocks<F: Fn(usize, usize, ColPtr) + Sync>(out: &mut [f32], w: usize,
 /// working-grid plane is 45 MB at 45 MP, and faulting one in from a hundred
 /// threads at once costs more than the sums do (170 ms against 20 ms), so
 /// the depth pass's filters keep their planes from one slice to the next.
+/// The moving sums run in f64: a running sum in f32 keeps the round-off of
+/// every value that passed through it, and on a plane whose values span
+/// many decades (the weighted average's weights: a sharp cell's against the
+/// tiny even weight of a flat one) that drift outweighed the small values
+/// and went negative — streaks along the rows and blocks down the columns.
 pub struct BoxFilter {
     w: usize,
     h: usize,
@@ -280,14 +285,14 @@ impl BoxFilter {
         let tmp = &mut self.tmp;
         for_rows(tmp, w, |y, row| {
             let s = &src[y * w..y * w + w];
-            let mut acc: f32 = s[..(r + 1).min(w)].iter().sum();
+            let mut acc: f64 = s[..(r + 1).min(w)].iter().map(|&v| v as f64).sum();
             for x in 0..w {
-                row[x] = acc;
+                row[x] = acc as f32;
                 if x + r + 1 < w {
-                    acc += s[x + r + 1];
+                    acc += s[x + r + 1] as f64;
                 }
                 if x >= r {
-                    acc -= s[x - r];
+                    acc -= s[x - r] as f64;
                 }
             }
         });
@@ -295,26 +300,28 @@ impl BoxFilter {
         let tmp: &[f32] = tmp;
         par_col_blocks(out, w, |x0, x1, p| {
             let bw = x1 - x0;
-            let mut acc = [0f32; COL_BLOCK];
+            let mut acc = [0f64; COL_BLOCK];
             let acc = &mut acc[..bw];
             for y in 0..(r + 1).min(h) {
                 for (a, v) in acc.iter_mut().zip(&tmp[y * w + x0..y * w + x1]) {
-                    *a += v;
+                    *a += *v as f64;
                 }
             }
             for y in 0..h {
                 // SAFETY: this block owns columns x0..x1 of every row; no other
                 // worker touches them, and `out` outlives the parallel loop.
                 let dst = unsafe { std::slice::from_raw_parts_mut(p.0.add(y * w + x0), bw) };
-                dst.copy_from_slice(acc);
+                for (d, a) in dst.iter_mut().zip(acc.iter()) {
+                    *d = *a as f32;
+                }
                 if y + r + 1 < h {
                     for (a, v) in acc.iter_mut().zip(&tmp[(y + r + 1) * w + x0..(y + r + 1) * w + x1]) {
-                        *a += v;
+                        *a += *v as f64;
                     }
                 }
                 if y >= r {
                     for (a, v) in acc.iter_mut().zip(&tmp[(y - r) * w + x0..(y - r) * w + x1]) {
-                        *a -= v;
+                        *a -= *v as f64;
                     }
                 }
             }
