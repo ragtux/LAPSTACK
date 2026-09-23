@@ -1888,8 +1888,16 @@ async function peakBitmap(fr) {
   for (let i = 0; i < p.data.length; i++) if (pm[i] > floor && p.data[i] >= t2 * pm[i]) { px[4 * i] = 255; px[4 * i + 1] = 0; px[4 * i + 2] = 255; px[4 * i + 3] = 150; }
   p.bmp = await createImageBitmap(new ImageData(px, p.w, p.h)); p.bmpThr = thr; return p.bmp;
 }
-// The filmstrip's peaking band: the mask box-averaged to thumb size, so the
-// alpha is the in-focus fraction of each thumb pixel (no 5 MB bitmap per frame).
+// The filmstrip's peaking band, from the mask box-averaged to thumb size: each
+// thumb pixel's value is the in-focus fraction of the ~9x9 mask pixels under it
+// (no 5 MB bitmap per frame). That fraction cannot be the alpha directly: the
+// longer the stack the thinner each frame's in-focus band, and a band that fills
+// a fifth of a thumb pixel drew at alpha 46 of 255 — next to nothing under the
+// dimmed thumb. It is scaled by the frame's own densest thumb pixels instead (the
+// 99.5th percentile of its fractions), so the band reads at full magenta whatever
+// the stack's length, with a floor under that reference so a frame with nothing in
+// focus shows its few sharp specks faintly rather than being stretched to a band.
+const PEAK_A = 230, PEAK_REF_MIN = 0.04;
 function peakThumb(fr, tw, th) {
   const { p, pm, thr, floor } = peakMask(fr);
   if (p.tc && p.tcThr === thr && p.tc.width === tw && p.tc.height === th) return p.tc;
@@ -1898,8 +1906,11 @@ function peakThumb(fr, tw, th) {
     const row = Math.floor(y * th / p.h) * tw;
     for (let x = 0; x < p.w; x++, i++) { const j = row + Math.floor(x * tw / p.w); tot[j]++; if (pm[i] > floor && p.data[i] >= t2 * pm[i]) cnt[j]++; }
   }
+  const a = new Float32Array(tw * th);
+  for (let j = 0; j < tw * th; j++) a[j] = tot[j] ? cnt[j] / tot[j] : 0;
+  const ref = Math.max(PEAK_REF_MIN, Float32Array.from(a).sort()[Math.floor(0.995 * (a.length - 1))]);
   const px = new Uint8ClampedArray(tw * th * 4);
-  for (let j = 0; j < tw * th; j++) { px[4 * j] = 255; px[4 * j + 2] = 255; px[4 * j + 3] = tot[j] ? Math.round(230 * cnt[j] / tot[j]) : 0; }
+  for (let j = 0; j < tw * th; j++) { px[4 * j] = 255; px[4 * j + 2] = 255; px[4 * j + 3] = Math.round(PEAK_A * Math.min(1, a[j] / ref)); }
   const c = new OffscreenCanvas(tw, th); c.getContext('2d').putImageData(new ImageData(px, tw, th), 0, 0);
   p.tc = c; p.tcThr = thr; return c;
 }

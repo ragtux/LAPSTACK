@@ -1106,7 +1106,10 @@ least *threshold* × the largest contrast any frame of the stack has at that
 pixel (and that maximum is above a small noise floor), so scrubbing shows
 the in-focus band sweep through the scene and each filmstrip entry shows its
 % in focus — computed from the pyramid the fusion already built rather than
-a separate contrast pass.
+a separate contrast pass. On a thumbnail the mask is box-averaged down, and
+the in-focus fraction of each thumbnail pixel is scaled by that frame's
+densest ones, so the band keeps its strength however long the stack (and
+however thin each frame's band) instead of averaging away to nothing.
 
 **Alignment on the GPU**: the streaming aligner chains each frame to the
 previous warped one like the native one, runs Nelder-Mead on the CPU side
