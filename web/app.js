@@ -117,9 +117,9 @@ const dpr = () => window.devicePixelRatio || 1;
 const PK = 'lapstack.settings';
 const INTERPS = ['nearest', 'bilinear', 'bicubic', 'spline4x4', 'spline6x6', 'lanczos3'];
 const CORNERS = ['tl', 'tr', 'bl', 'br'];
-const stepDefaults = { 'p-draft': 0, 'p-dust-thr': 3, 'p-dust-margin': 3, 'p-kept': 1536, 'p-wav-pow': 2, 'p-wav-smooth': 1, 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5, 'p-dslab-size': 10, 'p-dslab-ov': 2, 'p-split-n': 30, 'p-split-gap': 10 };
+const stepDefaults = { 'p-draft': 0, 'p-dust-thr': 3, 'p-dust-margin': 3, 'p-kept': 1536, 'p-wav-pow': 2, 'p-wav-smooth': 1, 'p-coarsen': 2, 'p-levels': 0, 'p-energy': 1, 'p-topr': 2, 'p-depthscale': 2, 'p-depthlevel': 2, 'p-proxy': 1400, 'p-slab': 5, 'p-dslab-size': 10, 'p-dslab-ov': 2, 'p-split-n': 30, 'p-split-gap': 10, 'p-halo': 0 };
 function readParams() {
-  const n = (id) => Number($(id).textContent) || 0; // a stepper's zero word ('auto', 'off') reads as 0
+  const n = stepVal;
   return {
     align: $('p-align').checked, shift: $('p-shift').checked, scale: $('p-scale').checked, rotation: $('p-rotation').checked, brightness: $('p-bright').checked,
     coarsen: n('p-coarsen'), interp: $('p-interp').value, model: $('p-model').value, levels: n('p-levels') || null, energy_radius: n('p-energy'), top: $('p-top').value,
@@ -137,9 +137,11 @@ function readParams() {
     ov_bar_pos: $('p-ov-barpos').value, ov_text_pos: $('p-ov-txtpos').value, ov_size: Number($('p-ov-size').value) || 3, ov_color: $('p-ov-color').value, ov_style: $('p-ov-style').value,
   };
 }
+// a stepper's zero word (its data-zero: 'auto', 'off') reads back as 0
+function stepVal(id) { const el = $(id); return el.textContent === el.dataset.zero ? 0 : Number(el.textContent) || 0; }
 function setStep(id, v) {
   const el = $(id); const lo = Number(el.dataset.min), hi = Number(el.dataset.max);
-  v = Math.min(hi, Math.max(lo, v));
+  v = Math.min(hi, Math.max(lo, Number.isFinite(v) ? v : lo)); // never let a stepper land on NaN and stick there
   el.textContent = (v === 0 && el.dataset.zero) ? el.dataset.zero : String(v);
 }
 function applyParams(p) {
@@ -166,12 +168,12 @@ function applyParams(p) {
 }
 function saveParams() { try { localStorage.setItem(PK, JSON.stringify(readParams())); } catch {} }
 try { applyParams(JSON.parse(localStorage.getItem(PK))); } catch {}
-for (const id of Object.keys(stepDefaults)) setStep(id, Number($(id).textContent === 'auto' ? 0 : $(id).textContent));
+for (const id of Object.keys(stepDefaults)) setStep(id, stepVal(id));
 document.querySelectorAll('#params [data-step], #runmenu [data-step]').forEach((b) => b.addEventListener('click', () => {
-  const id = b.dataset.step; const cur = Number($(id).textContent === 'auto' ? 0 : $(id).textContent);
-  setStep(id, cur + Number(b.dataset.d));
+  const id = b.dataset.step;
+  setStep(id, stepVal(id) + Number(b.dataset.d));
   // a slab's overlap stays short of its size (the engine clamps it too), so consecutive slabs advance
-  if (id === 'p-dslab-size' || id === 'p-dslab-ov') setStep('p-dslab-ov', Math.min(Number($('p-dslab-ov').textContent), Number($('p-dslab-size').textContent) - 1));
+  if (id === 'p-dslab-size' || id === 'p-dslab-ov') setStep('p-dslab-ov', Math.min(stepVal('p-dslab-ov'), stepVal('p-dslab-size') - 1));
   saveParams();
 }));
 document.querySelectorAll('#params input, #params select').forEach((el) => el.addEventListener('change', saveParams));
@@ -180,7 +182,7 @@ document.querySelectorAll('[data-step="p-slab"]').forEach((b) => b.addEventListe
 // Run menu (DFR and the batch split live here, not in the parameter panel): the Run label
 // shows the state, with the number of stacks a split makes
 const runLabel = () => {
-  const base = 'Run LAP' + ($('p-dmap').checked ? ' + DFR' : '') + ($('p-wav').checked ? ' + WAV' : '') + ($('p-dng').checked ? ' → DNG' : '') + (Number($('p-draft').textContent) > 0 ? ` (draft ÷${1 << Number($('p-draft').textContent)})` : '');
+  const base = 'Run LAP' + ($('p-dmap').checked ? ' + DFR' : '') + ($('p-wav').checked ? ' + WAV' : '') + ($('p-dng').checked ? ' → DNG' : '') + (stepVal('p-draft') > 0 ? ` (draft ÷${1 << stepVal('p-draft')})` : '');
   $('wav-ctl').hidden = !$('p-wav').checked;
   const stacks = B.all ? null : stacksOf(st.files), n = stacks ? stacks.length : 0;
   $('run').textContent = n > 1 ? `${base} ×${n}` : base;
@@ -1636,7 +1638,7 @@ async function winnerBitmap() {
   const bmp = await createImageBitmap(new ImageData(px, w, h)); st.depthBmp.set('winner', bmp); return bmp;
 }
 for (const id of svIds) $(id).addEventListener(svLive.includes(id) ? 'input' : 'change', () => { $('sv-qval').textContent = $('sv-quality').value; saveSaveSettings(); renderSave(); if (id === 'sv-crop') draw(); if (id === 'sv-overlay') { renderOverlayInfo(); draw(); } });
-document.querySelectorAll('#savecard [data-step]').forEach((b) => b.addEventListener('click', () => { const id = b.dataset.step; setStep(id, Number($(id).textContent) + Number(b.dataset.d)); saveSaveSettings(); renderSave(); }));
+document.querySelectorAll('#savecard [data-step]').forEach((b) => b.addEventListener('click', () => { const id = b.dataset.step; setStep(id, stepVal(id) + Number(b.dataset.d)); saveSaveSettings(); renderSave(); }));
 $('sv-all').addEventListener('change', (e) => { for (const o of saveRows()) if (o.avail()) { if (e.target.checked) SV.sel.add(o.id); else SV.sel.delete(o.id); } saveSaveSettings(); renderSave(); });
 // a finished file: into the chosen folder when there is one, else a download
 async function downloadBlob(blob, name) {
