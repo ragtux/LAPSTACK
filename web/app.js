@@ -177,10 +177,113 @@ function applyParams(p) {
   $('p-ov-bar').checked = p.ov_bar ?? false; $('p-ov-um').value = p.ov_um > 0 ? String(p.ov_um) : ''; $('p-ov-len').value = p.ov_len ?? ''; $('p-ov-txt').value = p.ov_text ?? '';
   $('p-ov-barpos').value = CORNERS.includes(p.ov_bar_pos) ? p.ov_bar_pos : 'br'; $('p-ov-txtpos').value = CORNERS.includes(p.ov_text_pos) ? p.ov_text_pos : 'bl';
   $('p-ov-size').value = p.ov_size ?? 3; $('p-ov-color').value = p.ov_color === 'black' ? 'black' : 'white'; $('p-ov-style').value = ['box', 'plain'].includes(p.ov_style) ? p.ov_style : 'halo';
+  updateResets();
 }
-function saveParams() { try { localStorage.setItem(PK, JSON.stringify(readParams())); } catch {} }
+function saveParams() { try { localStorage.setItem(PK, JSON.stringify(readParams())); } catch {} updateResets(); }
+// every control at its default, read back before the saved settings land on them: the `??` in
+// applyParams is the only place a default is written down, and both the per-section reset below
+// and the changed/unchanged state of its button read it from here.
+applyParams({});
+const DEFAULTS = readParams();
 try { applyParams(JSON.parse(localStorage.getItem(PK))); } catch {}
 for (const id of Object.keys(stepDefaults)) setStep(id, stepVal(id));
+
+// ---------- per-section reset ----------
+// Each panel section that holds settings carries a reset beside its heading: the section's keys
+// are dropped from the settings in hand and applyParams fills them in again from its own
+// defaults, then the section's own followers run — so a default lives in one place and a reset
+// is the same path as a page load. (applyParams re-applies the other sections' keys as it goes,
+// exactly the round-trip every reload already makes, so a typed "0,5" normalises to "0.5"
+// there and then.) The button is disabled while the section is already at its defaults, which
+// makes the panel say at a glance which groups have been changed. Sections that hold no
+// settings — History, How to, GPU — get no button.
+const SECTION_RESET = {
+  brush: { keys: ['brush_size', 'brush_hard'], after: () => setBrush(R.size, R.hard) },
+  'brush-source': { keys: ['brush_from', 'brush_slab'], after: () => { updateTabs(); renderFilmstrip(); draw(); } },
+  dust: { keys: ['dust_thr', 'dust_margin', 'dust_mode'], after: () => updateDustMap() },
+  alignment: { keys: ['brightness', 'align', 'shift', 'scale', 'rotation', 'model', 'coarsen', 'interp', 'rotate', 'draft'], after: () => runLabel() },
+  fusion: { keys: ['levels', 'energy_radius', 'top', 'top_radius', 'use_chroma', 'halo'] },
+  depthmap: { keys: ['depth_scale', 'depth_level'] },
+  overlay: { keys: ['ov_bar', 'ov_um', 'ov_len', 'ov_text', 'ov_bar_pos', 'ov_text_pos', 'ov_size', 'ov_color', 'ov_style'], after: () => overlayChanged(false) },
+  results: { keys: ['kept_mb'], after: () => { trimKept(); renderKept(); } },
+  view: { keys: ['proxy_edge'] },
+};
+function resetSection(sec, name) {
+  const r = SECTION_RESET[sec]; if (!r) return;
+  const p = readParams();
+  const cmp = st.cmpMode;   // pinned to the split while the retouch is on: applyParams would put the saved mode back
+  for (const k of r.keys) delete p[k];
+  applyParams(p);
+  st.cmpMode = cmp;
+  saveParams();
+  if (r.after) r.after();
+  log(`[lapstack] ${name} settings reset to the defaults`);
+}
+for (const h of document.querySelectorAll('#params button.section')) {
+  if (!SECTION_RESET[h.dataset.sec]) continue;
+  const name = h.textContent;
+  const b = document.createElement('button');
+  b.type = 'button'; b.className = 'sec-reset'; b.textContent = '\u21ba'; b.dataset.reset = h.dataset.sec;
+  b.title = `reset ${name.toLowerCase()} to the defaults`;
+  b.setAttribute('aria-label', b.title);
+  b.addEventListener('click', () => resetSection(h.dataset.sec, name));
+  h.parentElement.appendChild(b);   // inside the heading, after its toggle: the .sec-body still follows the heading
+}
+// a section at its defaults has nothing to reset
+function updateResets() {
+  const btns = document.querySelectorAll('#params .sec-reset');
+  if (!btns.length) return;   // called while the defaults themselves are being read, before the buttons exist
+  const p = readParams();
+  for (const b of btns) b.disabled = SECTION_RESET[b.dataset.reset].keys.every((k) => p[k] === DEFAULTS[k]);
+}
+updateResets();
+
+// ---------- steppers as spinbuttons ----------
+// A stepper was a <span> between two <button>s inside a <label> that wrapped no control: the
+// value had no role and no name, and the two buttons were the setting's only tab stops (Chrome
+// named them "+" and "<the whole row> +", so both read alike and neither announced the value).
+// The value element becomes the control — one tab stop, arrow-stepped, with its range and its
+// 'auto' / 'off' word in the ARIA value — and the +/- stay for the mouse but leave the tab order.
+const STEP_SEL = '#params [data-step], #runmenu [data-step], #savecard [data-step]';
+const stepButtons = (id) => [...document.querySelectorAll(STEP_SEL)].filter((b) => b.dataset.step === id);
+// walk to a target in one click of the +/-, so every listener hung on that button (saveParams, the
+// slab range, renderSave…) runs exactly once: land one step short and let the click carry it home
+function stepTo(id, target) {
+  const el = $(id), cur = stepVal(id);
+  target = Math.min(Number(el.dataset.max), Math.max(Number(el.dataset.min), target));
+  if (target === cur) return;
+  const b = stepButtons(id).find((x) => (Number(x.dataset.d) > 0) === (target > cur));
+  if (!b) return;
+  setStep(id, target - Number(b.dataset.d));
+  b.click();
+}
+for (const id of [...new Set([...document.querySelectorAll(STEP_SEL)].map((b) => b.dataset.step))]) {
+  const el = $(id), btns = stepButtons(id), row = el.closest('label') || el.parentElement;
+  // the row's own words are its name: "align coarsen", not "align coarsen 2 +"
+  const name = [...row.childNodes].filter((n) => n.nodeType === Node.TEXT_NODE).map((n) => n.textContent).join(' ').replace(/\s+/g, ' ').trim();
+  const d = Math.abs(Number((btns.find((b) => Number(b.dataset.d) > 0) || btns[0]).dataset.d)) || 1;
+  el.setAttribute('role', 'spinbutton'); el.tabIndex = 0;
+  el.setAttribute('aria-label', name);
+  el.setAttribute('aria-valuemin', el.dataset.min); el.setAttribute('aria-valuemax', el.dataset.max);
+  setStep(id, stepVal(id));
+  for (const b of btns) { b.tabIndex = -1; b.setAttribute('aria-label', `${Number(b.dataset.d) < 0 ? 'decrease' : 'increase'} ${name}`); }
+  el.addEventListener('keydown', (e) => {
+    const cur = stepVal(id);
+    const t = { ArrowUp: cur + d, ArrowRight: cur + d, ArrowDown: cur - d, ArrowLeft: cur - d,
+      PageUp: cur + d * 10, PageDown: cur - d * 10, Home: Number(el.dataset.min), End: Number(el.dataset.max) }[e.key];
+    if (t === undefined) return;
+    e.preventDefault(); e.stopPropagation();   // ←/→ otherwise scrub the frames as well
+    stepTo(id, t);
+  });
+}
+// An explanation written on a <label> describes the label, not the control inside it — Chrome gave
+// #p-model, #p-interp and the rest an empty description — so copy each row's title down to what it
+// explains. The label keeps its own, so the whole row still answers the mouse.
+for (const row of document.querySelectorAll('label[title]')) {
+  const ctl = row.querySelector('input:not([type=file]), select, textarea, [role=spinbutton]') || (row.htmlFor && $(row.htmlFor));
+  if (ctl && !ctl.title) ctl.title = row.title;
+}
+
 document.querySelectorAll('#params [data-step], #runmenu [data-step]').forEach((b) => b.addEventListener('click', () => {
   const id = b.dataset.step;
   setStep(id, stepVal(id) + Number(b.dataset.d));

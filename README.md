@@ -717,8 +717,11 @@ names, animations, content credentials). Keys 1/2 switch steps.
 added, with each frame's registration once aligned), a parameter panel (all
 `lapstack` knobs, persisted in localStorage — *rotate frames* and *draft*
 among them: the CLI's `--rotate` and `--draft`, the thumbnails turned with
-the frames, the Run button reading *draft ÷4*), Run/Cancel with progress and a
-log, and a viewer whose header is a segmented **Source / Stack / Depth**
+the frames, the Run button reading *draft ÷4*; every section's heading
+collapses the rows under it and carries a ↺ that puts that section's
+settings back to the defaults, lit only while the section holds something
+other than them, so the panel also says which groups have been changed),
+Run/Cancel with progress and a log, and a viewer whose header is a segmented **Source / Stack / Depth**
 control with a second-level control for the group's layers — **LAP / DFR**
 under Stack (DFR only when the depth-map render ran), **Focus depth /
 Confidence / In focus** under Depth — followed by controls that only show

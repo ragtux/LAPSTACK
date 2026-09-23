@@ -163,8 +163,8 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 .panel .section { font-size: var(--fs-xs); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--head); margin: 14px 0 4px; padding-top: 10px; border-top: 1px solid var(--border); }
 /* the heading wrapper carries no type of its own: it is there so the panel can be walked by
    heading, and the button inside it keeps the hairline and the uppercase */
-.sec-h { margin: 0; font: inherit; }
-.panel > .section:first-child, .panel > .sec-h:first-child > .section, #brush > .sec-h:first-child > .section, #brush[hidden] + .sec-h > .section { margin-top: 0; padding-top: 0; border-top: 0; }
+.sec-h { margin: 0; font: inherit; display: flex; align-items: stretch; }
+.panel > .section:first-child, .panel > .sec-h:first-child > *, #brush > .sec-h:first-child > *, #brush[hidden] + .sec-h > * { margin-top: 0; padding-top: 0; border-top: 0; }
 /* the parameter panel's sections collapse: the heading is the toggle (a button, so it keeps the
    heading's own hairline and type) and the rows under it live in the .sec-body it hides, so a
    squished panel can be cut down to the groups in use. The collapsed set is remembered. */
@@ -172,6 +172,14 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #params button.section:hover { color: var(--text); }
 #params button.section::after { content: "▾"; font-size: var(--fs-sm); color: var(--dim); }
 #params button.section.collapsed::after { content: "▸"; }
+/* each section that holds settings keeps a reset beside its toggle (made in app.js): it carries
+   the same hairline and margins, so the rule still runs unbroken across the panel, and it is
+   disabled while the section is at its defaults — the heading then also says which groups have
+   been changed. */
+#params .sec-h > button.section { width: auto; flex: 1 1 auto; min-width: 0; }
+#params .sec-reset { flex: 0 0 auto; background: transparent; color: var(--head); border: 0; border-top: 1px solid var(--border); border-radius: 0; margin: 14px 0 4px; padding: 10px 0 0 10px; font-size: var(--fs-sm); line-height: 1.1; }
+#params .sec-reset:hover:not(:disabled) { color: var(--pop); border-color: var(--border); }
+#params .sec-reset:disabled { color: var(--dim); opacity: .3; }
 #params .sec-body { display: flex; flex-direction: column; gap: 3px; }
 #brush .sec-body { gap: 2px; }
 #params .sec-body.collapsed { display: none; }
