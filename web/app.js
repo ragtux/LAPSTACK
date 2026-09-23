@@ -1235,7 +1235,7 @@ const OUTPUTS = [
   { id: 'anim-rock', token: 'rocking', anim: true, rock: true, name: 'Rocking', desc: () => `animated GIF: the stacked image rocking from side to side, ${refolding() ? 'each view folded from the shifted frames' : 'sheared by its depth map'}`, ext: () => animExt(), avail: () => !!st.result },
 ];
 // the kept results as rows of the Save step, after the run's own outputs
-const keptOutput = (k) => ({ id: keptId(k), token: k.kind === 'file' ? k.label : `run${k.run}-${k.kind === 'dmap' ? 'dfr' : 'lap'}`, kind: keptId(k), name: k.label, desc: `kept result: ${keptSummary(k)}`, avail: () => true, kept: k });
+const keptOutput = (k) => ({ id: keptId(k), token: k.kind === 'file' ? k.label : `run${k.run}-${k.kind === 'dmap' ? 'dfr' : k.kind === 'wav' ? 'wav' : 'lap'}`, kind: keptId(k), name: k.label, desc: `kept result: ${keptSummary(k)}`, avail: () => true, kept: k });
 const saveRows = () => OUTPUTS.concat(st.kept.map(keptOutput));
 const MESH_DESC = { glb: 'glTF binary: the stacked image as a textured relief of its depth map, one file', obj: 'Wavefront OBJ + MTL + texture image: the textured relief as Helicon writes it, three files', stl: 'binary STL: the relief alone, no texture, for printing' };
 const MESH_MIME = { glb: 'model/gltf-binary', obj: 'model/obj', mtl: 'model/mtl', stl: 'model/stl', jpg: 'image/jpeg', png: 'image/png' };
@@ -2357,6 +2357,7 @@ function layerFor(tab) {
   const k = keptOf(tab); if (k) return { bmp: k.canvas, w: k.w, h: k.h, ov: ($('sv-crop').checked && k.crop) || { x: 0, y: 0, w: k.w, h: k.h } };
   if (tab === 'fused') return st.result ? { bmp: st.result.fused, w: st.result.w, h: st.result.h, ov: ovWindow() } : null;
   if (tab === 'dmap') return st.result && st.result.dmap ? { bmp: st.result.dmap, w: st.result.w, h: st.result.h, ov: ovWindow() } : null;
+  if (tab === 'wav') return st.result && st.result.wav ? { bmp: st.result.wav, w: st.result.w, h: st.result.h, ov: ovWindow() } : null;
   if (isDepthLayer(tab)) {
     if (!st.result || (tab === 'conf' && !haveConf())) return null;
     const bmp = st.depthBmp.get(`${tab}:${st.turbo ? 'turbo' : 'gray'}`); if (!bmp) { mapBitmap(tab, st.turbo).then(draw); return null; }
