@@ -307,7 +307,7 @@ async function handle(m) {
             post({ type: 'stage', text: `rendering from depth map: ${m.files[i].name}`, done: i, total: m.files.length });
             const bytes = new Uint8Array(await next);
             next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
-            await engine.render_push(i, bytes, isRaw(m.files[i].name), false, 0, 0);
+            await engine.render_push(i, bytes, isRaw(m.files[i].name), false, 0, 0, 0);
           }
         }
         if (cancelled) { engine.render_cancel(); post({ type: 'render-cancelled' }); running = false; return; }
@@ -324,7 +324,7 @@ async function handle(m) {
           post({ type: 'stage', text: `weighted average: ${m.files[i].name}`, done: i, total: m.files.length });
           const bytes = new Uint8Array(await next);
           next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
-          await engine.render_push(i, bytes, isRaw(m.files[i].name), true, m.params.wav_power ?? 2, m.params.wav_smooth ?? 1);
+          await engine.render_push(i, bytes, isRaw(m.files[i].name), true, m.params.wav_power ?? 2, m.params.wav_smooth ?? 3, m.params.wav_gate ?? 0.5);
         }
         if (cancelled) { engine.render_cancel(); post({ type: 'render-cancelled' }); running = false; return; }
         const r = await engine.render_finish(true);

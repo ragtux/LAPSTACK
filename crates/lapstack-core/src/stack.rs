@@ -678,12 +678,14 @@ fn fuse_range(
 
 /// Fusion, with the optional depth from focus: the frames' focus slices are
 /// taken during the fold and the depth pass runs on them once the fused
-/// image, its guide, exists.
+/// image, its guide, exists. Returns the image, the depth map, its
+/// confidence, the pyramid's level count and the depth pass's noise floor
+/// (`DepthMap::floor`, for the weighted average).
 fn fuse_and_depth(
     src: &mut dyn FrameSource,
     params: &Params,
     log: &mut dyn FnMut(String),
-) -> Result<(Img3, Vec<f32>, Option<Vec<f32>>, usize), String> {
+) -> Result<(Img3, Vec<f32>, Option<Vec<f32>>, usize, Option<Vec<f32>>), String> {
     let (image, winner, levels, slices) = fuse_all(src, &params.fuse, params.gpu, params.depth.as_ref(), log)?;
     match &params.depth {
         Some(dp) => {
@@ -693,18 +695,19 @@ fn fuse_and_depth(
             let dm = if params.gpu { crate::gpu::depth_from_slices(&mut it, n, &image, dp, log)? } else { depth::depth_from_slices(&mut it, n, &image, dp, log)? };
             #[cfg(not(feature = "gpu"))]
             let dm = depth::depth_from_slices(&mut it, n, &image, dp, log)?;
-            Ok((image, dm.depth, Some(dm.conf), levels))
+            Ok((image, dm.depth, Some(dm.conf), levels, Some(dm.floor)))
         }
-        None => Ok((image, winner, None, levels)),
+        None => Ok((image, winner, None, levels, None)),
     }
 }
 
 /// The weighted average of `Params::wav`, another pass over the frames; it
-/// borrows the depth pass's focus measure, so it needs `Params::depth`.
-fn weighted(src: &mut dyn FrameSource, params: &Params, log: &mut dyn FnMut(String)) -> Result<Option<Img3>, String> {
-    match (&params.wav, &params.depth) {
-        (Some(wp), Some(dp)) => Ok(Some(crate::wav::weighted_average(src, dp, wp, log)?)),
-        (Some(_), None) => {
+/// borrows the depth pass's focus measure and noise floor, so it needs
+/// `Params::depth`.
+fn weighted(src: &mut dyn FrameSource, params: &Params, floor: Option<&[f32]>, log: &mut dyn FnMut(String)) -> Result<Option<Img3>, String> {
+    match (&params.wav, &params.depth, floor) {
+        (Some(wp), Some(dp), Some(floor)) => Ok(Some(crate::wav::weighted_average(src, dp, wp, floor, log)?)),
+        (Some(_), _, _) => {
             log("the weighted average needs the depth-from-focus pass (not the winner map): skipped".into());
             Ok(None)
         }
@@ -834,8 +837,8 @@ pub fn run_with(
                 src.len(), bit_depth.bits(), rayon::current_num_threads(), a.model.name(), a.shift, a.scale, a.rotation, a.coarsen, a.interp.name(),
                 if a.gpu && cfg!(feature = "gpu") { ", GPU" } else { "" }
             ));
-            let (image, depth, conf, levels) = fuse_and_depth(&mut src, params, log)?;
-            let wav = weighted(&mut src, params, log)?;
+            let (image, depth, conf, levels, floor) = fuse_and_depth(&mut src, params, log)?;
+            let wav = weighted(&mut src, params, floor.as_deref(), log)?;
             // the borders some frames only reach with smeared edge pixels go
             let area = common_area(&src.sims, w, h, a.interp);
             let mut window = if params.crop && !area.is_full(w, h) {
@@ -877,8 +880,8 @@ pub fn run_with(
             ));
             let bit_depth = src.depth;
             let (w, h) = (src.w, src.h);
-            let (image, depth, conf, levels) = fuse_and_depth(&mut src, params, log)?;
-            let wav = weighted(&mut src, params, log)?;
+            let (image, depth, conf, levels, floor) = fuse_and_depth(&mut src, params, log)?;
+            let wav = weighted(&mut src, params, floor.as_deref(), log)?;
             let crop = user_crop(params, w, h, log)?;
             let (image, depth, conf, wav) = match &crop {
                 Some(r) => (image.crop(r), crop_plane(&depth, w, r), conf.map(|c| crop_plane(&c, w, r)), wav.map(|i| i.crop(r))),

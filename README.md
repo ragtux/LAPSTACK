@@ -292,7 +292,8 @@ X,Y,W,H` cuts every output to a window of the (turned) frame, in
 full-resolution pixels, inside the automatic crop to the area every frame
 covers; a window outside that area stops the run.
 
-**Weighted average** (`wav.rs`; `--wav`, `--wav-power P`, `--wav-smooth R`):
+**Weighted average** (`wav.rs`; `--wav`, `--wav-power P`, `--wav-smooth R`,
+`--wav-gate G`):
 Helicon Focus's method A as a second image, `<stem>_wav.<ext>` — every
 frame's pixels averaged with weights that follow their local contrast, so
 the frame in focus at a pixel counts most and the rest fade in with their
@@ -305,12 +306,31 @@ stacks; the pyramid is the sharper tool, and the browser's retouch brushes
 one into the other. The contrast is the depth pass's focus measure (the
 ring difference filter on the luma, so `--wav` needs the depth-from-focus
 pass, not `--depth winner`), block-averaged to the depth pass's working
-grid, box-smoothed there by `--wav-smooth` grid pixels (Helicon's
-"smoothing", default 1), raised to `--wav-power` (default 2; 1 = plain
-contrast weighting, higher = a keener pick of the sharpest frame) and taken
-back to full resolution bilinearly; a floor of (1e-4)^P keeps a flat pixel
-from dividing by zero, so there every frame weighs the same. One more pass
-over the frames.
+grid and box-smoothed there by `--wav-smooth` grid pixels (Helicon's
+"smoothing", default 3; the depth pass aggregates its slices the same way
+before it takes their statistics): a cell's pick is its region's — one
+cell's measure strays over the gate below by chance and picks a noisy frame
+where a flat area should average them all, and along a silhouette, where
+one frame holds the edge and another the blurred halo over it, neighbouring
+cells picked different frames and the 2 px ramp between them showed as
+jagged speckle along every depth edge; over the window the frames
+cross-fade instead. What weighs is the contrast *above the cell's noise
+floor*: sensor
+noise alone gives the measure a floor that is the same in every frame, and
+at full resolution it is of the order of a sharp frame's own texture (a
+45 MP lemon peel reads under 3× its out-of-focus frames), so the contrast
+itself, shared with dozens of frames of noise, made an average as soft as
+no stacking at all. The depth pass tracks the least contrast any frame
+shows at every cell — the frames farthest out of focus leave only the
+noise — and `--wav-gate G` (default 0.5) says how far above it a contrast
+counts: the weight is the contrast less (1+G) × the floor, clamped at zero,
+raised to `--wav-power` (default 2; 1 = plain, higher = a keener pick of
+the sharpest frame), so what the noise could explain weighs nothing (a fade
+in place of the cut let dozens of frames of noise back in); where no frame
+rises above the floor a tiny even weight makes the frames a plain average.
+The weights are smoothed by the same window after the cut, so a region's
+border is a cross-fade and not a step wherever a cell sits at the gate, and
+taken back to full resolution bilinearly. One more pass over the frames.
 
 **Frame list** (`--skip LIST`, `--reverse`): `--skip` leaves frames out of the
 list — 1-based positions and ranges, comma-separated (`--skip 3,7-9,12`),
@@ -910,12 +930,13 @@ frame indices are the list's — and the status bar and log say so; the
 aligned proxies stay as the thumbs. A batch's stack in hand cannot be edited
 (*all frames* first), nor can the list while a run or save is going.
 
-**WAV** (the same ▾ menu, *WAV (weighted average)*, with *contrast power*
-and *weight smoothing*): the CLI's `--wav` in the browser — a third stacked
+**WAV** (the same ▾ menu, *WAV (weighted average)*, with *contrast power*,
+*weight smoothing* and *noise gate %*): the CLI's `--wav` in the browser — a third stacked
 image, made in one more pass over the frames after LAP (and DFR): each frame
 is decoded again, warped with the run's registration, its contrast taken on
 the GPU with the depth pass's focus measure on the working grid
-(box-smoothed, raised to the power, `record_weight` in
+(box-smoothed, less the gate's multiple of the cell's noise floor the depth
+pass kept, raised to the power, smoothed again: `record_weight` in
 `lapstack-web/src/depth.rs`) and blended in with that weight (`wav_acc`;
 `render_push` in its wav mode, the same accumulator as DFR's). WAV is a
 layer of the Stack group, the retouch's third target — the brush's *Result*

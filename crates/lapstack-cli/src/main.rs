@@ -110,6 +110,7 @@ fn main() {
             "--wav" => p.wav = Some(p.wav.unwrap_or_default()),
             "--wav-power" => { let v = next(&mut i).parse::<f32>().ok().filter(|v| *v >= 0.0).unwrap_or_else(|| fail("--wav-power: number >= 0")); p.wav = Some(lapstack_core::wav::WavParams { power: v, ..p.wav.unwrap_or_default() }); }
             "--wav-smooth" => { let v = next(&mut i).parse::<usize>().unwrap_or_else(|_| fail("--wav-smooth: integer")); p.wav = Some(lapstack_core::wav::WavParams { smooth: v, ..p.wav.unwrap_or_default() }); }
+            "--wav-gate" => { let v = next(&mut i).parse::<f32>().ok().filter(|v| *v >= 0.0).unwrap_or_else(|| fail("--wav-gate: number >= 0")); p.wav = Some(lapstack_core::wav::WavParams { gate: v, ..p.wav.unwrap_or_default() }); }
             "--split" => {
                 let s = next(&mut i);
                 split = Some(Split::parse(&s).unwrap_or_else(|| fail(&format!("--split: count:N | gap:SECONDS | dir, not '{s}'"))));
@@ -662,10 +663,14 @@ fn help() {
                                   each on its own (Zerene's slabbing): thick planes of focus to retouch from\n\
            --slab-dir DIR         where the slabs go, in the output's format [<output stem>_slabs]\n\
            --wav                  also the weighted average (Helicon's method A): every frame weighed by its\n\
-                                  local contrast (the depth pass's focus measure) -> <stem>_wav.<ext>; no seams\n\
-                                  or halos, flat areas average (less noise), softer than the pyramid\n\
-           --wav-power P          the contrast raised to P before weighing [2]; 1 = plain, higher = keener\n\
-           --wav-smooth R         box radius of the weight map on the depth pass's grid [1]; 0 = none\n\
+                                  local contrast (the depth pass's focus measure) above the cell's noise floor\n\
+                                  -> <stem>_wav.<ext>; no seams or halos, flat areas average (less noise),\n\
+                                  softer than the pyramid\n\
+           --wav-power P          the contrast above the floor raised to P before weighing [2]; 1 = plain,\n\
+                                  higher = keener\n\
+           --wav-smooth R         box radius the contrast, then the weights, are smoothed by on the depth\n\
+                                  pass's grid [3]: a region's pick, a cross-fade along depth edges; 0 = none\n\
+           --wav-gate G           a contrast counts above (1+G) x the cell's noise floor [0.5]; 0 = the floor\n\
            --split RULE           batch: cut the frames into stacks and run each — count:N (every N frames),\n\
                                   gap:SECONDS (a new stack at every pause in the capture times longer than\n\
                                   that), dir (one stack per folder); then -o, --slab-dir, --save-aligned and\n\

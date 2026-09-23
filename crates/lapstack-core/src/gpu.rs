@@ -1384,7 +1384,6 @@ pub fn depth_from_slices(
     // noise floor: median of the per-pixel profile minimum (subsampled)
     let cmin = g.s.memcpy_dtov(&state.slice(7 * m..8 * m)).map_err(|e| format!("{e:?}"))?;
     let mut mins: Vec<f32> = cmin.iter().step_by(7).copied().collect();
-    drop(cmin);
     let mid = mins.len() / 2;
     let floor = *mins.select_nth_unstable_by(mid, |a, b| a.total_cmp(b)).1;
     let (mut d, mut conf) = (sl, agg); // reused: the raw depth and confidence
@@ -1447,7 +1446,7 @@ pub fn depth_from_slices(
         g.s.memcpy_dtov(&full).map_err(|e| format!("{e:?}"))?
     };
     log(format!("depth: upsampled to {w}x{h} ({:?})  ({:.1}s)", p.upsample, t.elapsed().as_secs_f64()));
-    Ok(crate::depth::DepthMap { depth, conf: conf_full, w, h, dw, dh })
+    Ok(crate::depth::DepthMap { depth, conf: conf_full, w, h, dw, dh, floor: cmin })
 }
 
 #[cfg(test)]

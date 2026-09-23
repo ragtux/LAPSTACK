@@ -148,6 +148,11 @@ pub struct DepthMap {
     /// Working-grid dimensions the volume was processed at.
     pub dw: usize,
     pub dh: usize,
+    /// The noise floor of every working-grid cell: the least (aggregated)
+    /// contrast any frame showed there — in a cell no frame is sharp in, the
+    /// sensor noise's share of the measure. The weighted average (`wav.rs`)
+    /// weighs the frames by their contrast above it.
+    pub floor: Vec<f32>,
 }
 
 // ---------------------------------------------------------------- helpers
@@ -558,8 +563,9 @@ impl PeakTracker {
         self.m += 1;
     }
 
-    /// Close the profiles: sub-frame depth and raw confidence per pixel.
-    pub fn finish(mut self, gate: f32) -> (Vec<f32>, Vec<f32>) {
+    /// Close the profiles: sub-frame depth, raw confidence and the profile's
+    /// minimum (the cell's noise floor) per pixel.
+    pub fn finish(mut self, gate: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let n = self.m;
         assert!(n > 0, "no slices");
         self.px.par_iter_mut().for_each(|p| {
@@ -575,6 +581,7 @@ impl PeakTracker {
         let inv_n = 1.0 / n as f32;
         let mut depth = vec![0f32; self.px.len()];
         let mut conf = vec![0f32; self.px.len()];
+        let mins: Vec<f32> = self.px.iter().map(|p| if p.cmin.is_finite() { p.cmin } else { 0.0 }).collect();
         depth.par_iter_mut().zip(conf.par_iter_mut()).zip(&self.px).for_each(|((d, c), p)| {
             let (c1, l, r) = (p.c1, p.l1, p.r1);
             let mut delta = 0.0f32;
@@ -599,7 +606,7 @@ impl PeakTracker {
                 0.0
             };
         });
-        (depth, conf)
+        (depth, conf, mins)
     }
 }
 
@@ -1144,7 +1151,7 @@ pub fn depth_from_slices(
     }
     drop(agg);
     log(format!("depth: {n} slices aggregated  ({:.1}s)", t.elapsed().as_secs_f64()));
-    let (mut depth_w, mut conf) = tracker.finish(p.gate);
+    let (mut depth_w, mut conf, floor) = tracker.finish(p.gate);
     if p.median {
         depth_w = median3(&depth_w, dw, dh);
     }
@@ -1189,7 +1196,7 @@ pub fn depth_from_slices(
     depth.par_iter_mut().for_each(|v| *v = v.clamp(0.0, max_d));
     let conf_full = if k == 1 { conf } else { upsample_bilinear(&conf, dw, dh, w, h, k) };
     log(format!("depth: upsampled to {w}x{h} ({:?})  ({:.1}s)", p.upsample, t.elapsed().as_secs_f64()));
-    Ok(DepthMap { depth, conf: conf_full, w, h, dw, dh })
+    Ok(DepthMap { depth, conf: conf_full, w, h, dw, dh, floor })
 }
 
 #[cfg(test)]
@@ -1252,7 +1259,7 @@ mod tests {
         for &v in profile {
             t.push(&[v]);
         }
-        let (d, c) = t.finish(2.0);
+        let (d, c, _) = t.finish(2.0);
         (d[0], c[0])
     }
 
@@ -1438,7 +1445,7 @@ mod bench {
             tr.push(&slice);
             eprintln!("push {m}: {:.3}s", t.elapsed().as_secs_f64());
         }
-        let (d, mut conf) = tr.finish(1.0);
+        let (d, mut conf, _) = tr.finish(1.0);
         normalize_conf(&mut conf);
         let d: Vec<f32> = d.iter().enumerate().map(|(i, v)| v + 3.0 * guide[i] + lcg()).collect();
         let t = Instant::now();

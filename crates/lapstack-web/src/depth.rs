@@ -32,6 +32,9 @@ pub struct DepthGpu {
     /// Two working-grid planes for the weighted average's smoothed weight map.
     wtmp: wgpu::Buffer,
     wgrid: wgpu::Buffer,
+    /// After `finish`: the noise floor of every working-grid cell, the least
+    /// aggregated contrast any frame showed there (`DepthMap::floor` in core).
+    floor: Option<wgpu::Buffer>,
 }
 
 /// One grid of the WLS multigrid hierarchy (`lapstack_core::depth::MgLevel`):
@@ -85,6 +88,7 @@ impl DepthGpu {
             slices: Vec::new(),
             wtmp: g.buffer_f32("wav tmp", dw * dh),
             wgrid: g.buffer_f32("wav grid", dw * dh),
+            floor: None,
         })
     }
 
@@ -105,18 +109,27 @@ impl DepthGpu {
         );
     }
 
-    /// The contrast of the frame in `luma` (w×h f32) on the working grid, box-smoothed
-    /// by `smooth` grid pixels: the weighted average's weight map (`wav_acc`), in the
-    /// buffer returned. `tmp` is a w×h f32 scratch.
-    pub fn record_weight<'a>(&'a self, rec: &mut Rec<'_>, luma: &wgpu::Buffer, tmp: &wgpu::Buffer, w: usize, h: usize, smooth: u32) -> &'a wgpu::Buffer {
+    /// The weighted average's weight map for the frame in `luma` (w×h f32): its
+    /// contrast on the working grid, box-smoothed by `smooth` grid pixels, above
+    /// (1 + `gate`) × the cell's noise floor and raised to `power` (`wav_weight`; the
+    /// twin of core `wav.rs`), the weights smoothed by the same window, in the buffer
+    /// returned, for `wav_acc`. `tmp` is a
+    /// w×h f32 scratch. Needs the pass finished (the floor).
+    pub fn record_weight<'a>(&'a self, rec: &mut Rec<'_>, luma: &wgpu::Buffer, tmp: &wgpu::Buffer, w: usize, h: usize, power: f32, smooth: u32, gate: f32) -> Result<&'a wgpu::Buffer, String> {
+        let floor = self.floor.as_ref().ok_or("the weighted average needs the depth pass finished")?;
         self.record_measure(rec, luma, tmp, w, h);
-        if smooth == 0 {
-            return &self.slice;
-        }
         let pg = P { w: self.dw as u32, h: self.dh as u32, klen: smooth, ..Default::default() };
+        if smooth == 0 {
+            rec.dispatch("wav_weight", [Some(&self.slice), None, Some(&self.wgrid), None, Some(floor), None], P { f0: power.max(0.0), f1: gate.max(0.0), ..pg }, grid1(self.dw * self.dh));
+            return Ok(&self.wgrid);
+        }
+        // the contrast smoothed, weighed, and the weights smoothed by the same window
         rec.dispatch("box_h", [Some(&self.slice), Some(&self.wtmp), None, None, None, None], pg, grid2(self.dw, self.dh));
         rec.dispatch("box_v", [None, Some(&self.wtmp), Some(&self.wgrid), None, None, None], pg, grid2(self.dw, self.dh));
-        &self.wgrid
+        rec.dispatch("wav_weight", [Some(&self.wgrid), None, Some(&self.wtmp), None, Some(floor), None], P { f0: power.max(0.0), f1: gate.max(0.0), ..pg }, grid1(self.dw * self.dh));
+        rec.dispatch("box_h", [Some(&self.wtmp), Some(&self.wgrid), None, None, None, None], pg, grid2(self.dw, self.dh));
+        rec.dispatch("box_v", [None, Some(&self.wgrid), Some(&self.wtmp), None, None, None], pg, grid2(self.dw, self.dh));
+        Ok(&self.wtmp)
     }
 
     /// Read the recorded slice back and keep it (quantised).
@@ -238,9 +251,12 @@ impl DepthGpu {
         }
         drop(slices);
 
-        // ---- noise floor (median of the profile minima), close the profiles
+        // ---- noise floor (median of the profile minima), close the profiles; the
+        // per-cell minima stay for the weighted average
         let cmin = g.read_range_f32(&wk.state, 7 * n, n).await?;
         let mut mins: Vec<f32> = cmin.iter().step_by(7).copied().collect();
+        let floor_buf = g.buffer_init("dff floor", bytemuck::cast_slice(&cmin));
+        drop(cmin);
         let mid = mins.len() / 2;
         let floor = *mins.select_nth_unstable_by(mid, |a, b| a.total_cmp(b)).1;
         let mut rec = g.rec();
@@ -336,6 +352,7 @@ impl DepthGpu {
         let packed = g.read(full_tmp, (nfull.div_ceil(2) * 4) as u64).await?;
         let mut full: Vec<u16> = bytemuck::cast_slice::<u8, u16>(&packed).to_vec();
         full.truncate(nfull);
+        self.floor = Some(floor_buf);
         Ok((depth_w, conf_w, full))
     }
 

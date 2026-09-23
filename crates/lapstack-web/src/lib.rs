@@ -1308,11 +1308,13 @@ impl Engine {
     /// accumulator with weight `1 − |index − depth|` per pixel. The first call
     /// starts the pass. Returns {index, ms}.
     /// `wav`: the weighted average instead (Helicon's method A, twin of core `wav.rs`):
-    /// the re-warped frame is weighed by its contrast — the depth pass's focus measure
-    /// on the working grid, box-smoothed by `smooth` grid pixels, raised to `power`,
-    /// plus a floor of (1e-4)^power so a flat pixel averages every frame — into the
-    /// same accumulator; `render_finish(true)` normalises it into `wav_rgb16`.
-    pub async fn render_push(&mut self, index: usize, bytes: &[u8], raw: bool, wav: bool, power: f32, smooth: u32) -> Result<JsValue, JsValue> {
+    /// the re-warped frame is weighed by its contrast above the noise floor — the depth
+    /// pass's focus measure on the working grid, box-smoothed by `smooth` grid pixels,
+    /// less (1 + `gate`) × the least contrast any frame showed at the cell, raised to
+    /// `power`, the weights smoothed again; where nothing is above the floor every
+    /// frame weighs the same — into the same accumulator; `render_finish(true)`
+    /// normalises it into `wav_rgb16`.
+    pub async fn render_push(&mut self, index: usize, bytes: &[u8], raw: bool, wav: bool, power: f32, smooth: u32, gate: f32) -> Result<JsValue, JsValue> {
         let t0 = now();
         let frame = self.decode_for_run(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
@@ -1337,11 +1339,11 @@ impl Engine {
         if wav {
             let dff = run.dff.as_ref().ok_or_else(|| JsValue::from_str("the weighted average needs the depth-from-focus pass"))?;
             rec.dispatch("luma_f32", [Some(&run.cur[0]), None, Some(&run.en), None, None, None], P { w: w as u32, h: h as u32, ..Default::default() }, grid1(n));
-            let weight = dff.record_weight(&mut rec, &run.en, &run.tmp_full, w, h, smooth);
+            let weight = dff.record_weight(&mut rec, &run.en, &run.tmp_full, w, h, power, smooth, gate).map_err(|e| JsValue::from_str(&e))?;
             rec.dispatch(
                 "wav_acc",
                 [Some(&run.cur[0]), Some(&run.acc[0]), Some(&run.best[0]), None, Some(weight), None],
-                P { w: w as u32, h: h as u32, ow: dff.dw as u32, oh: dff.dh as u32, klen: dff.k as u32, f0: power.max(0.0), f1: 1e-4f32.powf(power.max(0.0)), ..Default::default() },
+                P { w: w as u32, h: h as u32, ow: dff.dw as u32, oh: dff.dh as u32, klen: dff.k as u32, ..Default::default() },
                 grid1(n),
             );
         } else {

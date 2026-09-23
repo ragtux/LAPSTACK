@@ -863,10 +863,20 @@ fn dmap_acc(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups
         o[i] += t;
     }
 }
-// ---- weighted average (twin of lapstack-core/src/wav.rs): the re-warped frame `a` (3
-// planes) accumulates into b (3 planes) and its weight into o, weighed by the contrast
-// map `wt` on the ow×oh grid of klen-pixel blocks (bilinear, samples at block centres),
-// raised to f0, plus the floor f1.
+// ---- weighted average (twin of lapstack-core/src/wav.rs). wav_weight: the frame's
+// contrast `a` on the working grid above (1 + gate) x the cell's noise floor `wt` (the
+// depth pass's, DepthGpu::floor), raised to the power -> o; a tiny even weight,
+// (floor / 100)^power, where nothing is above the floor. f0 = power, f1 = gate. The
+// contrast comes box-smoothed and the weights are smoothed again after (record_weight).
+@compute @workgroup_size(256)
+fn wav_weight(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = gid1(g, nwg); if (i >= p.w * p.h) { return; }
+    let f = wt[i];
+    o[i] = pow(max(a[i] - (1.0 + p.f1) * f, 0.0), p.f0) + pow(1e-2 * f, p.f0) + 1e-30;
+}
+// wav_acc: the re-warped frame `a` (3 planes) accumulates into b (3 planes) and its
+// weight into o, the weight map `wt` on the ow×oh grid of klen-pixel blocks taken
+// bilinearly (samples at block centres).
 @compute @workgroup_size(256)
 fn wav_acc(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = gid1(g, nwg); let n = p.w * p.h; if (i >= n) { return; }
@@ -877,8 +887,7 @@ fn wav_acc(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups)
     let x0 = u32(floor(gx)); let y0 = u32(floor(gy));
     let x1 = min(x0 + 1u, p.ow - 1u); let y1 = min(y0 + 1u, p.oh - 1u);
     let fx = gx - f32(x0); let fy = gy - f32(y0);
-    let v = mix(mix(wt[y0 * p.ow + x0], wt[y0 * p.ow + x1], fx), mix(wt[y1 * p.ow + x0], wt[y1 * p.ow + x1], fx), fy);
-    let wgt = pow(max(v, 0.0), p.f0) + p.f1;
+    let wgt = mix(mix(wt[y0 * p.ow + x0], wt[y0 * p.ow + x1], fx), mix(wt[y1 * p.ow + x0], wt[y1 * p.ow + x1], fx), fy);
     b[i] += wgt * a[i]; b[n + i] += wgt * a[n + i]; b[2u * n + i] += wgt * a[2u * n + i];
     o[i] += wgt;
 }
