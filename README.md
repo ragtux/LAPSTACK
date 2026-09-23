@@ -391,7 +391,10 @@ every output at full size. The bar is the 1-2-5 value nearest a fifth of the
 width, or `LENGTH` (`100um`, `2mm`, `500nm`; one that does not fit is brought
 down to the largest 1-2-5 value that does, and the log says so), snapped to
 whole pixels, with its length written over it in the unit that keeps the
-number under a thousand (500 nm, 100 µm, 2.5 mm). `--text` is a caption:
+number under a thousand (500 nm, 100 µm, 2.5 mm). `--scale-bar px` asks for
+a bar without a calibration: a round count of the frames' pixels, labelled so
+(*500 px*; `px:LENGTH` takes the count), so a figure that is not calibrated
+still carries a scale. `--text` is a caption:
 `\n` breaks a line, and `{date}` / `{time}` (the first frame's capture time,
 as the batch split reads it), `{frames}`, `{first}` (the first frame's stem)
 and `{n}` (the stack's number in a batch) are filled in. Bar and text each
@@ -1062,7 +1065,8 @@ after the run writes this session's run and strokes; saving before it keeps
 the project's own.
 
 **Scale bar and text** (the panel's *Scale bar and text* section; the CLI's
-`--scale-bar` and `--text`, above): the calibration in µm per pixel, the bar's
+`--scale-bar` and `--text`, above): the *scale bar* tick, the calibration in
+µm per pixel (empty: the bar is labelled in pixels of the frames), the bar's
 length (empty = the 1-2-5 value nearest a fifth of the width), a caption with
 the same tokens (`{date}`, `{time}`, `{frames}`, `{first}`, `{n}`; `\n` breaks
 a line), the corners, the size, the colour and the style. The engine renders

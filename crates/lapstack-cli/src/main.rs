@@ -210,17 +210,25 @@ fn main() {
             "--gpu" => p.gpu = true,
             "--gpu-align" => a.gpu = true,
             "--scale-bar" => {
-                // CAL[:LENGTH]: the size of a pixel (0.325 = µm; 325nm), or auto (the first frame's TIFF), and the bar's length
+                // CAL[:LENGTH]: the size of a pixel (0.325 = µm; 325nm), auto (the first frame's TIFF) or px (no
+                // calibration: the bar is labelled in pixels), and the bar's length
                 let s = next(&mut i);
                 let mut it = s.splitn(2, ':');
                 let cal = it.next().unwrap_or("");
+                ov.bar = true;
                 if cal.eq_ignore_ascii_case("auto") {
                     ov_auto = true;
-                } else {
-                    ov.um_per_px = overlay::parse_length_um(cal).unwrap_or_else(|| fail("--scale-bar CAL[:LENGTH]: CAL is the size of one pixel of the frames, in µm (0.325) or with a unit (325nm), or auto"));
+                } else if !matches!(cal.to_ascii_lowercase().as_str(), "px" | "pixels" | "none") {
+                    ov.um_per_px = overlay::parse_length_um(cal).unwrap_or_else(|| fail("--scale-bar CAL[:LENGTH]: CAL is the size of one pixel of the frames, in µm (0.325) or with a unit (325nm), auto, or px for a bar in pixels"));
                 }
                 if let Some(len) = it.next() {
-                    ov.bar_um = if len.eq_ignore_ascii_case("auto") { 0.0 } else { overlay::parse_length_um(len).unwrap_or_else(|| fail("--scale-bar CAL[:LENGTH]: LENGTH with a unit (100um | 2mm | 500nm), or auto")) };
+                    ov.bar_um = if len.eq_ignore_ascii_case("auto") {
+                        0.0
+                    } else if ov_auto || ov.um_per_px > 0.0 {
+                        overlay::parse_length_um(len).unwrap_or_else(|| fail("--scale-bar CAL[:LENGTH]: LENGTH with a unit (100um | 2mm | 500nm), or auto"))
+                    } else {
+                        overlay::parse_length_px(len).unwrap_or_else(|| fail("--scale-bar px[:LENGTH]: LENGTH in pixels of the frames (500 | 500px), or auto"))
+                    };
                 }
             }
             "--text" => ov.text = next(&mut i),
@@ -707,11 +715,12 @@ fn help() {
          are taken as sRGB and written as a linear sRGB DNG. The slabs, the weighted average and the stereo pair\n\
          are DNGs too; the rocking views are TIFFs; a stack must be all raws or none.\n\
          Scale bar and caption (microscopy), burned into the fused image, the weighted average and the views:\n\
-           --scale-bar CAL[:LENGTH]   CAL = the size of one pixel of the frames in µm (0.325, or 325nm), or auto = read\n\
+           --scale-bar CAL[:LENGTH]   CAL = the size of one pixel of the frames in µm (0.325, or 325nm), auto = read\n\
                                   from the first frame's TIFF (ImageJ's unit=, OME-XML's PhysicalSizeX, a resolution in\n\
-                                  cm or inch from a writer that is not a camera); LENGTH = the bar's length with a unit\n\
-                                  (100um, 2mm, 500nm) [auto: the 1-2-5 value nearest a fifth of the width]; the label\n\
-                                  picks its unit (500 nm, 100 µm, 2.5 mm)\n\
+                                  cm or inch from a writer that is not a camera), or px = no calibration, a bar labelled\n\
+                                  in pixels of the frames; LENGTH = the bar's length with a unit (100um, 2mm, 500nm; in\n\
+                                  pixels after px) [auto: the 1-2-5 value nearest a fifth of the width]; the label picks\n\
+                                  its unit (500 nm, 100 µm, 2.5 mm)\n\
            --text TEXT            a caption; \\n breaks a line; {{date}} {{time}} (the first frame's capture time),\n\
                                   {{frames}}, {{first}} (its stem), {{n}} (the stack in a batch)\n\
            --overlay-pos BAR[,TEXT]   the corners, tl | tr | bl | br [br,bl]; in one corner the text goes above the bar\n\

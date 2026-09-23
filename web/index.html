@@ -224,10 +224,10 @@
     <button class="section" type="button" data-sec="overlay">Scale bar and text</button>
     <div class="sec-body">
       <div class="dim small">For the microscope: a scale bar and a caption burned into the saved stacked images, the stereo pair and the animations, and shown here on the Stack layers as they will be saved. The calibration is the size of one pixel of the frames — the camera's pixel pitch over the magnification, or what a stage micrometer measures; a TIFF written by ImageJ or as OME-TIFF carries it.</div>
-      <label title="a bar of a round length (1, 2 or 5 × 10ⁿ) with that length written over it: 500 nm, 100 µm, 2.5 mm"><input type="checkbox" id="p-ov-bar"> scale bar</label>
+      <label title="a bar of a round length (1, 2 or 5 × 10ⁿ) with that length written over it: 500 nm, 100 µm, 2.5 mm — or, with no µm per pixel given, a round count of the frames' pixels (500 px)"><input type="checkbox" id="p-ov-bar"> scale bar</label>
       <label title="the size of one pixel of the frames in µm (alignment brings every frame onto frame 0's pixels, and the crop only cuts them, so one number serves)">µm per pixel <input type="text" id="p-ov-um" inputmode="decimal" placeholder="0.325"></label>
       <div class="dim small" id="ov-cal">—</div>
-      <label title="the bar's length with a unit — 100 µm, 2 mm, 500 nm; empty = the 1-2-5 value nearest a fifth of the width">bar length <input type="text" id="p-ov-len" placeholder="auto"></label>
+      <label title="the bar's length with a unit — 100 µm, 2 mm, 500 nm (in pixels, 500 or 500 px, when there is no calibration); empty = the 1-2-5 value nearest a fifth of the width">bar length <input type="text" id="p-ov-len" placeholder="auto"></label>
       <label>bar corner <select id="p-ov-barpos"><option value="br">bottom right</option><option value="bl">bottom left</option><option value="tr">top right</option><option value="tl">top left</option></select></label>
       <label title="a caption; \n breaks a line; {date} and {time} are the first frame's capture time, {frames} the frame count, {first} the first frame's name, {n} the stack's number in a batch">text <input type="text" id="p-ov-txt" placeholder="none"></label>
       <label title="the corner the text sits in; in the bar's corner it goes above the bar (below it at the top)">text corner <select id="p-ov-txtpos"><option value="bl">bottom left</option><option value="br">bottom right</option><option value="tl">top left</option><option value="tr">top right</option></select></label>

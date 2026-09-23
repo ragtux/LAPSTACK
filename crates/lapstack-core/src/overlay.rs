@@ -13,6 +13,9 @@
 //   brings every frame onto frame 0's pixel grid and the crop only cuts that
 //   grid, so one number serves every output at full size; an output shrunk
 //   to a smaller long edge (an animation) passes the shrink as `scale`.
+//   A bar asked for without a calibration is labelled in pixels of the
+//   frames ("500 px"), so a bar is drawn whenever one is asked for and a
+//   figure that is not calibrated still carries a scale.
 // * The bar's length is the 1-2-5 value nearest a fifth of the width, or the
 //   length asked for; its label picks the unit that keeps the number under a
 //   thousand (500 nm, 100 µm, 2.5 mm). The bar is snapped to whole pixels.
@@ -142,9 +145,13 @@ impl Style {
 /// The overlay asked for. Empty (`is_empty`) when there is neither a bar nor text.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OverlayParams {
-    /// The size of one pixel of the frames (frame 0's grid) in µm; 0 = no scale bar.
+    /// A scale bar wanted even without a calibration: labelled in pixels of the frames.
+    pub bar: bool,
+    /// The size of one pixel of the frames (frame 0's grid) in µm; 0 = not calibrated
+    /// (no bar unless `bar` asks for a pixel one).
     pub um_per_px: f64,
-    /// The bar's length in µm; 0 = the 1-2-5 value nearest a fifth of the width.
+    /// The bar's length in µm (in frame pixels without a calibration); 0 = the 1-2-5
+    /// value nearest a fifth of the width.
     pub bar_um: f64,
     /// The caption; '\n' separates lines; empty = none.
     pub text: String,
@@ -159,6 +166,7 @@ pub struct OverlayParams {
 impl Default for OverlayParams {
     fn default() -> Self {
         OverlayParams {
+            bar: false,
             um_per_px: 0.0,
             bar_um: 0.0,
             text: String::new(),
@@ -172,8 +180,12 @@ impl Default for OverlayParams {
 }
 
 impl OverlayParams {
-    pub fn has_bar(&self) -> bool {
+    /// A calibration is given: the bar is a length.
+    pub fn calibrated(&self) -> bool {
         self.um_per_px > 0.0 && self.um_per_px.is_finite()
+    }
+    pub fn has_bar(&self) -> bool {
+        self.bar || self.calibrated()
     }
     pub fn has_text(&self) -> bool {
         !self.text.trim().is_empty()
@@ -212,6 +224,20 @@ pub fn parse_length_um(s: &str) -> Option<f64> {
     let k = if unit.trim().is_empty() { 1.0 } else { unit_um(unit)? };
     let um = v * k;
     (um > 0.0 && um.is_finite()).then_some(um)
+}
+
+/// A length in pixels ("500", "500px", "500 pixels") for a bar without a
+/// calibration. `None` when it does not parse, is not positive, or carries a
+/// unit of length.
+pub fn parse_length_px(s: &str) -> Option<f64> {
+    let s = s.trim();
+    let split = s.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == ',' || c == '-' || c == '+')).unwrap_or(s.len());
+    let (num, unit) = s.split_at(split);
+    if !matches!(unit.trim().to_ascii_lowercase().as_str(), "" | "px" | "pixel" | "pixels") {
+        return None;
+    }
+    let v: f64 = num.replace(',', ".").parse().ok()?;
+    (v > 0.0 && v.is_finite()).then_some(v)
 }
 
 /// The 1-2-5 × 10^n value nearest `target` in log scale.
@@ -857,7 +883,8 @@ pub struct Overlay {
     pub back_rgb: [f32; 3],
     /// The opacity of `back` (1 for a halo, less for a box).
     pub back_alpha: f32,
-    /// The bar's length in µm and in output pixels (0 without a bar), and its label.
+    /// The bar's length in µm (frame pixels without a calibration) and in output
+    /// pixels (0 without a bar), and its label.
     pub bar_um: f64,
     pub bar_px: f32,
     pub label: String,
@@ -903,16 +930,17 @@ impl Overlay {
         };
         let mut blocks: Vec<(Corner, Block)> = Vec::new();
 
-        // the scale bar with its label over it
+        // the scale bar with its label over it: a length at the calibration, or a
+        // count of frame pixels without one (a unit of 1 frame pixel = 1/scale output pixels)
         if p.has_bar() {
-            let um_out = p.um_per_px / scale;   // µm per output pixel
+            let um_out = if p.calibrated() { p.um_per_px } else { 1.0 } / scale;   // units per output pixel
             let max_px = (w as f32 - 2.0 * margin - 2.0 * pad).max(2.0) as f64;
             let mut bar_um = if p.bar_um > 0.0 { p.bar_um } else { nice_length_um(0.2 * w as f64 * um_out) };
             if bar_um / um_out > max_px {
                 bar_um = nice_floor_um(max_px * um_out);
             }
             let bar_px = (bar_um / um_out).round().max(1.0) as f32;
-            let label = format_length(bar_um);
+            let label = if p.calibrated() { format_length(bar_um) } else { format!("{} px", trim_float(bar_um)) };
             let line = layout(font, &label, em);
             let t = (0.1 * em).round().max(1.0);
             let gap = 0.2 * em;
@@ -997,9 +1025,16 @@ impl Overlay {
         let p = &self.params;
         let mut parts = Vec::new();
         if self.bar_px > 0.0 {
-            let mut s = format!("scale bar {} = {} px at {} µm/px, {}", self.label, self.bar_px, trim_float(p.um_per_px), p.bar_pos.describe());
+            let mut s = if p.calibrated() {
+                format!("scale bar {} = {} px at {} µm/px, {}", self.label, self.bar_px, trim_float(p.um_per_px), p.bar_pos.describe())
+            } else if self.bar_px == self.bar_um as f32 {
+                format!("scale bar {} (no calibration), {}", self.label, p.bar_pos.describe())
+            } else {
+                format!("scale bar {} of the frames = {} px (no calibration), {}", self.label, self.bar_px, p.bar_pos.describe())
+            };
             if p.bar_um > 0.0 && (p.bar_um - self.bar_um).abs() > 1e-9 * p.bar_um {
-                s.push_str(&format!(" (the {} asked for does not fit)", format_length(p.bar_um)));
+                let asked = if p.calibrated() { format_length(p.bar_um) } else { format!("{} px", trim_float(p.bar_um)) };
+                s.push_str(&format!(" (the {asked} asked for does not fit)"));
             }
             parts.push(s);
         }
@@ -1375,6 +1410,32 @@ mod tests {
         ov.apply_u16(&mut pair, 2 * w, w, 0);
         let white = |x0: usize| (0..h).flat_map(|y| (x0..x0 + w).map(move |x| (x, y))).filter(|&(x, y)| pair[(y * 2 * w + x) * 3] > 65000).count();
         assert!(white(0) >= 50 && white(0) == white(w), "{} / {}", white(0), white(w));
+    }
+
+    /// A bar asked for without a calibration is a round count of frame pixels,
+    /// labelled so; at half the output size it measures the same frame pixels.
+    #[test]
+    fn uncalibrated_bar_in_pixels() {
+        let p = OverlayParams { bar: true, ..Default::default() };
+        assert!(p.has_bar() && !p.calibrated() && !p.is_empty());
+        let ov = Overlay::render(&p, 1000, 800, 1.0);
+        assert_eq!(ov.patches.len(), 1);
+        assert_eq!(ov.label, "200 px");
+        assert_eq!(ov.bar_px, 200.0);
+        assert!(ov.describe().starts_with("scale bar 200 px (no calibration), bottom right"), "{}", ov.describe());
+        let half = Overlay::render(&p, 500, 400, 0.5);
+        assert_eq!(half.label, "200 px");
+        assert_eq!(half.bar_px, 100.0);
+        assert!(half.describe().contains("200 px of the frames = 100 px"), "{}", half.describe());
+        // a length asked for is pixels too, and one that does not fit is brought down
+        let asked = Overlay::render(&OverlayParams { bar: true, bar_um: 250.0, ..Default::default() }, 1000, 800, 1.0);
+        assert_eq!(asked.label, "250 px");
+        let big = Overlay::render(&OverlayParams { bar: true, bar_um: 5000.0, ..Default::default() }, 1000, 800, 1.0);
+        assert!(big.bar_px < 1000.0 && big.describe().contains("the 5000 px asked for does not fit"), "{}", big.describe());
+        assert_eq!(parse_length_px("500"), Some(500.0));
+        assert_eq!(parse_length_px("500 px"), Some(500.0));
+        assert_eq!(parse_length_px("2 mm"), None);
+        assert_eq!(parse_length_px("0"), None);
     }
 
     #[test]

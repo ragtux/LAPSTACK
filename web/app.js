@@ -684,6 +684,11 @@ function lengthUm(s) {
   const k = { '': 1, um: 1, 'µm': 1, 'μm': 1, micron: 1, microns: 1, nm: 1e-3, mm: 1e3, cm: 1e4, m: 1e6, in: 25400, inch: 25400 }[m[2].toLowerCase()];
   const v = parseFloat(m[1].replace(',', '.')) * (k ?? NaN); return v > 0 && isFinite(v) ? v : 0;
 }
+// a length in pixels ("500", "500 px") for a bar without a calibration; 0 = auto / not a pixel count
+function lengthPx(s) {
+  const m = /^\s*([0-9]*[.,]?[0-9]+)\s*(px|pixels?)?\s*$/i.exec(s || ''); if (!m) return 0;
+  const v = parseFloat(m[1].replace(',', '.')); return v > 0 && isFinite(v) ? v : 0;
+}
 // the caption with its tokens filled in: {date} {time} from the first frame's capture time (read once per first frame,
 // the overlay redrawn when it lands), {frames}, {first}, {n}; \n breaks a line
 function captionText(t) {
@@ -693,14 +698,17 @@ function captionText(t) {
   return t.replace(/\\n/g, '\n').replace(/\{date\}/g, m ? `${m[1]}-${m[2]}-${m[3]}` : '').replace(/\{time\}/g, m ? m[4] : '')
     .replace(/\{frames\}/g, String(st.files.length)).replace(/\{first\}/g, f0 ? stemOf(f0.name) : '').replace(/\{n\}/g, String(B.all ? B.k + 1 : 1));
 }
-// the overlay as the engine takes it (OverlayParams by name), or null when there is nothing to draw
+// the overlay as the engine takes it (OverlayParams by name), or null when there is nothing to draw;
+// a bar without a calibration is labelled in pixels, so the bar is drawn whenever it is ticked
 function overlayParams() {
   const p = readParams();
   const draft = st.result && st.result.meta ? (st.result.meta.draft || 0) : p.draft;   // a draft's pixels are 2^N frame pixels wide
   const um = p.ov_bar && p.ov_um > 0 ? p.ov_um * (1 << draft) : 0, text = captionText(p.ov_text).trim();
-  if (!um && !text) return null;
-  return { um_per_px: um, bar_um: lengthUm(p.ov_len), text, bar_pos: p.ov_bar_pos, text_pos: p.ov_text_pos, size: p.ov_size / 100, color: p.ov_color, style: p.ov_style };
+  if (!p.ov_bar && !text) return null;
+  return { bar: p.ov_bar, um_per_px: um, bar_um: um ? lengthUm(p.ov_len) : lengthPx(p.ov_len), text, bar_pos: p.ov_bar_pos, text_pos: p.ov_text_pos, size: p.ov_size / 100, color: p.ov_color, style: p.ov_style };
 }
+// one line for the info rows before the engine has described the overlay
+const overlayWords = (p) => [p.um_per_px ? `scale bar at ${p.um_per_px} µm per pixel` : p.bar ? 'scale bar in pixels (no calibration)' : '', p.text ? `text “${p.text.replace(/\n/g, ' / ')}”` : ''].filter(Boolean).join('; ');
 const overlayJson = () => { const p = overlayParams(); return p ? JSON.stringify(p) : ''; };
 const burnOverlay = () => !!overlayParams() && $('sv-overlay').checked;   // the saved files get it, and the viewer shows it
 // the patches for an output of W×H at `scale` of the frames' resolution: from the cache, or null while the
@@ -746,14 +754,15 @@ function renderOverlayInfo() {
     const b = document.createElement('button'); b.textContent = 'use'; b.title = 'take the calibration the first frame carries';
     b.addEventListener('click', () => { $('p-ov-um').value = String(cal); $('p-ov-bar').checked = true; overlayChanged(); });
     el.append(b);
-  } else el.textContent = st.result ? 'the first frame carries no pixel size (a TIFF from ImageJ or an OME-TIFF would); calibrate with a stage micrometer' : 'a frame\'s own calibration (ImageJ, OME-TIFF) shows here after a run';
+  } else el.textContent = (p && p.bar && !p.um_per_px ? 'no calibration: the bar is labelled in pixels of the frames; ' : '')
+    + (st.result ? 'the first frame carries no pixel size (a TIFF from ImageJ or an OME-TIFF would); calibrate with a stage micrometer' : 'a frame\'s own calibration (ImageJ, OME-TIFF) shows here after a run');
   const have = !!(st.result || st.kept.length), [W, H] = outDims();
   const hit = p && have && W ? OV.cache.get(JSON.stringify([p, W, H, 1])) : null;
   $('ov-info').textContent = !p ? 'off'
     : !$('sv-overlay').checked ? 'shown nowhere: the Save step\'s "burn the scale bar and text" is off'
     : hit && hit !== 'pending' ? hit.text
     : have && W ? 'rendering…'
-    : `${p.um_per_px ? `scale bar at ${p.um_per_px} µm per pixel` : ''}${p.um_per_px && p.text ? '; ' : ''}${p.text ? `text “${p.text.replace(/\n/g, ' / ')}”` : ''} — on the Stack layers once there is a result`;
+    : `${overlayWords(p)} — on the Stack layers once there is a result`;
 }
 for (const id of ['p-ov-bar', 'p-ov-um', 'p-ov-len', 'p-ov-txt', 'p-ov-barpos', 'p-ov-txtpos', 'p-ov-size', 'p-ov-color', 'p-ov-style']) $(id).addEventListener('input', () => overlayChanged());
 window.__overlayParams = () => overlayParams(); window.__overlayChanged = () => overlayChanged(); window.__overlayPatches = (w, h, s) => overlayPatches(w, h, s);
@@ -1453,7 +1462,7 @@ async function renderSave() {
   // the scale bar and text: what the Stack step's section set up, and whether the files get it
   const ovp = overlayParams(); $('sv-overlay').disabled = !ovp;
   $('sv-overlay-info').textContent = !ovp ? 'off — a scale bar or a text is set up in the Stack step\'s "Scale bar and text" section'
-    : (OV.text || `${ovp.um_per_px ? `scale bar at ${ovp.um_per_px} µm per pixel` : ''}${ovp.um_per_px && ovp.text ? '; ' : ''}${ovp.text ? `text “${ovp.text.replace(/\n/g, ' / ')}”` : ''}`) + ($('sv-overlay').checked ? '' : ' — left out of the files');
+    : (OV.text || overlayWords(ovp)) + ($('sv-overlay').checked ? '' : ' — left out of the files');
   // stereo / rocking: the DFR image is on offer only when it was rendered
   for (const k of ['dmap', 'wav']) $('v3-src').querySelector(`[value="${k}"]`).disabled = !haveKind(k);
   if (!haveKind($('v3-src').value)) $('v3-src').value = 'fused';

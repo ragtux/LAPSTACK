@@ -365,6 +365,7 @@ fn encode_rgb16(v: &[u16], w: u32, h: u32, format: &str, quality: u8, bits16: bo
 #[derive(Deserialize)]
 #[serde(default)]
 struct OverlayJson {
+    bar: bool,
     um_per_px: f64,
     bar_um: f64,
     text: String,
@@ -378,7 +379,7 @@ struct OverlayJson {
 impl Default for OverlayJson {
     fn default() -> Self {
         let d = OverlayParams::default();
-        OverlayJson { um_per_px: 0.0, bar_um: 0.0, text: String::new(), bar_pos: d.bar_pos.name().into(), text_pos: d.text_pos.name().into(), size: d.size, color: d.color.name().into(), style: d.style.name().into() }
+        OverlayJson { bar: false, um_per_px: 0.0, bar_um: 0.0, text: String::new(), bar_pos: d.bar_pos.name().into(), text_pos: d.text_pos.name().into(), size: d.size, color: d.color.name().into(), style: d.style.name().into() }
     }
 }
 
@@ -391,6 +392,7 @@ fn overlay_params(json: &str) -> Result<Option<OverlayParams>, JsValue> {
     let j: OverlayJson = serde_json::from_str(json).map_err(|e| JsValue::from_str(&format!("overlay: {e}")))?;
     let d = OverlayParams::default();
     let p = OverlayParams {
+        bar: j.bar,
         um_per_px: j.um_per_px,
         bar_um: j.bar_um,
         text: j.text,
