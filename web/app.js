@@ -2853,9 +2853,16 @@ $('flip').addEventListener('pointerdown', () => flip(true)); $('flip').addEventL
 // (keys, wheel, slider), so frames above and below stay in view and the strip
 // scrolls under the selection instead of the selection running off-screen.
 // Clicking a thumb does not recentre: it is already on screen.
+// The strip's children are not the frames (the tools row, the banners and the
+// stack headers sit among them), so the selected thumb is looked up by class;
+// and its own scrollTop is set rather than scrollIntoView, which would scroll
+// the page under the strip too.
 function revealSelected() {
-  const el = $('filmstrip').children[st.selected];
-  if (el && el.classList.contains('sel')) el.scrollIntoView({ block: 'center', behavior: 'instant' });
+  const fs = $('filmstrip'), el = fs.querySelector('.thumb.sel');
+  if (!el) return;
+  const r = el.getBoundingClientRect(), b = fs.getBoundingClientRect();
+  const want = fs.scrollTop + (r.top - b.top) - (b.height - r.height) / 2;
+  fs.scrollTop = Math.max(0, Math.min(fs.scrollHeight - fs.clientHeight, want));
 }
 function scrub(delta) { if (!st.files.length) return; st.selected = Math.min(st.files.length - 1, Math.max(0, st.selected + delta)); updateTabs(); renderFilmstrip(); revealSelected(); draw(); }
 // ResizeObserver: two panes change size when the split toggles
