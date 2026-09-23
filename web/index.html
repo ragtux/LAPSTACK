@@ -151,17 +151,17 @@
   </div>
   <!-- run parameters: each section heading is a toggle for the .sec-body under it, so a short
        window can be cut down to the groups in use (the collapsed set is remembered) -->
-  <div id="params" class="panel">
+  <aside id="params" class="panel" aria-label="Run parameters">
     <!-- retouch mode: the brush sits above the run parameters while it is on -->
     <div id="brush" hidden>
-      <button class="section" type="button" data-sec="brush">Brush</button>
+      <h3 class="sec-h"><button class="section" type="button" data-sec="brush">Brush</button></h3>
       <div class="sec-body">
-        <label>size <span class="val" id="br-size">100</span></label>
+        <label for="br-size-in">size <span class="val" id="br-size">100</span></label>
         <input type="range" id="br-size-in" min="0" max="100" value="50" title="[ / ] or alt+wheel over the image">
-        <label>hardness <span class="val" id="br-hard">0.50</span></label>
+        <label for="br-hard-in">hardness <span class="val" id="br-hard">0.50</span></label>
         <input type="range" id="br-hard-in" min="0" max="95" value="50" title="alt+shift+wheel over the image">
       </div>
-      <button class="section" type="button" data-sec="brush-source">Source</button>
+      <h3 class="sec-h"><button class="section" type="button" data-sec="brush-source">Source</button></h3>
       <div class="sec-body">
         <!-- what the brush copies from (right pane): the scrubbed frame, the other stacked
              result — LAP into DFR or DFR into LAP (needs a Run LAP + DFR) — or a slab: the
@@ -175,16 +175,16 @@
         </div>
         <div class="dim small" id="bs-slab-hint" hidden>A slab is the scrubbed frame and its neighbours (± this many) stacked on their own with the run's settings — a thick plane of focus to paint from, the way Zerene retouches from slabs. It is fused on demand when the scrub settles (well under a second per frame at 45 MP); the filmstrip marks its frames.</div>
       </div>
-      <button class="section" type="button" data-sec="brush-history">History</button>
+      <h3 class="sec-h"><button class="section" type="button" data-sec="brush-history">History</button></h3>
       <div class="sec-body">
         <div class="row"><button id="undo" title="ctrl+z" disabled>undo</button><button id="redo" title="ctrl+shift+z" disabled>redo</button><span id="hist" class="dim small"></span></div>
       </div>
-      <button class="section" type="button" data-sec="brush-howto">How to</button>
+      <h3 class="sec-h"><button class="section" type="button" data-sec="brush-howto">How to</button></h3>
       <div class="sec-body">
         <div class="dim small">Left pane: the stacked image (LAP or DFR, whichever is selected) · right pane: the brush source — a source frame, a slab of frames around it, or the other stacked image. The brush previews itself in the left pane: what is inside the circle is what a click would paint there. Drag on either pane to paint the source into the stacked image; shift+drag pans; the wheel picks the source frame and ctrl+wheel zooms; double-click fits / 100 %. Esc or the Retouch button leaves.</div>
       </div>
     </div>
-    <button class="section" type="button" data-sec="dust">Dust map</button>
+    <h3 class="sec-h"><button class="section" type="button" data-sec="dust">Dust map</button></h3>
     <div class="sec-body">
       <div class="dim small">Sensor dust sits in every frame at the same place, and the stack keeps it. A frame of an evenly lit blank surface, shot out of focus at the stack's aperture, shows nothing but the dust: load it here and the spots found in it are taken out of every frame before alignment.</div>
       <div class="row"><button id="dust-add" title="a photo of a white wall, the sky, a sheet of paper — out of focus, at the aperture the stack was shot at, with the same camera">Load dust map…</button><input type="file" id="dust-file" accept=".png,.jpg,.jpeg,.tif,.tiff,.ari,.arw,.cr2,.cr3,.crm,.crw,.dcr,.dcs,.dng,.erf,.iiq,.kdc,.mef,.mos,.mrw,.nef,.nrw,.orf,.ori,.pef,.raf,.raw,.rw2,.rwl,.srw,.3fr,.fff,.x3f,.qtk,image/png,image/jpeg,image/tiff" hidden><button id="dust-x" title="no dust map: the frames are stacked as they are" hidden>×</button></div>
@@ -194,7 +194,7 @@
       <label class="stepper" title="pixels each spot is grown by: the soft edge of the shadow, and the little a spot moves between apertures">margin px <span><button data-step="p-dust-margin" data-d="-1">−</button><span id="p-dust-margin" data-min="0" data-max="20">3</span><button data-step="p-dust-margin" data-d="1">+</button></span></label>
       <label class="sel" title="fill: each spot is interpolated from its surroundings (Helicon's way) — flat: each spot is divided by the map's own attenuation, which keeps the detail under it but needs the map shot at the stack's aperture and lighting">remove by <select id="p-dust-mode"><option value="fill">fill (interpolate)</option><option value="flat">flat-field (divide)</option></select></label>
     </div>
-    <button class="section" type="button" data-sec="alignment">Alignment</button>
+    <h3 class="sec-h"><button class="section" type="button" data-sec="alignment">Alignment</button></h3>
     <div class="sec-body">
       <label title="one gain per channel brings each frame's mean to frame 0's, over the area the frame covers: exposure and colour flicker between frames"><input type="checkbox" id="p-bright" checked> equalise brightness</label>
       <label><input type="checkbox" id="p-align" checked> align frames</label>
@@ -207,8 +207,9 @@
       <label title="turn every frame as decoded, clockwise — a camera held sideways (a raw is already turned by its EXIF orientation); the thumbnails follow">rotate frames <select id="p-rotate"><option value="0" selected>no</option><option value="90">90° cw</option><option value="180">180°</option><option value="270">90° ccw</option></select></label>
       <label class="stepper" title="a draft run: every frame block-averaged by 2, 4, 8 or 16 as decoded, so the whole run — alignment, fusion, depth, every view and file — is a quick check of the settings at a fraction of the size and time; the scale bar and the crop window follow the frames' own pixels">draft <span><button data-step="p-draft" data-d="-1">−</button><span id="p-draft" data-min="0" data-max="4" data-zero="off">0</span><button data-step="p-draft" data-d="1">+</button></span></label>
     </div>
-    <button class="section" type="button" data-sec="fusion">Fusion</button>
+    <h3 class="sec-h"><button class="section" type="button" data-sec="fusion">Fusion</button></h3>
     <div class="sec-body">
+      <div class="dim small">The Laplacian pyramid of Wang &amp; Chang 2011. Every frame is cut into band-pass levels, and at each level a pixel is taken from the frame with the most region energy there — the squared coefficients summed over a small window — so the frame that is sharp at that point and that scale wins it. The coarsest level holds no detail to compare, so the top rule settles it instead.</div>
       <label class="stepper">levels <span><button data-step="p-levels" data-d="-1">−</button><span id="p-levels" data-min="0" data-max="12" data-zero="auto">0</span><button data-step="p-levels" data-d="1">+</button></span></label>
       <label class="stepper">energy radius <span><button data-step="p-energy" data-d="-1">−</button><span id="p-energy" data-min="0" data-max="4">1</span><button data-step="p-energy" data-d="1">+</button></span></label>
       <label>top rule <select id="p-top"><option value="de">deviation + entropy</option><option value="dev">deviation</option><option value="avg">average</option></select></label>
@@ -216,12 +217,13 @@
       <label><input type="checkbox" id="p-chroma"> use chroma</label>
       <label class="stepper" title="halo control: the levels coarser than the depth level do not pick their own winners — each is the mean of the frames weighed by the depth level's region energy to this power, so the coarse structure follows the frames found sharp there and a defocused copy of a bright object no longer wins the coarse levels beside it (the pyramid's halo). 1 weighs by the energy itself, higher is closer to a hard pick; off = every level picks its own winner (the paper's rule)">halo control <span><button data-step="p-halo" data-d="-1">−</button><span id="p-halo" data-min="0" data-max="8" data-zero="off">0</span><button data-step="p-halo" data-d="1">+</button></span></label>
     </div>
-    <button class="section" type="button" data-sec="depthmap">Depth map</button>
+    <h3 class="sec-h"><button class="section" type="button" data-sec="depthmap">Depth map</button></h3>
     <div class="sec-body">
+      <div class="dim small">Depth from focus: each frame's focus measure is summed onto a coarse grid, filtered along the image's own edges, and the peak down the frame axis gives every point its depth. That grid is what the Focus depth, Confidence and In focus views and the DFR rendering are built on. The winner map is a separate record — which frame won at one pyramid level — and is what ctrl+G and Save winner map read.</div>
       <label class="stepper" title="depth from focus works on a grid of 1/2^N the frame size">grid 1/2^N <span><button data-step="p-depthscale" data-d="-1">−</button><span id="p-depthscale" data-min="1" data-max="4">2</span><button data-step="p-depthscale" data-d="1">+</button></span></label>
       <label class="stepper" title="pyramid level the winner map (ctrl+G pixel lookup, Save winner map) is read from (0 = full resolution, noisy where the scene is flat)">winner map level <span><button data-step="p-depthlevel" data-d="-1">−</button><span id="p-depthlevel" data-min="0" data-max="6">2</span><button data-step="p-depthlevel" data-d="1">+</button></span></label>
     </div>
-    <button class="section" type="button" data-sec="overlay">Scale bar and text</button>
+    <h3 class="sec-h"><button class="section" type="button" data-sec="overlay">Scale bar and text</button></h3>
     <div class="sec-body">
       <div class="dim small">For the microscope: a scale bar and a caption burned into the saved stacked images, the stereo pair and the animations, and shown here on the Stack layers as they will be saved. The calibration is the size of one pixel of the frames — the camera's pixel pitch over the magnification, or what a stage micrometer measures; a TIFF written by ImageJ or as OME-TIFF carries it.</div>
       <label title="a bar of a round length (1, 2 or 5 × 10ⁿ) with that length written over it: 500 nm, 100 µm, 2.5 mm — or, with no µm per pixel given, a round count of the frames' pixels (500 px)"><input type="checkbox" id="p-ov-bar"> scale bar</label>
@@ -231,28 +233,28 @@
       <label>bar corner <select id="p-ov-barpos"><option value="br">bottom right</option><option value="bl">bottom left</option><option value="tr">top right</option><option value="tl">top left</option></select></label>
       <label title="a caption; \n breaks a line; {date} and {time} are the first frame's capture time, {frames} the frame count, {first} the first frame's name, {n} the stack's number in a batch">text <input type="text" id="p-ov-txt" placeholder="none"></label>
       <label title="the corner the text sits in; in the bar's corner it goes above the bar (below it at the top)">text corner <select id="p-ov-txtpos"><option value="bl">bottom left</option><option value="br">bottom right</option><option value="tl">top left</option><option value="tr">top right</option></select></label>
-      <label title="the font size as a share of the image height; the bar's thickness, the margins and the halo follow it, so the figure looks the same at every resolution">size <span class="val" id="p-ov-size-val">3 %</span></label>
+      <label for="p-ov-size" title="the font size as a share of the image height; the bar's thickness, the margins and the halo follow it, so the figure looks the same at every resolution">size <span class="val" id="p-ov-size-val">3 %</span></label>
       <input type="range" id="p-ov-size" min="1" max="10" step="0.5" value="3">
       <label>colour <select id="p-ov-color"><option value="white">white</option><option value="black">black</option></select></label>
-      <label title="what sits behind the ink so it reads on any background">style <select id="p-ov-style"><option value="halo">halo: a thin outline in the other colour</option><option value="box">a translucent box behind</option><option value="plain">plain</option></select></label>
+      <label title="what sits behind the ink so it reads on any background — halo: a thin outline in the other colour; box: a translucent box in the other colour behind each block; plain: nothing">style <select id="p-ov-style"><option value="halo">halo</option><option value="box">box</option><option value="plain">plain</option></select></label>
       <div class="dim small" id="ov-info">off</div>
     </div>
-    <button class="section" type="button" data-sec="results">Results</button>
+    <h3 class="sec-h"><button class="section" type="button" data-sec="results">Results</button></h3>
     <div class="sec-body">
       <div class="dim small">When a run starts, the last result's LAP, DFR and WAV images stay on as results — to compare with, to brush from and to save — up to the memory below, the oldest going first. A saved result can be loaded as one too.</div>
       <div id="kept-list"></div>
       <div class="row"><button id="kept-add" title="load a saved result (PNG, JPEG or TIFF) as one more: an earlier session's, or another program's">Load result…</button><input type="file" id="kept-file" accept=".png,.jpg,.jpeg,.tif,.tiff,.ari,.arw,.cr2,.cr3,.crm,.crw,.dcr,.dcs,.dng,.erf,.iiq,.kdc,.mef,.mos,.mrw,.nef,.nrw,.orf,.ori,.pef,.raf,.raw,.rw2,.rwl,.srw,.3fr,.fff,.x3f,.qtk,image/png,image/jpeg,image/tiff" hidden></div>
       <label class="stepper" title="the memory the kept results may take in the engine (a 45 MP image is 270 MB); over it, the oldest are let go">results kept MB <span><button data-step="p-kept" data-d="-256">−</button><span id="p-kept" data-min="0" data-max="8192">1536</span><button data-step="p-kept" data-d="256">+</button></span></label>
     </div>
-    <button class="section" type="button" data-sec="view">View</button>
+    <h3 class="sec-h"><button class="section" type="button" data-sec="view">View</button></h3>
     <div class="sec-body">
       <label class="stepper">proxy edge px <span><button data-step="p-proxy" data-d="-200">−</button><span id="p-proxy" data-min="400" data-max="3000">1400</span><button data-step="p-proxy" data-d="200">+</button></span></label>
     </div>
-    <button class="section" type="button" data-sec="gpu">GPU</button>
+    <h3 class="sec-h"><button class="section" type="button" data-sec="gpu">GPU</button></h3>
     <div class="sec-body">
       <div id="gpuinfo" class="dim small">—</div>
     </div>
-  </div>
+  </aside>
   <!-- Save step: the whole main area is one centred card (the filmstrip, canvas, panel and log
        are hidden by body.step-save), so nothing competes with the save settings -->
   <div id="savepage" hidden>
@@ -261,7 +263,7 @@
       <div id="sv-info" class="dim">—</div>
       <!-- file names are built from tokens joined with "_", all lower case; the row under the
            tokens previews the stacked image's name (renderSave) -->
-      <div class="section">File name</div>
+      <div class="section" role="heading" aria-level="3">File name</div>
       <div id="fn-tokens">
         <label class="check"><input type="checkbox" id="fn-app" checked> <span>lapstack</span></label>
         <label class="check"><input type="checkbox" id="fn-exif"> <span>EXIF date/time of the first frame</span><span class="dim small" id="fn-exif-val">—</span></label>
@@ -277,27 +279,27 @@
            and the exact name it will be saved as -->
       <div class="section sv-head"><span>Files</span><label class="check small"><input type="checkbox" id="sv-all"> <span>all</span></label></div>
       <div id="sv-files"></div>
-      <div class="section">Image format</div>
+      <div class="section" role="heading" aria-level="3">Image format</div>
       <label>format <select id="sv-format"><option value="png">PNG, input bit depth</option><option value="png8">PNG, 8-bit</option><option value="jpeg">JPEG</option><option value="dng">DNG, linear (camera space)</option></select></label>
       <div class="dim small" id="sv-format-info" hidden>—</div>
       <label id="sv-qrow" hidden>quality <span class="val" id="sv-qval">92</span></label>
       <input type="range" id="sv-quality" min="50" max="100" value="92" hidden>
       <div class="dim small">Depth and winner maps are always PNG; animations are GIF.</div>
-      <div class="section">Crop</div>
+      <div class="section" role="heading" aria-level="3">Crop</div>
       <label class="check"><input type="checkbox" id="sv-crop" checked> <span>crop to the area every aligned frame covers</span></label>
       <div class="dim small" id="sv-crop-info">—</div>
       <div class="dim small">Where a shifted, scaled or rotated frame did not reach, the aligner filled its border by repeating the edge; the stacked images, maps and animations are cut to the window with real pixels from every frame. The viewer shows it as the bright window. Off, the files keep the full frame.</div>
       <div class="row"><span class="seg"><button id="sv-cropset" title="draw the window on the image in the Stack step (C)">set a window…</button><button id="sv-cropclear" title="back to the automatic window alone">clear</button></span></div>
       <div class="dim small" id="sv-crop-user">—</div>
       <div class="dim small">A window of your own, drawn on the stacked image with the Crop button of the Stack step's viewer (or C): every file is cut to it, inside the automatic window. A project file keeps it.</div>
-      <div class="section">Scale bar and text</div>
+      <div class="section" role="heading" aria-level="3">Scale bar and text</div>
       <label class="check"><input type="checkbox" id="sv-overlay" checked> <span>burn the scale bar and text into the stacked images, the stereo pair and the animations</span></label>
       <div class="dim small" id="sv-overlay-info">—</div>
-      <div class="section">Metadata</div>
+      <div class="section" role="heading" aria-level="3">Metadata</div>
       <label class="check"><input type="checkbox" id="sv-meta" checked> <span>copy the first frame's EXIF, ICC profile and XMP into the stacked images</span></label>
       <div class="dim small" id="sv-meta-info">—</div>
       <div class="dim small">The EXIF is rebuilt with the camera, lens, exposure, date and orientation tags (MakerNote and thumbnail left out) and Software set to lapstack. PNG carries it as eXIf, iCCP and iTXt chunks, JPEG as APP1 / APP2 segments. Maps and animations get none.</div>
-      <div class="section">Animations</div>
+      <div class="section" role="heading" aria-level="3">Animations</div>
       <label>long edge <select id="an-edge"><option value="0">full resolution</option><option value="4000">4000 px</option><option value="3000">3000 px</option><option value="2000">2000 px</option><option value="1600">1600 px</option><option value="1200">1200 px</option><option value="800">800 px</option></select></label>
       <label class="stepper">every Nth frame <span><button data-step="an-step" data-d="-1">−</button><span id="an-step" data-min="1" data-max="50">1</span><button data-step="an-step" data-d="1">+</button></span></label>
       <label>speed <select id="an-fps"><option value="5">5 fps</option><option value="10" selected>10 fps</option><option value="15">15 fps</option><option value="25">25 fps</option></select></label>
@@ -307,7 +309,7 @@
       <div class="dim small" id="an-vinfo" hidden>This browser has no WebCodecs video encoder: the animations are GIFs.</div>
       <div class="dim small" id="an-info">—</div>
       <!-- synthetic stereo and rocking: the stacked image sheared by its depth map (view.rs) -->
-      <div class="section">Stereo and rocking</div>
+      <div class="section" role="heading" aria-level="3">Stereo and rocking</div>
       <label>method <select id="v3-method"><option value="shear">shear the stacked image by its depth map</option><option value="refold">refold the frames, shifted (Zerene's way)</option></select></label>
       <label>image <select id="v3-src"><option value="fused">LAP stack</option><option value="dmap">DFR stack</option><option value="wav">WAV stack</option></select></label>
       <label>stereo shift <span class="val" id="v3-shift-val">±3 %</span></label>
@@ -320,7 +322,7 @@
       <div class="dim small" id="v3-near-info">—</div>
       <div class="dim small">The depth map makes the stacked image a relief, and a view from the side is that relief sheared: each pixel slides sideways in proportion to its depth. The shift is how far the far end of the stack moves relative to the near end, as a percentage of the width (Zerene's maximum X shift; ±3 % suits most subjects, more gives a deeper but harder-to-fuse pair — for a scene <i>d</i> deep and <i>w</i> wide, a viewing angle <i>a</i> is a shift of tan(<i>a</i>) · <i>d</i> / <i>w</i>). The middle of the stack stays put. Where a near edge slides off the background, the background shows through. The pair is saved at the crop's size (each view the image's size), the rocking as a GIF at the animation size and speed, one sine cycle of the views per loop. If the depth looks inside out, the frames went back to front: untick the box.<br>The <i>shear</i> needs only the stacked image and its depth map, so it is instant, but a depth map is one surface: it cannot show what is behind a hair or a bristle. The <i>refold</i> does what Zerene does — it reads the frames again and fuses the stack once per view with every frame shifted by its index, so each view is a real LAP stack with no depth map involved. That costs one pass over the frames (as long as the run's fold) per batch of views: the stereo pair is one batch at full resolution, and a rocking sequence at the animation size fits in one batch on most GPUs. Its price is the method's halo: beside a near object, the far frames — which win there because the background is sharp in them — carry that object's defocused copy, displaced by the shift, so a soft ghost shows next to it, wider with a larger shift and a deeper scene. The file thumbnails always use the shear.</div>
       <!-- the 3D model: the stacked image as a textured relief of its depth map (mesh.rs) -->
-      <div class="section">3D model</div>
+      <div class="section" role="heading" aria-level="3">3D model</div>
       <label>format <select id="m3-format"><option value="glb">glTF binary (.glb): one file, texture inside</option><option value="obj">Wavefront OBJ + MTL + texture image: three files</option><option value="stl">binary STL: the relief alone, no texture</option></select></label>
       <label>relief <span class="val" id="m3-relief-val">25 %</span></label>
       <input type="range" id="m3-relief" min="2" max="100" step="1" value="25">
@@ -328,7 +330,7 @@
       <label>texture long edge <select id="m3-tex"><option value="0">full resolution</option><option value="8192" selected>8192 px</option><option value="4096">4096 px</option><option value="2048">2048 px</option></select></label>
       <div class="dim small" id="m3-info">—</div>
       <div class="dim small">Helicon's 3D model: the depth map makes the stacked image a relief, and the model is that relief as a mesh — a grid of vertices over the image, each raised by the depth there, with the stacked image as its texture (the LAP or DFR image chosen under <i>Stereo and rocking</i>, whose near-end switch also says which way the relief stands). The <i>relief</i> is the depth of the stack as a percentage of the image width, the one thing the depth map cannot know: measure the subject, or set it by eye. Each vertex takes the mean depth of the pixels around it, so a finer mesh follows finer detail and a coarser one is smoother; a step in depth becomes a wall between the near surface and the far one, since a relief shows nothing behind an edge. The texture is 8-bit in the image format above (JPEG at its quality, or PNG), capped at the texture long edge because many viewers refuse textures over 8192 px; the model is cropped like the other files, x runs along the width (1 unit), y up, z towards the viewer. GLB opens in Windows 3D Viewer, macOS Quick Look, Blender and any web viewer; OBJ is what Helicon writes (the browser may ask to allow the three downloads); STL is for printing and has no texture. No content credentials are attached to 3D files.</div>
-      <div class="section">Content credentials</div>
+      <div class="section" role="heading" aria-level="3">Content credentials</div>
       <label class="check"><input type="checkbox" id="cc-on"> <span>attach content credentials (C2PA)</span></label>
       <label>signed as <input type="text" id="cc-name" placeholder="your name"></label>
       <div class="dim small">A signed C2PA manifest is embedded in each saved file (<a href="https://contentcredentials.org/" target="_blank" rel="noopener">contentcredentials.org</a>). The certificate is self-signed and made in this browser: verifiers show the manifest, its assertions and the content hash as valid, and the signer as unknown. The key never leaves this browser.</div>

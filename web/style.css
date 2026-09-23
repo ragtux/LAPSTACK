@@ -10,7 +10,7 @@
    lg canvas overlays (chips, zoom bar, pane labels), xl display numbers (frame counter,
    progress mark) */
 :root { --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px; --fs-row: 14px; --fs-lg: 15px; --fs-xl: 22px; --font: 'Fira Sans', system-ui, sans-serif; --font-logo: var(--font); --font-mono: 'Fira Mono', ui-monospace, monospace;
-  --bg:#1e1e22; --panel:#26262b; --border:#3a3a42; --widget:#34343c; --accent:#3b82f6; --pop:#ff7a30; --c-source:#f0862a; --c-stack:#3b82f6; --c-depth:#22a55a; --text:#e6e6e6; --dim:#9a9aa3; --head:#b9b9c4; --glass:rgba(20,20,22,.75); --glass-border:rgba(255,255,255,.12); }
+  --bg:#1e1e22; --panel:#26262b; --border:#3a3a42; --border-strong:#737380; --widget:#34343c; --accent:#3b82f6; --pop:#ff7a30; --c-source:#f0862a; --c-stack:#3b82f6; --c-depth:#22a55a; --text:#e6e6e6; --dim:#9a9aa3; --head:#b9b9c4; --glass:rgba(20,20,22,.75); --glass-border:rgba(255,255,255,.12); }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font-family: var(--font); font-size: var(--fs-md); overflow: hidden; }
@@ -18,6 +18,14 @@ body { display: flex; flex-direction: column; }
 button { background: var(--widget); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 3px 10px; cursor: pointer; font: inherit; }
 button:hover:not(:disabled) { border-color: #666; }
 button:disabled { opacity: .4; cursor: default; }
+/* one focus ring for every control, drawn only for keyboard focus; the panel's steppers
+   move it to the whole [- value +] group (below) */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* reduced motion: the progress bar's barber pole stands still — its red/white stripes still
+   mark the running state — and the hover and toast transitions snap */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
 button.accent, button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 input { font: inherit; }
 select { background: var(--widget); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font: inherit; }
@@ -35,7 +43,7 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #cancel { min-width: 96px; }
 .menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 20; width: 320px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.5); display: flex; flex-direction: column; gap: 6px; }
 .menu .tog { justify-content: flex-start; }
-.menu label.stepper { display: flex; justify-content: space-between; align-items: center; } .menu label.stepper > span { display: inline-flex; align-items: center; gap: 4px; }
+.menu label.stepper { display: flex; justify-content: space-between; align-items: center; }
 .menu #dslab-ctl[hidden] { display: none; }
 .menu .menu-sep { border-top: 1px solid var(--border); margin: 4px 0; }
 .menu label.sel { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
@@ -153,7 +161,10 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 .panel label, .panel .row { font-size: var(--fs-row); }
 .panel .small { font-size: var(--fs-sm); line-height: 1.45; }
 .panel .section { font-size: var(--fs-xs); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--head); margin: 14px 0 4px; padding-top: 10px; border-top: 1px solid var(--border); }
-.panel > .section:first-child, #brush > .section:first-child, #brush[hidden] + .section { margin-top: 0; padding-top: 0; border-top: 0; }
+/* the heading wrapper carries no type of its own: it is there so the panel can be walked by
+   heading, and the button inside it keeps the hairline and the uppercase */
+.sec-h { margin: 0; font: inherit; }
+.panel > .section:first-child, .panel > .sec-h:first-child > .section, #brush > .sec-h:first-child > .section, #brush[hidden] + .sec-h > .section { margin-top: 0; padding-top: 0; border-top: 0; }
 /* the parameter panel's sections collapse: the heading is the toggle (a button, so it keeps the
    heading's own hairline and type) and the rows under it live in the .sec-body it hides, so a
    squished panel can be cut down to the groups in use. The collapsed set is remembered. */
@@ -163,7 +174,7 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #params button.section.collapsed::after { content: "▸"; }
 #params .sec-body { display: flex; flex-direction: column; gap: 3px; }
 #brush .sec-body { gap: 2px; }
-#params button.section.collapsed + .sec-body { display: none; }
+#params .sec-body.collapsed { display: none; }
 /* the two surfaces that scroll with a visible scrollbar (the filmstrip and the log hide theirs),
    so both get a dark one: the default is painted light over this dark chrome */
 #params, #savepage { scrollbar-width: thin; scrollbar-color: #4a4a55 transparent; }
@@ -173,11 +184,19 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 .panel label { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 8px; min-height: 28px; }
 .panel label > input, .panel label > select, .panel label > span { justify-self: end; order: 1; }
 .panel label > input[type=checkbox] { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
-.panel label.stepper > span { display: inline-flex; align-items: center; gap: 4px; }
-.panel label.stepper > span > span { min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }
-.panel .stepper button { padding: 0 8px; height: 24px; background: transparent; border-color: rgba(255,255,255,.09); color: var(--dim); }
-.panel .stepper button:hover:not(:disabled) { background: var(--widget); border-color: var(--border); color: var(--text); }
+/* a stepper is one control, not two buttons around a number: [- value +] in a single bordered
+   group, the +/- borderless inside it. The old per-button hairline sat at 1.3:1 against the
+   panel, so nothing read as clickable until hover. The value is the spinbutton (app.js gives
+   it the role, the arrow keys and the value semantics), so the ring goes round the group. */
+.panel label.stepper > span, .menu label.stepper > span { display: inline-flex; align-items: center; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--widget); overflow: hidden; }
+.panel label.stepper > span > span, .menu label.stepper > span > span { min-width: 42px; padding: 0 2px; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }
+.panel .stepper button, .menu .stepper button { padding: 0 8px; height: 24px; background: transparent; border: 0; border-radius: 0; color: var(--dim); }
+.panel .stepper button:hover:not(:disabled), .menu .stepper button:hover:not(:disabled) { background: rgba(255,255,255,.08); color: var(--text); }
+.panel label.stepper > span:has(> span:focus-visible), .menu label.stepper > span:has(> span:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
+.panel label.stepper > span > span:focus-visible, .menu label.stepper > span > span:focus-visible { outline: none; }
 .panel select { height: 24px; padding: 0 4px; }
+/* a select never widens its row past the panel: a long option is cut, not scrolled to */
+.panel label > select { max-width: 176px; }
 /* log strip: [vertical toolbar + status bar][log]; the strip is panel gray like the rest of the
    chrome and the log itself keeps its black well; collapsed leaves just the toolbar row, so all
    gray, and the status bar stretches out along it */

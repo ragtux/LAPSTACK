@@ -45,8 +45,15 @@ try { if (localStorage.getItem('lapstack.keys') === '0') setKeysCollapsed(true);
 // so a short window can be cut down to the groups in use; the collapsed set is remembered
 const collapsedSecs = new Set((() => { try { return JSON.parse(localStorage.getItem('lapstack.sections') || '[]'); } catch { return []; } })());
 for (const h of document.querySelectorAll('#params button.section')) {
+  // the heading sits in an <h3> so the panel can be walked by heading; the rows are the .sec-body
+  // after that wrapper. aria-label keeps the CSS caret (::after) out of the button's name.
+  const body = h.parentElement.nextElementSibling;
+  body.id = `sec-${h.dataset.sec}`;
+  h.setAttribute('aria-controls', body.id);
+  h.setAttribute('aria-label', h.textContent);
   const set = (on) => {
-    h.classList.toggle('collapsed', on); h.setAttribute('aria-expanded', String(!on));
+    h.classList.toggle('collapsed', on); body.classList.toggle('collapsed', on);
+    h.setAttribute('aria-expanded', String(!on));
     h.title = on ? `show ${h.textContent.toLowerCase()}` : `hide ${h.textContent.toLowerCase()}`;
     collapsedSecs[on ? 'add' : 'delete'](h.dataset.sec);
   };
@@ -142,7 +149,12 @@ function stepVal(id) { const el = $(id); return el.textContent === el.dataset.ze
 function setStep(id, v) {
   const el = $(id); const lo = Number(el.dataset.min), hi = Number(el.dataset.max);
   v = Math.min(hi, Math.max(lo, Number.isFinite(v) ? v : lo)); // never let a stepper land on NaN and stick there
-  el.textContent = (v === 0 && el.dataset.zero) ? el.dataset.zero : String(v);
+  const word = (v === 0 && el.dataset.zero) ? el.dataset.zero : String(v);
+  el.textContent = word;
+  // the value element is the control (role=spinbutton, below), so the number it shows and the
+  // number it reports have to move together: a screen reader reads valuenow as it changes
+  el.setAttribute('aria-valuenow', String(v));
+  if (word === String(v)) el.removeAttribute('aria-valuetext'); else el.setAttribute('aria-valuetext', word);
 }
 function applyParams(p) {
   if (!p) return;
@@ -746,6 +758,7 @@ function overlayChanged(save = true) {
 function renderOverlayInfo() {
   const p = overlayParams();
   $('p-ov-size-val').textContent = `${$('p-ov-size').value} %`;
+  $('p-ov-size').setAttribute('aria-valuetext', `${$('p-ov-size').value} %`);
   // the calibration the first frame carries (ImageJ, OME-TIFF), read by the run
   const m = st.result && st.result.meta, cal = m && m.pixel_um > 0 ? +m.pixel_um.toPrecision(6) : 0, f0 = st.files[0];
   const el = $('ov-cal'); el.textContent = '';
@@ -2289,6 +2302,7 @@ const sliderFromSize = (px) => Math.round(100 * Math.log(px / 2) / Math.log(1000
 function setBrush(size, hard) {
   R.size = Math.min(2000, Math.max(2, Math.round(size))); R.hard = Math.min(0.95, Math.max(0, Math.round(hard * 100) / 100));
   $('br-size').textContent = `${R.size} px`; $('br-hard').textContent = R.hard.toFixed(2);
+  $('br-size-in').setAttribute('aria-valuetext', `${R.size} px`); $('br-hard-in').setAttribute('aria-valuetext', R.hard.toFixed(2));
   $('br-size-in').value = String(sliderFromSize(R.size)); $('br-hard-in').value = String(Math.round(R.hard * 100));
   saveParams(); drawSoon();   // the wheel and the sliders both run ahead of the frame rate: one redraw a frame
 }
@@ -2860,6 +2874,10 @@ $('lut-gray').addEventListener('click', () => { st.turbo = false; saveParams(); 
 $('lut-turbo').addEventListener('click', () => { st.turbo = true; saveParams(); updateTabs(); draw(); });
 const flip = (on) => { st.flipped = on; draw(); };
 $('flip').addEventListener('pointerdown', () => flip(true)); $('flip').addEventListener('pointerup', () => flip(false)); $('flip').addEventListener('pointerleave', () => flip(false));
+// hold to flip from the keyboard too: the button is focusable, and Space over a focused button now
+// activates it rather than reaching the document (the keyup below lets it go)
+$('flip').addEventListener('keydown', (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); flip(true); } });
+$('flip').addEventListener('keyup', (e) => { if (e.key === ' ' || e.key === 'Enter') flip(false); });
 // Keep the selected thumb near the middle of the filmstrip while scrubbing
 // (keys, wheel, slider), so frames above and below stay in view and the strip
 // scrolls under the selection instead of the selection running off-screen.
@@ -2883,6 +2901,13 @@ for (const id of ['scrub', 'filmstrip']) $(id).addEventListener('wheel', (e) => 
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox' && e.target.type !== 'range') return;
   if (e.target.tagName === 'SELECT') return;
+  // a focused control owns the keys it acts on, so they do not also reach the app: the arrows on a
+  // slider or a spinbutton moved the control *and* scrubbed a frame, and Space over a checkbox was
+  // swallowed by the compare flip. The letter shortcuts still pass through, as they did.
+  if ((e.target.type === 'range' || e.target.getAttribute('role') === 'spinbutton')
+    && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) return;
+  if (e.target.type === 'checkbox' && (e.key === ' ' || e.key === 'Delete')) return;
+  if (e.target.tagName === 'BUTTON' && (e.key === ' ' || e.key === 'Enter')) return;   // a focused button is activated, not stepped over
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); sendHistory(e.shiftKey ? 'redo' : 'undo'); return; }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); sendHistory('redo'); return; }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') {
