@@ -123,7 +123,7 @@ browser searches.
 
 **Alignment model** (`--align-model M`; `align::AlignModel`): how much a
 frame may be deformed to land on the previous one. `similarity` (the
-default) is shift, scale and rotation — Zerene's and Helicon's model, and
+default) is shift, scale and rotation — the usual model, and
 what a focus rail or a focus ring produces: the image breathes, shifts and
 turns a little. `affine` adds an aspect ratio and a shear; `projective`
 adds the two perspective terms, for a camera that tilted against the
@@ -158,12 +158,12 @@ weighted average and the slabs decode and warp the frames again with the
 transforms found, as they already did without alignment.
 
 **Interpolation** (`--interpolation K`; `align::Interp`): the kernel each
-aligned frame is resampled with once its transform is found — the choice
-Zerene Stacker and Helicon Focus offer. `nearest` (the nearest source pixel:
+aligned frame is resampled with once its transform is found — the choice a
+focus stacker usually offers. `nearest` (the nearest source pixel:
 nothing blurred, nothing rung, and sub-pixel shifts land jagged — for stacks
 already aligned to the pixel, or to see the pixels as shot), `bilinear`
 (soft), `bicubic` (Keys' cubic convolution, a = −0.5), `spline4x4`
-(Panorama Tools' spline16, Zerene's default and ours), `spline6x6` (spline36,
+(Panorama Tools' spline16, our default), `spline6x6` (spline36,
 sharper, a little ringing at hard edges) and `lanczos3` (three lobes, the
 sharpest and the most ringing). All are separable and interpolating (a
 pixel-centred sample comes back as it is; the weights sum to 1, Lanczos's
@@ -174,7 +174,7 @@ frames are read, not where they land. The crop below keeps each kernel's own
 support out (nearest 0 px, bilinear 1, the 4-taps 2, the 6-taps 3), so a
 wider kernel loses a pixel or two more at the border.
 
-**Slabs** (`--slabs SIZE[:OVERLAP]`, `--slab-dir DIR`): Zerene's slabbing
+**Slabs** (`--slabs SIZE[:OVERLAP]`, `--slab-dir DIR`): slabbing
 for the native path — after the result, every run of SIZE consecutive
 frames overlapping by OVERLAP (default 2) is fused on its own with the same
 settings over the same aligned, equalised frames, cropped like the result,
@@ -193,8 +193,8 @@ spline4x4 — is kept out); `--no-crop` keeps the full frame.
 **Batch runs and stack splitting** (`batch.rs`; `--split RULE`, `--dry-run`):
 a directory among the inputs stands for the image files in it (PNG, JPEG,
 TIFF, in natural order, `f2` before `f10`), and `--split` cuts the frame list
-into stacks that are then run one after the other with the same settings —
-Zerene's batch and Helicon's split: `count:N` makes a stack of every N frames,
+into stacks that are then run one after the other with the same settings.
+`count:N` makes a stack of every N frames,
 `gap:SECONDS` starts a new one wherever the capture time jumps by more than
 that (a rail shoots every second or two and a pause between subjects is tens
 of seconds; the time is EXIF DateTimeOriginal with its sub-seconds, else
@@ -240,8 +240,8 @@ implementation on wasm32 and panics there, so a shim reads zero on wasm
 (`vendor/rawler/LAPSTACK-PATCH.md` says how to move to a newer rawler);
 without the feature a raw file is refused.
 
-**Linear DNG output** (`dng.rs`; `-o stacked.dng`): Helicon Focus's "RAW in,
-DNG out". With a `.dng` output the raws are not developed to sRGB: each is
+**Linear DNG output** (`dng.rs`; `-o stacked.dng`): raw in, DNG out. With a
+`.dng` output the raws are not developed to sRGB: each is
 decoded to the camera's own linear space — black and white levels, demosaic,
 the sensor's crop, turned by its orientation, and nothing else
 (`raw::develop_linear`) — and the stack is fused in a *look* space made from
@@ -294,7 +294,7 @@ covers; a window outside that area stops the run.
 
 **Weighted average** (`wav.rs`; `--wav`, `--wav-power P`, `--wav-smooth R`,
 `--wav-gate G`):
-Helicon Focus's method A as a second image, `<stem>_wav.<ext>` — every
+a second image, `<stem>_wav.<ext>` — every
 frame's pixels averaged with weights that follow their local contrast, so
 the frame in focus at a pixel counts most and the rest fade in with their
 sharpness. No pixel is ever picked outright: the seams and halos a
@@ -306,9 +306,9 @@ stacks; the pyramid is the sharper tool, and the browser's retouch brushes
 one into the other. The contrast is the depth pass's focus measure (the
 ring difference filter on the luma, so `--wav` needs the depth-from-focus
 pass, not `--depth winner`), block-averaged to the depth pass's working
-grid and box-smoothed there by `--wav-smooth` grid pixels (Helicon's
-"smoothing", default 3; the depth pass aggregates its slices the same way
-before it takes their statistics): a cell's pick is its region's — one
+grid and box-smoothed there by `--wav-smooth` grid pixels (default 3; the
+depth pass aggregates its slices the same way before it takes their
+statistics): a cell's pick is its region's — one
 cell's measure strays over the gate below by chance and picks a noisy frame
 where a flat area should average them all, and along a silhouette, where
 one frame holds the edge and another the blurred halo over it, neighbouring
@@ -359,8 +359,8 @@ per frame), *equalise brightness* in the parameter panel, and each filmstrip
 entry shows its gain.
 
 **Dust map** (`dust.rs`; `--dust-map FILE`, `--dust-threshold PCT`,
-`--dust-margin PX`, `--dust-mode fill|flat`, `--save-dust-map PATH`): Helicon
-Focus's dust map. Sensor dust shows in every frame at the same place as a
+`--dust-margin PX`, `--dust-mode fill|flat`, `--save-dust-map PATH`): the dust
+map. Sensor dust shows in every frame at the same place as a
 soft dark spot, and the stack keeps it — worse, the region-energy rule takes
 the spot's edge for detail and picks it, so the spot comes out sharper than
 in any frame. A frame of an evenly lit, featureless surface shot out of
@@ -378,7 +378,7 @@ under 16 px is noise, and a blob wider than a quarter of the frame is not
 dust and is reported. The spots are then taken out of every frame **as
 decoded, before alignment** — the dust is fixed on the sensor, and a fixed
 pattern in every frame is exactly what pulls a registration towards zero
-shift. `fill` (the default, Helicon's way) interpolates each spot from its
+shift. `fill` (the default) interpolates each spot from its
 surroundings by pull-push (Gortler et al. 1996: the window's pyramid is
 built with the dust weighted out, and on the way down every hole takes the
 coarser level's value), a smooth patch that meets its edges; `flat` divides
@@ -446,13 +446,13 @@ app draws the same patches (below).
 **Synthetic stereo and rocking** (`view.rs`; `--stereo PCT[:LAYOUT]`,
 `--rocking PCT[:N]`, `--far-first`): the depth map makes the result a relief,
 and a view from the side is that relief sheared — every pixel slides
-sideways in proportion to its depth. Zerene gets the same picture by
-shifting each frame by its index before stacking; Helicon projects the
-textured 3D model it builds from the depth map; lapstack shears the stacked
-image and its depth map in one pass, with Zerene's parameter: the far end of
-the stack moves PCT % of the width relative to the near end (their "maximum
-X shift"; ±3 % suits most subjects — for a scene d deep and w wide a viewing
-angle a is tan(a)·d/w), the middle of the stack staying put. The shear is a
+sideways in proportion to its depth. The same picture can be had by shifting
+each frame by its index before stacking, or by projecting a textured 3D
+model built from the depth map; lapstack shears the stacked image and its
+depth map in one pass: the far end of the stack moves PCT % of the width
+relative to the near end (the maximum X shift; ±3 % suits most subjects —
+for a scene d deep and w wide a viewing angle a is tan(a)·d/w), the middle
+of the stack staying put. The shear is a
 forward warp per row: consecutive samples less than 2 px apart in the view
 form a patch of surface, rasterised with a nearness test so a near edge
 slides over the background; a larger gap is a depth discontinuity, and the
@@ -485,8 +485,8 @@ the other way, and the sign says nothing without knowing the lens. The
 symptom of the wrong choice is a relief that looks inside out; the run logs
 which cue decided.
 
-**3D model** (`mesh.rs`; `--mesh glb,obj,stl`): Helicon Focus's 3D model —
-the depth map makes the result a relief, and the model is that relief as a
+**3D model** (`mesh.rs`; `--mesh glb,obj,stl`): the depth map makes the
+result a relief, and the model is that relief as a
 mesh, a grid of vertices over the image (`--mesh-grid N` along the long
 edge, default 1000; each vertex takes the mean depth of the cell of pixels
 around it, so the mesh is smooth at its own scale; each cell is cut along the
@@ -498,13 +498,13 @@ the depth of the stack is the one thing the depth map cannot know, so
 measure the subject or set it by eye; `--far-first` applies). `glb` writes
 `<stem>.glb`, a self-contained glTF 2.0 binary with the texture embedded
 (Windows 3D Viewer, macOS Quick Look, Blender, every web viewer); `obj`
-writes `<stem>.obj` + `<stem>.mtl` + `<stem>_texture.jpg`, what Helicon
-writes; `stl` writes the geometry alone as binary STL for printing. The
+writes `<stem>.obj` + `<stem>.mtl` + `<stem>_texture.jpg`, plain text most
+tools read; `stl` writes the geometry alone as binary STL for printing. The
 texture is 8-bit, JPEG (quality 92) or PNG, capped at `--mesh-texture
 EDGE[:jpeg[:Q] | png]` px on the long edge (default 8192, the largest most
 viewers accept). A depth discontinuity becomes a wall between the near
 surface and the far one — a heightfield has no way to show what is behind
-an edge, as in Helicon's viewer.
+an edge.
 
 `--save-depth` writes the depth map produced by the depth-from-focus pass
 below (`--depth winner` instead reports the raw winning frame index read
@@ -770,7 +770,7 @@ long edge or a frame step for those. Frames are quantised (median cut,
 Floyd–Steinberg) and LZW-encoded in the worker (`crates/lapstack-web/src/gif.rs`),
 the bytes streaming back so the file never sits in wasm memory whole.
 The section's *format* makes the same animations **videos** instead —
-**MP4 (H.264)** or **WebM (VP9)**, Helicon's animation export: each frame is
+**MP4 (H.264)** or **WebM (VP9)**: each frame is
 drawn as for the GIF, encoded by the browser's own encoder (WebCodecs
 `VideoEncoder`: H.264 High, Main or Constrained Baseline at the level the
 size needs, or VP9 profile 0, VP8 failing that — whichever the browser
@@ -797,7 +797,7 @@ view per call (`view_rgba` for the GIF's frames at the animation size,
 `view_stereo` for the pair, saved at the crop's size in the chosen format and
 bit depth with the metadata). The **Stereo pair** still and the **Rocking**
 GIF are rows of the file list like the others. The section's *method*
-picks the shear or the **refold**, Zerene's own way: the frames are read
+picks the shear or the **refold**: the frames are read
 again and the stack is fused once per view with every frame shifted
 sideways in proportion to its index (`Refold` in `lapstack-web/src/lib.rs`:
 `refold_begin`, one `refold_pass_begin` / `refold_push` per frame /
@@ -875,8 +875,8 @@ is not shown as a layer; it drives the ctrl+G pixel lookup and has its own
 save button.
 
 **In focus** (the second Depth layer) is the scrubbed frame's own pixels,
-in colour, showing only the parts of it the result uses — Helicon Focus's
-"source map": every pixel is darkened by how far, in frames, the depth map
+in colour, showing only the parts of it the result uses — a source map:
+every pixel is darkened by how far, in frames, the depth map
 puts it from that frame (full brightness within ±0.5 frames, 8 % beyond
 ±0.75, linear between), so the plane of focus stands out with a crisp edge
 and scrubbing sweeps it through the scene. The out-of-focus part keeps its
@@ -901,7 +901,7 @@ the right; DFR has its own layer under Stack, is the retouch target while
 it is the shown layer, and can be the saved image (*result*). On the 25 × 45 MP stack the second pass
 adds 6.7 s to a 27.7 s run.
 
-*From slabs* in the same menu is Zerene's slabbing as a rendering mode:
+*From slabs* in the same menu is slabbing as a rendering mode:
 the stack is cut into slabs of *slab size* frames overlapping by
 *overlap* (defaults 10 and 2), each slab is fused on its own with the
 run's settings (LAP within the slab, the same fold as the retouch slab)
@@ -1000,8 +1000,8 @@ the run's size (below); or, after a
 *Run LAP + DFR*, the **other stacked result** (the panel's *Source* section,
 or `S` to cycle): DFR while LAP is painted, LAP while DFR is, so the
 pyramid's fine detail can be brushed into the depth-map rendering and its
-smooth areas back into the pyramid image, the way Zerene retouches PMax into
-DMap. A slab is Zerene's slab made on demand: the scrubbed frame and its
+smooth areas back into the pyramid image. A slab is fused on demand: the
+scrubbed frame and its
 neighbours (*slab ± frames*, default 5) fused on their own, with the run's
 registration, brightness gains and fusion settings, so the brush copies a
 thick plane of focus instead of one frame's sliver of it — on a deep stack
@@ -1037,7 +1037,7 @@ sends back the exact patch, and Save writes the retouched image. Undo
 history is capped at ~600 MB of patches.
 
 **Results** (the panel's *Results* section): a result stays on past its run,
-the way Helicon Focus keeps every run's output in a list. When the next run
+kept in a list with the other runs' output. When the next run
 starts — or the frame list changes under the result — its LAP and DFR images
 become *kept results*: the engine takes the 16-bit masters out of the run
 (`keep` in `lapstack-web/src/lib.rs`), the page keeps the display copies, and
@@ -1045,7 +1045,7 @@ each is named after its run (*run 3 · LAP*, its frames, settings and time in
 the tooltip). A kept result is a layer of the **Stack** group, so two runs
 with different settings can be compared with *vs*, swipe or side by side; a
 kept result of the run's size is a brush source for the retouch (*Result* in
-the brush's *Source* section, `S` cycles to it), the way Zerene retouches
+the brush's *Source* section, `S` cycles to it), so the retouch can paint
 from any saved output; and each is a row of the Save step, cut to its own
 crop window and carrying its own metadata (`encode` takes `kept:ID`). *Load
 result…* takes a saved result — an earlier session's, the CLI's, another
@@ -1200,8 +1200,8 @@ sends).
 
 ## Lightroom Classic plugin (`lightroom/`)
 
-`lightroom/lapstack.lrplugin` is the round trip Helicon Focus and Zerene
-Stacker offer from Lightroom: the frames of a stack go out of the catalogue
+`lightroom/lapstack.lrplugin` is the usual focus-stacking round trip from
+Lightroom: the frames of a stack go out of the catalogue
 to the `lapstack` CLI and the stacked image comes back into it. Add the
 folder in File › Plug-in Manager and set the path to the lapstack binary and
 the stacking settings in its section (output format tif / png / dng, a name

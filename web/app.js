@@ -714,7 +714,7 @@ $('kept-add').addEventListener('click', () => $('kept-file').click());
 $('kept-file').addEventListener('change', (e) => { for (const f of [...e.target.files]) loadKeptFile(f); e.target.value = ''; });
 document.querySelectorAll('[data-step="p-kept"]').forEach((b) => b.addEventListener('click', () => { trimKept(); renderKept(); }));
 // ---------- dust map ----------
-// The dust map (lapstack-core's dust.rs, Helicon's dust map): a frame of an evenly lit blank
+// The dust map (lapstack-core's dust.rs): a frame of an evenly lit blank
 // surface, whose spots the engine takes out of every frame it decodes — the run, the renders,
 // the slabs, the source view. The engine keeps what it needs to find the spots again when the
 // settings change (no file needed); the page keeps the file for the project, and shows the map
@@ -1340,7 +1340,7 @@ const OUTPUTS = [
 // the kept results as rows of the Save step, after the run's own outputs
 const keptOutput = (k) => ({ id: keptId(k), token: k.kind === 'file' ? k.label : `run${k.run}-${k.kind === 'dmap' ? 'dfr' : k.kind === 'wav' ? 'wav' : 'lap'}`, kind: keptId(k), name: k.label, desc: `kept result: ${keptSummary(k)}`, avail: () => true, kept: k });
 const saveRows = () => OUTPUTS.concat(st.kept.map(keptOutput));
-const MESH_DESC = { glb: 'glTF binary: the stacked image as a textured relief of its depth map, one file', obj: 'Wavefront OBJ + MTL + texture image: the textured relief as Helicon writes it, three files', stl: 'binary STL: the relief alone, no texture, for printing' };
+const MESH_DESC = { glb: 'glTF binary: the stacked image as a textured relief of its depth map, one file', obj: 'Wavefront OBJ + MTL + texture image: the textured relief in plain text, three files', stl: 'binary STL: the relief alone, no texture, for printing' };
 const MESH_MIME = { glb: 'model/gltf-binary', obj: 'model/obj', mtl: 'model/mtl', stl: 'model/stl', jpg: 'image/jpeg', png: 'image/png' };
 const SV = { sel: new Set(['lap']), exif: null, exifFor: null, exporting: false, cancel: false, dir: null, lastSaved: [] };   // dir: the folder saved files go to (File System Access), null = downloads
 const SK = 'lapstack.save';
@@ -1521,7 +1521,7 @@ function meshPlan() {
   const size = m.format === 'stl' ? 84 + nt * 50 : m.format === 'obj' ? nv * 78 + nt * (9 * digits + 9) + tex : nv * 32 + nt * 12 + tex;
   return { nx, ny, nv, nt, tw, th, size };
 }
-// Zerene's way: the stack folded again, each frame shifted by its index, one accumulator per view
+// The refold: the stack folded again, each frame shifted by its index, one accumulator per view
 // (see Refold in lib.rs); the frames are read again. The views wait in the engine until refold_end.
 function refold(shifts, w, h) { const v = v3(); return call({ type: 'refold', files: st.files, shifts, near: v.near, w, h }); }
 // one view of the stacked image, sheared by the engine at w×h (view.rs): {w, h, rgba}. `shift` is the
@@ -2061,7 +2061,7 @@ $('slice').addEventListener('change', (e) => { st.slice = e.target.checked; save
 
 // ---------- in focus ----------
 // The scrubbed frame's real pixels, showing only the parts of it the result
-// uses (Helicon's "source map"): each pixel is weighted by how far, in frames,
+// uses (a source map): each pixel is weighted by how far, in frames,
 // the depth map puts it from the frame — w = 1 within ±FOCUS_W0 frames, 0
 // beyond ±FOCUS_W1, linear between — so the plane of focus stands out with a
 // crisp edge and scrubbing sweeps it through the scene. The out-of-focus part
@@ -2244,7 +2244,7 @@ async function onSource(m) {
 // the worker dropped a request that a newer one had superseded; ask again for what is on screen now
 function onSourceSkipped(m) { if (R.loading === m.index) R.loading = -1; if (R.prefetch === m.index) R.prefetch = -1; ensureSource(); updateTabs(); }
 // ---------- the slab brush source ----------
-// Zerene's slabs, made on demand: the frames within ±(slab ± frames) of the scrubbed
+// Slabs, made on demand: the frames within ±(slab ± frames) of the scrubbed
 // one, fused on their own by the worker with the run's registration, gains and fusion
 // settings, so the brush copies a thick plane of focus rather than one frame's sliver.
 // One slab is held at a time (a full-res canvas here, the 16-bit master in the worker);
@@ -2301,8 +2301,9 @@ function slabLabel() {
 const target = () => ((st.view === 'dmap' || st.view === 'wav') && haveKind(st.view) ? st.view : 'fused');
 const targetCanvas = () => st.result && st.result[target()];
 // The brush source: the scrubbed frame ('source'), the slab around it ('slab'), or the
-// other stacked result — DFR while LAP is painted, LAP while DFR is — the way Zerene
-// brushes PMax detail into a DMap. That one needs both results, so without a depth-map
+// other stacked result — DFR while LAP is painted, LAP while DFR is, so the pyramid's
+// fine detail can be brushed into the depth-map rendering. That one needs both results,
+// so without a depth-map
 // rendering the choice falls back to the frame. The source is what the right pane shows
 // (updateTabs pins st.cmp to it).
 // The results on offer as a brush source ('result', R.result the one chosen): the run's

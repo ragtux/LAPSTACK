@@ -2,7 +2,7 @@
 // INTERNAL USE ONLY
 
 //! The stacked image as a 3D model: a textured heightfield from the depth
-//! map, what Helicon Focus's "3D model" export makes.
+//! map.
 //!
 //! The depth map gives every pixel a position along the stack, so the result
 //! is a relief — a surface over the image plane with the stacked image as its
@@ -11,8 +11,8 @@
 //! the cell of pixels around it, so the mesh is smooth at its own scale) and
 //! triangulates it, each cell cut along the diagonal with the smaller depth
 //! difference so a ridge or an edge is not stepped. A depth discontinuity
-//! becomes a steep wall between the near surface and the far one, as in
-//! Helicon's viewer; a heightfield has no way to show what is behind it.
+//! becomes a steep wall between the near surface and the far one; a
+//! heightfield has no way to show what is behind it.
 //!
 //! Coordinates are right-handed with the image's width as the unit: x runs
 //! along the width (−0.5 … 0.5), y up the height (±0.5 · h/w), z out of the
@@ -23,8 +23,8 @@
 //!
 //! Writers: [`glb`] (glTF 2.0 binary, one self-contained file with the
 //! texture embedded — the format every current viewer and Blender open),
-//! [`obj`] + [`mtl`] (Wavefront, the texture as a file beside it, what
-//! Helicon writes) and [`stl`] (binary, geometry only, for printing).
+//! [`obj`] + [`mtl`] (Wavefront, the texture as a file beside it, plain
+//! text most tools read) and [`stl`] (binary, geometry only, for printing).
 
 use crate::align::Rect;
 use crate::view::{self, Sample};

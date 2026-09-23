@@ -1,7 +1,7 @@
 # lapstack desktop — the browser app as an application
 
 `desktop/` wraps the browser app in `web/` in an [Electron](https://www.electronjs.org/)
-window, so lapstack opens like Zerene Stacker or Helicon Focus do: one
+window, so lapstack opens like a desktop application: one
 application, no browser profile to set up and no launcher script. Electron
 carries its own Chromium, and WebGPU runs in it on Linux, Windows and macOS
 with the switches `web/chrome.sh` passes to Chrome. Nothing of the app

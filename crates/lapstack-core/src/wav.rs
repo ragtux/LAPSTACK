@@ -1,7 +1,7 @@
 // Copyright (c) 2026 RAGTUX LLC
 // INTERNAL USE ONLY
 
-//! The weighted average — Helicon Focus's method A: every frame's pixels are
+//! The weighted average: every frame's pixels are
 //! averaged with weights that follow their local contrast, so the frame in
 //! focus at a pixel counts most and the rest fade in with their sharpness. No
 //! pixel is ever picked outright: the seams and halos of a winner-take-all
@@ -36,7 +36,7 @@
 //! cell to the next — and on the CPU and the GPU differently.
 //! `power` 1 is plain contrast weighting, higher a keener pick of the sharpest
 //! frame. The contrast is box-smoothed on the grid before the cut (`smooth`,
-//! in grid pixels — Helicon's "smoothing"; the depth pass aggregates its
+//! in grid pixels; the depth pass aggregates its
 //! slices the same way before it takes their statistics): a cell's pick is a
 //! region's, not its own — one cell's measure strays over the gate by chance
 //! and picks one noisy frame where a flat area should average them all, and

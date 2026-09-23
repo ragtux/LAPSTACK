@@ -155,7 +155,7 @@ async function handleCall(m) {
       .map((f) => ({ name: f.name, bytes: f.bytes.buffer }));
     post({ type: 'mesh', rid: m.rid, files }, files.map((f) => f.bytes));
   } else if (m.type === 'refold') {
-    // Zerene-style synthetic stereo: the stack folded again (m.files, in frame order), each
+    // Refold synthetic stereo: the stack folded again (m.files, in frame order), each
     // frame shifted by its index, into one accumulator per view in m.shifts, at about m.w×m.h
     // (0 = full resolution). As many views per pass over the frames as the GPU budget allows;
     // progress goes to the page as 'refold-progress'. The views stay in the engine until
@@ -314,7 +314,7 @@ async function handle(m) {
         const r = await engine.render_finish(false);
         post({ type: 'done2', w: r.w, h: r.h, rgba: r.rgba.buffer, ms: performance.now() - t1 }, [r.rgba.buffer]);
       }
-      // optional third image: the weighted average (Helicon's method A) — the frames decoded
+      // optional third image: the weighted average — the frames decoded
       // once more, each weighed by its contrast (the depth pass's focus measure) into one average
       if (m.params.render_wav) {
         const t2 = performance.now();

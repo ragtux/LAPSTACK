@@ -2,8 +2,8 @@
 
 `lapstack.lrplugin` sends the frames of a focus stack out of the catalogue to
 the `lapstack` command-line tool and brings the stacked image back into it,
-stacked with the first frame — the round trip Helicon Focus and Zerene Stacker
-offer. It needs Lightroom Classic 6 or later and a `lapstack` binary
+stacked with the first frame — the usual focus-stacking round trip. It needs
+Lightroom Classic 6 or later and a `lapstack` binary
 (`cargo build --release` in this repository; `--features gpu` for the CUDA
 options).
 

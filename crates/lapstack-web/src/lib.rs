@@ -203,7 +203,7 @@ struct Run {
     /// Depth-map rendering (second pass): frames folded so far, and the result.
     render_count: usize,
     dmap_rgb16: Option<Vec<u16>>,
-    /// The weighted average (`render_push` in its wav mode), Helicon's method A.
+    /// The weighted average (`render_push` in its wav mode).
     wav_rgb16: Option<Vec<u16>>,
     /// The slabbed depth-map rendering in progress (`render_slabs_begin`).
     srender: Option<SlabRender>,
@@ -284,7 +284,7 @@ struct ViewBase {
     z: Option<Vec<u16>>,
 }
 
-/// Zerene-style synthetic stereo (`Engine::refold_*`): the stack folded
+/// Refold synthetic stereo (`Engine::refold_*`): the stack folded
 /// again, every frame shifted sideways in proportion to its index, into one
 /// accumulator per view — at full resolution for a stereo pair, at the
 /// animation's size for a rocking sequence (each warped frame is
@@ -1307,7 +1307,7 @@ impl Engine {
     /// decoded again and warped with the run's registration, into the
     /// accumulator with weight `1 − |index − depth|` per pixel. The first call
     /// starts the pass. Returns {index, ms}.
-    /// `wav`: the weighted average instead (Helicon's method A, twin of core `wav.rs`):
+    /// `wav`: the weighted average instead (twin of core `wav.rs`):
     /// the re-warped frame is weighed by its contrast above the noise floor — the depth
     /// pass's focus measure on the working grid, box-smoothed by `smooth` grid pixels,
     /// less (1 + `gate`) × the least contrast any frame showed at the cell, raised to
@@ -1362,7 +1362,7 @@ impl Engine {
         Ok(o.into())
     }
 
-    /// Slabbed depth-map rendering (Zerene's slabbing, second pass): the
+    /// Slabbed depth-map rendering (second pass): the
     /// stack is cut into slabs of `size` frames overlapping by `overlap`,
     /// each is fused on its own (`slab_begin` / `slab_push`, LAP within the
     /// slab) and `render_slab_finish` blends the collapsed slab in with
@@ -1558,7 +1558,7 @@ impl Engine {
 
     /// Retouch: start a slab — the frames `lo..=hi` fused on their own, with
     /// the run's registration, brightness gains and fusion parameters — the
-    /// brush source with a thick plane of focus (Zerene's slabs, made on
+    /// brush source with a thick plane of focus (slabs made on
     /// demand: one at a time, around the scrubbed frame, instead of a batch
     /// of files). It reuses the run's accumulator, which is free once the
     /// result is read back: the best-energy planes are reset here,

@@ -4,7 +4,7 @@
 // Metadata pass-through: the EXIF, ICC profile and XMP of the first frame,
 // read out of its JPEG / PNG / TIFF and written into the stacked image's file,
 // so the result keeps the camera, lens, exposure and colour information of the
-// stack it came from (Helicon Focus and Zerene Stacker do the same).
+// stack it came from (as other focus stackers do).
 //
 // EXIF is a TIFF structure (byte-order mark, IFD0, and the Exif / GPS /
 // Interoperability sub-IFDs). It is never copied verbatim: `rebuild` reads the

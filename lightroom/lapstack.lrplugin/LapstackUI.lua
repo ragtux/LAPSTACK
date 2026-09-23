@@ -58,7 +58,7 @@ function M.rows(f, bindTo)
             f:static_text { title = 'halo control' },
             f:edit_field { value = bind 'lapstack_halo', bind_to_object = bindTo, width_in_chars = 3, min = 0, max = 8, precision = 0, increment = 1,
                            tooltip = '--halo-control: 0 = off, 1 = weigh the coarse levels by the guide\'s energy, up to 8 = a hard pick' },
-            f:checkbox { title = 'weighted average too', value = bind 'lapstack_wav', bind_to_object = bindTo, tooltip = '--wav: Helicon\'s method A as <stem>_wav' },
+            f:checkbox { title = 'weighted average too', value = bind 'lapstack_wav', bind_to_object = bindTo, tooltip = '--wav: the weighted average as <stem>_wav' },
             f:checkbox { title = 'depth map too', value = bind 'lapstack_depth', bind_to_object = bindTo, tooltip = '--save-depth: <stem>_depth.png' },
             f:checkbox { title = 'CUDA', value = bind 'lapstack_gpu', bind_to_object = bindTo, tooltip = '--gpu --gpu-align: a build with the gpu feature and an NVIDIA card' }),
         row('extra options:',

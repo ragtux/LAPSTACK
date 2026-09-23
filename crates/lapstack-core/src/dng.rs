@@ -1,7 +1,7 @@
 // Copyright (c) 2026 RAGTUX LLC
 // INTERNAL USE ONLY
 
-//! Linear DNG output — Helicon Focus's "RAW in, DNG out": the stacked image
+//! Linear DNG output — raw in, DNG out: the stacked image
 //! written as a demosaiced, linear, camera-space DNG that a raw converter
 //! develops like the raws it came from, with the exposure, white balance,
 //! profile and highlight latitude of a raw instead of a baked-in rendering.

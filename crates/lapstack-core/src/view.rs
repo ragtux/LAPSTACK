@@ -6,12 +6,12 @@
 //!
 //! The depth map makes the result a relief — a textured surface over the
 //! image plane — and a camera moved sideways sees that surface sheared: every
-//! pixel slides horizontally in proportion to its depth. Zerene gets the same
-//! picture by shifting each *frame* by its index before stacking (the "maximum
-//! X shift", a percentage of the width, is the shift between the two ends of
-//! the stack); Helicon projects the textured 3D model it builds from the depth
+//! pixel slides horizontally in proportion to its depth. The same picture can
+//! be had by shifting each *frame* by its index before stacking (the shift
+//! between the two ends of the stack, a percentage of the width, is then the
+//! parameter), or by projecting a textured 3D model built from the depth
 //! map. Here the stacked image and its depth map are sheared in one pass,
-//! with Zerene's parameter: a [`View`] moves the far end of the stack `shift`
+//! with that same parameter: a [`View`] moves the far end of the stack `shift`
 //! × width sideways relative to the near end, about the `pivot` depth that
 //! stays put. Two views at ∓`shift` are a stereo pair; a sequence of views
 //! with the shift sweeping ±A is a rocking animation.
@@ -32,7 +32,7 @@ use rayon::prelude::*;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct View {
     /// The far end of the stack moves this far sideways relative to the near
-    /// end, as a fraction of the image width (0.03 = Zerene's 3 %). Positive
+    /// end, as a fraction of the image width (0.03 = 3 %). Positive
     /// is the view from the right (near things slide left), negative from
     /// the left.
     pub shift: f32,

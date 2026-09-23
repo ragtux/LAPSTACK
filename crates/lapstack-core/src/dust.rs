@@ -1,7 +1,7 @@
 // Copyright (c) 2026 RAGTUX LLC
 // INTERNAL USE ONLY
 
-//! Dust map removal (Helicon Focus's dust map): sensor dust shows in every
+//! Dust map removal: sensor dust shows in every
 //! frame of a stack at the same place, as a soft dark spot, and the fusion
 //! rule keeps it — worse, the region-energy rule sees the spot's edge as
 //! detail and picks it, so the spot is sharper in the result than in any
@@ -29,8 +29,8 @@
 //! shift). `Fill` interpolates each spot from its surroundings with the
 //! pull-push of Gortler et al. (the masked window's pyramid is built with the
 //! spot's pixels weighted out, and on the way back down every hole takes the
-//! coarser level's value: a smooth patch that meets its edges), what Helicon
-//! does. `Flat` instead divides the spot by the dust map's own attenuation
+//! coarser level's value: a smooth patch that meets its edges).
+//! `Flat` instead divides the spot by the dust map's own attenuation
 //! (the ratio the detection measured), a flat-field correction that keeps
 //! whatever detail lies under the spot — right when the map was shot at the
 //! stack's aperture and lighting, wrong (a ring) when it was not.

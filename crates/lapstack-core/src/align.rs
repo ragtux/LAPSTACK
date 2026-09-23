@@ -53,7 +53,7 @@ impl AlignParams {
 }
 
 /// The transform searched for: how much a frame may be deformed to land on
-/// the previous one. Similarity is Zerene's and Helicon's (and what a focus
+/// the previous one. Similarity is the usual model (and what a focus
 /// rail or a focus ring produces: the image breathes, shifts, turns a
 /// little). Affine adds an aspect ratio and a shear; projective the two
 /// perspective terms, for a stack whose camera tilted against the subject as
@@ -97,9 +97,9 @@ pub fn free_mask(shift: bool, scale: bool, rotation: bool, model: AlignModel) ->
 /// The interpolation kernel of the warp: how an aligned frame's pixel is read
 /// from between its source's. All separable, all interpolating (a pixel-centred
 /// sample comes back as it is; the sum of the weights is 1 — Lanczos's are
-/// normalised to make it so). The choice is the one Zerene Stacker and Helicon
-/// Focus offer: the wider the kernel, the sharper the fine detail survives a
-/// fractional shift, and the more the noise and the ringing at hard edges.
+/// normalised to make it so). The wider the kernel, the sharper the fine
+/// detail survives a fractional shift, and the more the noise and the
+/// ringing at hard edges.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Interp {
     /// The nearest source pixel: no blur, no ringing, and jagged sub-pixel
@@ -109,7 +109,7 @@ pub enum Interp {
     Bilinear,
     /// Keys' cubic convolution (a = −0.5), 4×4.
     Bicubic,
-    /// Panorama Tools' spline16, 4×4: Zerene's default and ours.
+    /// Panorama Tools' spline16, 4×4: our default.
     #[default]
     Spline4x4,
     /// Panorama Tools' spline36, 6×6: sharper, a little ringing.
@@ -386,7 +386,7 @@ pub fn affine_inv(m: [[f64; 3]; 2]) -> [[f64; 3]; 2] {
     [[ia, ib, -(ia * tx + ib * ty)], [id, ie, -(id * tx + ie * ty)]]
 }
 
-/// Panorama Tools' spline16 (Zerene's Spline4x4Kernel): the 4 weights at
+/// Panorama Tools' spline16 (the 4×4 spline kernel): the 4 weights at
 /// fraction `t`, taps at −1, 0, +1, +2 from the floor.
 #[inline]
 fn spline4(t: f64) -> [f64; 4] {

@@ -647,10 +647,10 @@ fn help() {
            --no-align             frames are already registered (streams from disk)\n\
            --no-shift/scale/rotation   restrict the similarity model\n\
            --align-coarsen N      align at reduced resolution (skip N finest levels)\n\
-           --align-model M        similarity (shift, scale, rotation: Zerene's and Helicon's) | affine (+ aspect,\n\
+           --align-model M        similarity (shift, scale, rotation) | affine (+ aspect,\n\
                                   shear) | projective (+ perspective, for a camera that tilted as it stepped) [similarity]\n\
            --interpolation K      the kernel the aligned frames are resampled with: nearest | bilinear | bicubic |\n\
-                                  spline4x4 (Zerene's default) | spline6x6 | lanczos3 [spline4x4]; wider = sharper,\n\
+                                  spline4x4 | spline6x6 | lanczos3 [spline4x4]; wider = sharper,\n\
                                   more ringing at hard edges (the registration search itself always uses spline4x4)\n\
            --save-aligned DIR     write the aligned frames\n\
            --save-depth           write the depth map next to the output (8-bit, min-max scaled)\n\
@@ -660,9 +660,9 @@ fn help() {
            --no-crop              keep the full frame instead of cropping to the area every aligned frame covers\n\
            --no-brightness        do not equalise the frames' brightness to frame 0 (exposure flicker)\n\
            --slabs SIZE[:OVERLAP] also fuse slabs of SIZE consecutive frames, overlapping by OVERLAP [2],\n\
-                                  each on its own (Zerene's slabbing): thick planes of focus to retouch from\n\
+                                  each on its own: thick planes of focus to retouch from\n\
            --slab-dir DIR         where the slabs go, in the output's format [<output stem>_slabs]\n\
-           --wav                  also the weighted average (Helicon's method A): every frame weighed by its\n\
+           --wav                  also the weighted average: every frame weighed by its\n\
                                   local contrast (the depth pass's focus measure) above the cell's noise floor\n\
                                   -> <stem>_wav.<ext>; no seams or halos, flat areas average (less noise),\n\
                                   softer than the pyramid\n\
@@ -688,7 +688,7 @@ fn help() {
                                   directories are expanded and before any split (3,7-9,12)\n\
            --reverse              reverse the frame order (a stack shot back to front); each stack of a\n\
                                   batch on its own, so frame 0 is the near end again for --stereo / --mesh\n\
-           --dust-map FILE        dust map (Helicon's): a frame of an evenly lit blank surface shot out of focus\n\
+           --dust-map FILE        dust map: a frame of an evenly lit blank surface shot out of focus\n\
                                   at the stack's aperture; the dust spots found in it are taken out of every\n\
                                   frame before alignment (each interpolated from its surroundings)\n\
            --dust-threshold PCT   a pixel darker than its background by more than this is dust [3]\n\
@@ -707,13 +707,13 @@ fn help() {
                                   last (far; --far-first is the same), or auto = the focus distances the camera wrote\n\
                                   into the first and last frames (EXIF SubjectDistance) decide, frame 0 near when\n\
                                   there are none [auto]\n\
-           --mesh FORMATS         3D model (Helicon's): the depth map as a relief textured with the result, as\n\
+           --mesh FORMATS         3D model: the depth map as a relief textured with the result, as\n\
                                   glb (glTF binary, one file) | obj (+ .mtl + texture file) | stl (geometry only),\n\
                                   comma-separated -> <stem>.glb / .obj / .stl; --far-first applies\n\
            --mesh-relief PCT      the depth of the stack as a percentage of the image width [25]\n\
            --mesh-grid N          vertices along the long edge [1000]\n\
            --mesh-texture EDGE[:jpeg[:Q] | png]   the texture's long edge, 0 = full [8192], and format [jpeg:92]\n\
-         Linear DNG (-o stacked.dng; Helicon's RAW in, DNG out): the raws are developed to the camera's own linear\n\
+         Linear DNG (-o stacked.dng; raw in, DNG out): the raws are developed to the camera's own linear\n\
          space (no white balance, matrix or curve baked in), fused in the look that frame 0's white balance and\n\
          matrix give, and the result is written back in camera space with the camera's colour matrices, so a\n\
          raw converter develops the stack like a raw, highlights past white and all; frames that are not raws\n\

@@ -40,12 +40,12 @@ pub struct Params {
     /// Bring every frame to frame 0's brightness, one gain per channel over
     /// the area the frame covers (`brightness`): exposure flicker.
     pub brightness: bool,
-    /// Slabs (Zerene's slabbing): after the result, fuse every run of `size`
+    /// Slabs: after the result, fuse every run of `size`
     /// consecutive frames overlapping by `overlap` on its own, with the same
     /// settings, and hand each to `run_with`'s callback — thick planes of
     /// focus to retouch from elsewhere. `None` = no slabs.
     pub slabs: Option<(usize, usize)>,
-    /// The weighted average (`wav.rs`, Helicon's method A) as a second image,
+    /// The weighted average (`wav.rs`) as a second image,
     /// from the depth pass's focus measure: needs `depth`.
     pub wav: Option<crate::wav::WavParams>,
     /// Dust map (`dust.rs`): the spots taken out of every frame as decoded,
