@@ -1,5 +1,5 @@
--- Copyright (c) 2026 RAGTUX LLC
--- INTERNAL USE ONLY
+-- SPDX-FileCopyrightText: 2026 RAGTUX LLC
+-- SPDX-License-Identifier: AGPL-3.0-only
 
 -- lapstack for Lightroom Classic: the frames of a focus stack go out of the
 -- catalogue to the lapstack command-line tool and the stacked image comes back

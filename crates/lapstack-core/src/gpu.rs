@@ -1,5 +1,5 @@
-// Copyright (c) 2026 RAGTUX LLC
-// INTERNAL USE ONLY
+// SPDX-FileCopyrightText: 2026 RAGTUX LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! CUDA fusion path (feature `gpu`). Same maths as `pyramid.rs` + `fuse.rs`
 //! — the binomial taps, reflect-101 borders, luma energy, binomial window and

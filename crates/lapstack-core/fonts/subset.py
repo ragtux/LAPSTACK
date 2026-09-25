@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 RAGTUX LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Subset a TrueType (glyf) font to a set of characters, standard library only.
 
     python3 subset.py FiraSans-Regular.ttf FiraSans-Regular.subset.ttf

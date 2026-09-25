@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 RAGTUX LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // lapstack worker: owns the WASM engine and the WebGPU device. The page sends
 // {type:'init'|'run'|'cancel'|'load_source'|'slab'|'stroke'|'save'|…}; the worker answers with progress and
 // results (large buffers are transferred, not copied).

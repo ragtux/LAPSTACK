@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 RAGTUX LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # Build the browser app: wasm32 + wasm-bindgen glue into web/pkg.
 #   ./web/build.sh            # release build
 #   ./web/serve.sh            # then open http://localhost:8765/

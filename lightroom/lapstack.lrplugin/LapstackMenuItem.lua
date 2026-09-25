@@ -1,5 +1,5 @@
--- Copyright (c) 2026 RAGTUX LLC
--- INTERNAL USE ONLY
+-- SPDX-FileCopyrightText: 2026 RAGTUX LLC
+-- SPDX-License-Identifier: AGPL-3.0-only
 
 -- Library > Plug-in Extras > Stack with lapstack: the selected frames are
 -- rendered with the plug-in's preferences (a 16-bit TIFF in the chosen colour

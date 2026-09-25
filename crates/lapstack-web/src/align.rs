@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 RAGTUX LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Streaming alignment on the GPU: the Nelder-Mead control loop runs here
 //! (async), every cost evaluation is one `cost` dispatch (Spline4x4 warp +
 //! DC-removed RMS partial sums) and a small readback. Same model, search and

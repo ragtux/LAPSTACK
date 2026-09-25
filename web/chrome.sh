@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 RAGTUX LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # Launch Chrome with WebGPU on the real GPU and open the app.
 #
 # Linux Chrome ships WebGPU behind switches, and the chrome://flags pair

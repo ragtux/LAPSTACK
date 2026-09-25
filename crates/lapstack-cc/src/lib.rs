@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 RAGTUX LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Content credentials (C2PA, https://contentcredentials.org) for the browser
 //! app: a self-signed ES256 certificate made in the browser, and a signed
 //! manifest embedded into a PNG / JPEG / GIF. Verifiers show the signer as

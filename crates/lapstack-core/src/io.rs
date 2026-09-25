@@ -1,6 +1,6 @@
-// Copyright (c) 2026 RAGTUX LLC
-// INTERNAL USE ONLY
-//
+// SPDX-FileCopyrightText: 2026 RAGTUX LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Image I/O with bit-depth preservation.
 //
 // Frames are decoded into a normalized f32 `Img3` and all fusion runs in float,

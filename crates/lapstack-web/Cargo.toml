@@ -2,6 +2,8 @@
 name = "lapstack-web"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
 description = "lapstack in the browser: WebGPU fusion + WASM decode/align, driven from a Web Worker"
 
 [lib]

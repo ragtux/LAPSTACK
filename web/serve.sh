@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 RAGTUX LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # Static server for the app (WebGPU needs a secure context: localhost is fine).
 # Sends Cache-Control: no-store so a rebuilt app.js / worker.js / pkg/*.wasm is
 # picked up by a plain reload (Chrome otherwise caches module scripts and wasm

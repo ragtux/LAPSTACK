@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 RAGTUX LLC
+   SPDX-License-Identifier: AGPL-3.0-only */
+
 /* Interface face: Fira Sans — a humanist sans drawn for OS UI, so it holds up at the 11–13px
    of the panels and the log. Self-hosted (latin subset, web/fonts) so the app needs no network;
    the system stack stays behind it as the fallback. SIL OFL 1.1. */

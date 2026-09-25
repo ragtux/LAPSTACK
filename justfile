@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 RAGTUX LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # lapstack developer commands — `just` lists them.
 set shell := ["bash", "-euo", "pipefail", "-c"]
 

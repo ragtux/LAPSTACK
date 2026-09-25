@@ -1,5 +1,5 @@
-// Copyright (c) 2026 RAGTUX LLC
-// INTERNAL USE ONLY
+// SPDX-FileCopyrightText: 2026 RAGTUX LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! Linear DNG output — raw in, DNG out: the stacked image
 //! written as a demosaiced, linear, camera-space DNG that a raw converter

@@ -1,5 +1,5 @@
-// Copyright (c) 2026 RAGTUX LLC
-// INTERNAL USE ONLY
+// SPDX-FileCopyrightText: 2026 RAGTUX LLC
+// SPDX-License-Identifier: AGPL-3.0-only
 
 //! Depth from focus (DFF): a dense, sub-frame depth map from the aligned stack.
 //!

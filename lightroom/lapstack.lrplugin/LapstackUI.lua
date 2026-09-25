@@ -1,5 +1,5 @@
--- Copyright (c) 2026 RAGTUX LLC
--- INTERNAL USE ONLY
+-- SPDX-FileCopyrightText: 2026 RAGTUX LLC
+-- SPDX-License-Identifier: AGPL-3.0-only
 
 -- The settings as dialog rows, built once for the Export dialog's section and
 -- once for the Plug-in Manager's: `f` is the view factory, `bindTo` the

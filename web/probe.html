@@ -1,4 +1,7 @@
 <!doctype html><meta charset="utf-8"><title>webgpu probe</title>
+<!-- SPDX-FileCopyrightText: 2026 RAGTUX LLC
+   SPDX-License-Identifier: AGPL-3.0-only -->
+
 <script type="module">
 const out = { main: null, worker: null };
 try { const a = await navigator.gpu?.requestAdapter(); out.main = a ? { vendor: a.info.vendor, arch: a.info.architecture, desc: a.info.description, maxBuf: a.limits.maxBufferSize, maxStorage: a.limits.maxStorageBufferBindingSize, fallback: a.isFallbackAdapter } : 'null'; } catch (e) { out.main = 'err ' + e.message; }

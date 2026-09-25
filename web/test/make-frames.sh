@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 RAGTUX LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+
 # Regenerate the small test set: 8 crops (1024x768, 8-bit) from aligned frames
 # + the native reference output.  Usage: web/test/make-frames.sh ALIGNED_DIR
 #   ALIGNED_DIR holds aligned_NNN.png from `lapstack --save-aligned` (or any

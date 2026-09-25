@@ -1275,3 +1275,26 @@ cargo build --release --features gpu -p lapstack-cli
 `cudarc` is built with `dynamic-loading`, so a binary built with the feature
 still runs on a machine without CUDA; `--gpu` / `--gpu-align` fail at run
 time with a message, everything else works.
+
+## License
+
+lapstack is free software under the **GNU Affero General Public License,
+version 3** (`LICENSE`; SPDX `AGPL-3.0-only`).
+
+Copyright (C) 2026 RAGTUX LLC.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the license for details.
+
+The AGPL's network clause (section 13) is the reason for the *A*: the browser
+app in `web/` is the engine compiled to WASM, so anyone who offers a modified
+lapstack to users over a network has to offer them its source as well —
+serving it is not a loophole around shipping it.
+
+`vendor/rawler` is a patched copy of a third-party crate (MIT and LGPL-2.1
+per file, copyright Daniel Vogelbacher) and keeps its own licenses; combining
+the LGPL-2.1 files with the AGPL needs the election recorded in
+`vendor/rawler/LAPSTACK-PATCH.md`, which anyone redistributing a build with the
+`raw` feature should read. The two papers in `docs/` are the authors' and are
+included for reference, not relicensed.

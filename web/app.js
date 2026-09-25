@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 RAGTUX LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
 import { muxMp4, muxWebm } from './mux.js';
 // lapstack browser UI. A focus-stacking workbench: filmstrip, parameter
 // panel, run/cancel with progress + log, viewer layers (Source / Stack / Depth),

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 RAGTUX LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! wgpu layer: device setup, one bind-group layout shared by every kernel, a
 //! dynamic-offset uniform ring, a command recorder that auto-flushes, and
 //! async buffer readbacks.

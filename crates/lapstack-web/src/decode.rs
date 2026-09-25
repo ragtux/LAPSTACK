@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 RAGTUX LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Decode PNG/JPEG/TIFF bytes — or develop a camera raw's (`lapstack_core::raw`) —
 //! to interleaved RGB u16 (8-bit inputs widened by ×257), the form the `warp`
 //! kernel samples directly.

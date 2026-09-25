@@ -2,6 +2,8 @@
 name = "lapstack-cc"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
 description = "lapstack in the browser: content credentials (C2PA manifests, self-signed in the browser); a separate wasm module the worker loads on first use"
 
 [lib]

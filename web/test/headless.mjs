@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 RAGTUX LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Headless Chrome runner for web/test.html: serves ./web, launches Chrome with
 // WebGPU, attaches over CDP, streams console output, and exits with the JSON
 // result from window.__result.  Usage: node web/test/headless.mjs [--align]

@@ -2,6 +2,8 @@
 name = "lapstack-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
 description = "lapstack: CLI for the Laplacian-pyramid focus stacker"
 
 [[bin]]

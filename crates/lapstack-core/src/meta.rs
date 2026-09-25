@@ -1,6 +1,6 @@
-// Copyright (c) 2026 RAGTUX LLC
-// INTERNAL USE ONLY
-//
+// SPDX-FileCopyrightText: 2026 RAGTUX LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Metadata pass-through: the EXIF, ICC profile and XMP of the first frame,
 // read out of its JPEG / PNG / TIFF and written into the stacked image's file,
 // so the result keeps the camera, lens, exposure and colour information of the
