@@ -7,5 +7,5 @@ web/test/expected_dff.*
 web/test/big/
 web/test/big25/
 docs/*
-!docs/*.pdf
+!docs/README.md
 web/test/expected_conf.*

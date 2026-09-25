@@ -2,7 +2,8 @@
 
 `lapstack` fuses a focus-bracketed series of photographs into one all-in-focus
 image and a dense depth map. It is a from-scratch implementation of focus
-stacking on the Laplacian pyramid, written from two papers kept in `docs/`:
+stacking on the Laplacian pyramid, written from the papers cited in
+`docs/README.md`:
 
 - Adelson, Anderson, Bergen, Burt, Ogden, *Pyramid methods in image
   processing* (RCA Engineer, 1984) — REDUCE/EXPAND, the band-pass
@@ -21,7 +22,7 @@ crates/lapstack-core   library: pyramid, fusion, depth from focus, aligner, dust
 crates/lapstack-cli    `lapstack` command-line tool
 crates/lapstack-web    wasm32 + WebGPU engine for the browser app
 web/                   the browser app (static files) and its headless test
-docs/                  the two papers the algorithm is written from
+docs/                  the papers the algorithm is written from, cited
 lightroom/             the Lightroom Classic plugin (the CLI as an export target and a Library menu item)
 desktop/               the browser app as an Electron desktop application
 ```
@@ -1296,5 +1297,6 @@ serving it is not a loophole around shipping it.
 per file, copyright Daniel Vogelbacher) and keeps its own licenses; combining
 the LGPL-2.1 files with the AGPL needs the election recorded in
 `vendor/rawler/LAPSTACK-PATCH.md`, which anyone redistributing a build with the
-`raw` feature should read. The two papers in `docs/` are the authors' and are
-included for reference, not relicensed.
+`raw` feature should read. The papers the algorithm is written from are cited
+in `docs/README.md` rather than redistributed: they are their authors' and
+publishers' work, under their own copyright.
