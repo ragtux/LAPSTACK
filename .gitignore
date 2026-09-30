@@ -1,6 +1,7 @@
 target/
 web/pkg/
 web/pkg-cc/
+web/pkg-raw/
 web/test/frames/
 web/test/expected.png
 web/test/expected_dff.*

@@ -25,26 +25,29 @@ file says "or any later version", so the LGPL files are LGPL-2.1 **only**.
 
 lapstack is proprietary (`/LICENSE`). The LGPL allows that combination — a
 "work that uses the Library" may be under any terms — on conditions, two of
-which bind here:
+which bind here, and this is how lapstack meets them:
 
 - **The library's own changes stay LGPL.** `wasm_time.rs` and the five import
   lines are a modification of rawler and are under the LGPL-2.1 like the files
-  they change. This directory, this note included, is the source of that
-  modified library, and anyone who receives a lapstack build may have and
-  copy it under the LGPL.
-- **The user must be able to replace the library** (LGPL-2.1 §6). A program
-  that links the library statically may be distributed only together with the
-  object code needed to relink it against a modified rawler (§6a); otherwise
-  the library has to be a shared library the program finds at run time (§6b).
-  lapstack links rawler statically, natively and into the browser engine's
-  wasm, and will not ship relinkable object code — so **a build with the `raw`
-  feature is not distributable as it stands**, and that includes serving the
-  browser app. The way out is §6b: rawler and a thin shim in a crate of their
-  own, `lapstack-raw`, built as a cdylib the CLI loads at run time (as cudarc
-  loads libcuda) and as a wasm module of its own that the worker imports (as
-  `pkg-cc` already is), with the engine talking to it across that boundary and
-  the module's source published beside the app. Until that lands, `raw` is a
-  development feature: built here, not distributed.
+  they change; so is `crates/lapstack-raw`, the shim around rawler that is
+  built with it. This directory, the shim and a workspace file to build them
+  are the source of that modified library, and they ship with every lapstack
+  build (`legal/lapstack-raw-src.tar.gz` in the browser app, and beside the
+  command-line tool's downloads), so anyone who receives a build has it.
+- **The user must be able to replace the library** (LGPL-2.1 §6). lapstack
+  does not link rawler or `lapstack-raw`; it loads the built module at run
+  time through a small interface (`crates/lapstack-raw/src/lib.rs` describes
+  it; `crates/lapstack-core/src/raw.rs` is the client): natively a shared
+  library found next to the binary (§6b — "a suitable shared library
+  mechanism"), in the browser a wasm module of its own that the worker imports
+  and the engine reaches through the global object. Rebuild the module from
+  its source, put it where the old one was, and lapstack uses it;
+  `crates/lapstack-raw/README.md` says how. lapstack's own parts stay
+  proprietary and are not part of the LGPL work.
+
+Until 2026-09-30 rawler was linked into the engine itself, which the LGPL does
+not allow a proprietary program to distribute without relinkable object code;
+no build with it was distributed.
 
 While lapstack was AGPL-3.0-only (2026-09-24 to 2026-09-30) an earlier revision
 of this note elected, under LGPL-2.1 §3, to take the LGPL files as GPL-3.0.

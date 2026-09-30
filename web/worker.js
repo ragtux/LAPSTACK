@@ -24,6 +24,29 @@ async function loadCc() {
   await mod.default({ module_or_path: `./pkg-cc/lapstack_cc_bg.wasm?t=${V}` });
   cc = mod; return cc;
 }
+// camera raw decoding is a module of its own too (pkg-raw: rawler behind a small interface,
+// LGPL — its source is in legal/, and a build of your own dropped in here is what the engine
+// uses): loaded when the first raw comes in. The engine (lapstack-core's raw.rs, through
+// lapstack-web's raw_bridge) reaches it by the three globals below; a developed image stays
+// in the raw module's memory and the engine copies from a view on it, then free() gives it back.
+let rawMod = null, rawMem = null;
+async function loadRaw() {
+  if (rawMod) return;
+  const mod = await import(`./pkg-raw/lapstack_raw.js?t=${V}`);
+  const wasm = await mod.default({ module_or_path: `./pkg-raw/lapstack_raw_bg.wasm?t=${V}` });
+  rawMod = mod; rawMem = wasm.memory;
+}
+const needRaw = async (files) => { if (!rawMod && files.some((f) => f && isRaw(f.name))) await loadRaw(); };
+const rawView = (d) => {
+  const view = d.bits === 32 ? new Float32Array(rawMem.buffer, d.ptr(), d.len()) : d.bits === 16 ? new Uint16Array(rawMem.buffer, d.ptr(), d.len()) : new Uint8Array(rawMem.buffer, d.ptr(), d.len());
+  return { w: d.w, h: d.h, channels: d.channels, bits: d.bits, turns: d.turns, flip: d.flip, color: d.color, data: view, free: () => d.free() };
+};
+globalThis.lapstackRawDevelop = (bytes, linear) => {
+  if (!rawMod) throw new Error('the raw decoder (pkg-raw) is not loaded');
+  return rawView(linear ? rawMod.develop_linear(bytes) : rawMod.develop(bytes));
+};
+globalThis.lapstackRawPreview = (bytes) => { const d = rawMod ? rawMod.preview(bytes) : undefined; return d ? rawView(d) : null; };
+globalThis.lapstackRawMetadata = (bytes) => (rawMod && rawMod.metadata(bytes)) || null;
 
 let engine = null;
 let gifw = null;          // the animated GIF being written (gif_begin … gif_end), see gif.rs
@@ -45,6 +68,7 @@ async function thumbLoop() {
     try {
       const bytes = new Uint8Array(await f.arrayBuffer());
       if (job.gen !== thumbGen) return;
+      await needRaw([f]);
       const t = thumbnail(bytes, job.edge, isRaw(f.name), job.rotate || 0);
       const [proxy, strip] = await proxyBitmaps(t.proxy.buffer, t.proxy_w, t.proxy_h);
       post({ type: 'thumb', index: i, uid, name: f.name, w: t.w, h: t.h, bits: t.bits, proxy, strip }, [proxy, strip]);
@@ -117,6 +141,7 @@ async function handleCall(m) {
     // the aligned full-res frame (or its In focus rendering, m.focus = focusParams), like load_source
     // without the scrub bookkeeping; the page passes the file bytes it has already read
     if (running) throw new Error('a run is in progress');
+    await needRaw([m.file]);
     const held = engine.source_gpu_index() === m.index;
     let r = null;
     if (!held) r = await engine.load_source(m.index, new Uint8Array(m.bytes || await m.file.arrayBuffer()), !m.focus, isRaw(m.file && m.file.name));
@@ -164,6 +189,7 @@ async function handleCall(m) {
     // progress goes to the page as 'refold-progress'. The views stay in the engine until
     // 'refold_end': 'refold_view' returns one as RGBA8, 'refold_stereo' encodes views 0 and 1.
     if (running) throw new Error('a run is in progress');
+    await needRaw(m.files);
     refoldCancel = false;
     const plan = engine.refold_begin(new Float32Array(m.shifts), m.near !== false, m.w || 0, m.h || 0);
     const total = plan.passes * m.files.length; let done = 0;
@@ -202,6 +228,7 @@ async function handleCall(m) {
     // the engine takes out of every frame it decodes from now on; 'dust_update' finds the spots
     // again with other settings, 'dust_clear' lets it go. The reply is the engine's dust_info.
     if (running) throw new Error('a run is in progress');
+    if (m.type === 'dust_set') await needRaw([m.file]);
     let r = null;
     if (m.type === 'dust_set') r = engine.dust_set(m.file.name, new Uint8Array(await m.file.arrayBuffer()), isRaw(m.file.name), m.edge || 1400, m.threshold, m.margin, m.mode);
     else if (m.type === 'dust_update') r = engine.dust_update(m.threshold, m.margin, m.mode);
@@ -210,6 +237,7 @@ async function handleCall(m) {
     post({ type: 'dust', rid: m.rid, info: r ? { ...r, rects: r.rects, proxy } : null }, proxy ? [proxy, r.rects.buffer] : []);
   } else if (m.type === 'keep_file') {
     // an image file kept as a result (see 'keep' below): decoded here, its RGBA8 back for the page's copy
+    await needRaw([m.file]);
     const r = engine.keep_file(m.id, new Uint8Array(await m.file.arrayBuffer()), isRaw(m.file.name));
     post({ type: 'kept_file', rid: m.rid, id: m.id, w: r.w, h: r.h, bits: r.bits, rgba: r.rgba.buffer }, [r.rgba.buffer]);
   } else if (m.type === 'make_cert') {
@@ -256,6 +284,7 @@ async function handle(m) {
     } else if (m.type === 'run') {
       if (running) return;
       running = true; cancelled = false;
+      await needRaw(m.files);
       engine.reset();
       const params = JSON.stringify(m.params);
       const t0 = performance.now();
@@ -341,6 +370,7 @@ async function handle(m) {
       // like a live one, and its patch reaches the page the same way. m.strokes: [{target,
       // from, index?, lo?, hi?, dabs}], m.files: the frames in order.
       if (running) return;
+      await needRaw(m.files);
       let done = 0, skipped = 0;
       for (const s of m.strokes) {
         post({ type: 'stage', text: `retouch ${done + skipped + 1}/${m.strokes.length}`, done: done + skipped, total: m.strokes.length });
@@ -385,6 +415,7 @@ async function handle(m) {
       // (a read issued here would wait for it); without them the File is read here.
       if (running) return;
       if (m.gen < sourceGen) { post({ type: 'source-skipped', index: m.index, gen: m.gen, focus: !!m.focus }); return; }
+      await needRaw([m.file]);
       const held = engine.source_gpu_index() === m.index;
       let r = null;
       if (!held) {
@@ -403,6 +434,7 @@ async function handle(m) {
       const total = m.hi - m.lo + 1;
       const skip = () => post({ type: 'slab-skipped', lo: m.lo, hi: m.hi, gen: m.gen });
       if (m.gen < slabGen) { skip(); return; }
+      await needRaw(m.files);
       engine.slab_begin(m.lo, m.hi);
       let next = readAhead(m.files[0]);
       for (let i = 0; i < total; i++) {

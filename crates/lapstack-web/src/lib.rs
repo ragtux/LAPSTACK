@@ -13,6 +13,7 @@ mod decode;
 mod depth;
 mod gif;
 mod gpu;
+mod raw_bridge;
 
 use align::{Aligner, LumaPyr, Sim};
 use gpu::{Gpu, P, Rec, grid1, grid2};

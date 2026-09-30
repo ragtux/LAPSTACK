@@ -43,7 +43,7 @@ smoke: build
 
 # ---- browser app ----
 
-# wasm32 build + wasm-bindgen glue into web/pkg (pulls in lld via nix-shell when no wasm linker is on PATH)
+# wasm32 build + wasm-bindgen glue into web/pkg, pkg-cc and pkg-raw (pulls in lld via nix-shell when no wasm linker is on PATH)
 build-web:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -135,4 +135,4 @@ desktop-dist:
 # Remove build outputs
 clean:
     cargo clean
-    rm -rf web/pkg web/pkg-cc desktop/dist
+    rm -rf web/pkg web/pkg-cc web/pkg-raw web/dist desktop/dist

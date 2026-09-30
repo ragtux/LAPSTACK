@@ -6,7 +6,7 @@ lapstack is proprietary software (`LICENSE`). It is built from the components be
 
 - **Fira Sans and Fira Mono** (`web/fonts`, `crates/lapstack-core/fonts`): Copyright (c) 2012-2015, The Mozilla Foundation and Telefonica S.A., under the SIL Open Font License, Version 1.1 — the full text is in `web/fonts/LICENSE-fira-sans.txt`. The subsets lapstack ships are Reserved-Font-Name-free derivatives under §1 of that licence.
 - **Electron** (the desktop application's shell, `desktop/`): MIT, Copyright (c) Electron contributors and GitHub Inc. electron-builder places Electron's `LICENSE` and Chromium's `LICENSES.chromium.html` in every package it makes.
-- **rawler** (`vendor/rawler`, the camera raw decoder, Copyright (c) Daniel Vogelbacher): LGPL-2.1, with a two-file change by RAGTUX LLC that is under the same licence. What the LGPL asks of a proprietary program that uses it, and where lapstack stands on that, is in `vendor/rawler/LAPSTACK-PATCH.md`; it is listed under LGPL-2.1 below as well.
+- **rawler** (`vendor/rawler`, the camera raw decoder, Copyright (c) Daniel Vogelbacher): LGPL-2.1, with a two-file change by RAGTUX LLC that is under the same licence, inside **lapstack-raw** (`crates/lapstack-raw`, RAGTUX LLC, LGPL-2.1), the module built from it. lapstack does not link either: the module is loaded at run time — a shared library beside the command-line tool, a wasm module (`pkg-raw`) beside the browser app's engine — and its source ships with every build as `lapstack-raw-src.tar.gz` (under `legal/` in the app), so it can be rebuilt and replaced. `vendor/rawler/LAPSTACK-PATCH.md` has the obligations in full; rawler is listed under LGPL-2.1 below as well.
 
 ## Crates, by the licence lapstack takes them under
 

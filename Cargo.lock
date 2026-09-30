@@ -1868,8 +1868,23 @@ dependencies = [
  "cudarc",
  "flate2",
  "image",
- "rawler",
+ "libloading",
  "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lapstack-raw"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "image",
+ "rawler",
+ "serde",
+ "serde_json",
+ "uuid",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1879,14 +1894,12 @@ dependencies = [
  "bytemuck",
  "console_error_panic_hook",
  "futures-channel",
- "getrandom 0.3.4",
  "gif",
  "image",
  "js-sys",
  "lapstack-core",
  "serde",
  "serde_json",
- "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

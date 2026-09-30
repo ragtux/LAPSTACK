@@ -21,6 +21,7 @@ stacking on the Laplacian pyramid, written from the papers cited in
 crates/lapstack-core   library: pyramid, fusion, depth from focus, aligner, dust map, stereo views, 3D model, batch splitting, I/O, linear DNG, frame preparation, CUDA path, pooling allocator
 crates/lapstack-cli    `lapstack` command-line tool
 crates/lapstack-web    wasm32 + WebGPU engine for the browser app
+crates/lapstack-raw    the camera raw decoder (rawler, LGPL) as a module of its own: a shared library the CLI loads at run time, a wasm module the browser app loads beside its engine
 web/                   the browser app (static files) and its headless test
 docs/                  the papers the algorithm is written from, cited
 lightroom/             the Lightroom Classic plugin (the CLI as an export target and a Library menu item)
@@ -220,7 +221,18 @@ follows the pixels, a window around that IFD (100 frames of 274 MB in 0.2 s).
 **Camera raw input** (`raw.rs`): NEF, CR2 and CR3, ARW, DNG, RAF, ORF, RW2,
 PEF, IIQ, 3FR and the rest of what [rawler](https://github.com/dnglab/dnglab)
 (dnglab's library) decodes are taken as frames, natively and in the browser,
-by their extension. Each is developed as shot — black and white levels,
+by their extension. The decoding is not in lapstack itself but in
+`lapstack-raw` (`crates/lapstack-raw`, LGPL-2.1), a component loaded at run
+time: natively `liblapstack_raw.so` / `.dylib` / `lapstack_raw.dll`, which
+`cargo build --release` puts next to the binary and the binary looks for
+beside itself (then `../lib`, then the system path; `LAPSTACK_RAW_LIB` names
+one outright) — without it a raw is an error that says so and every other
+input works, as with CUDA; in the browser `web/pkg-raw`, a wasm module the
+worker imports when the first raw comes in and the engine reaches through
+three globals (`lapstack-web`'s `raw_bridge.rs`). `raw.rs` is the client of
+that interface: the five functions the rest of lapstack calls, a `RawBackend`
+either side installs, and the JSON shapes of the camera's colour and
+metadata that cross it. Each is developed as shot — black and white levels,
 demosaic, the white balance the camera recorded, the camera's colour matrix
 to sRGB, the sRGB curve — into the 16-bit RGB every other input becomes,
 turned the way the EXIF orientation says; a monochrome sensor gives gray.
@@ -1290,13 +1302,18 @@ notices in `THIRD-PARTY.md`, which `just third-party` regenerates from the
 Cargo metadata and the crates' own licence files; a distributed build carries
 it. Two need more than a listing:
 
-- `vendor/rawler`, the camera raw decoder, is LGPL-2.1 (MIT and LGPL-2.1 per
-  file, copyright Daniel Vogelbacher). The LGPL lets a proprietary program use
-  the library on the condition that the user can replace it, which a
-  statically linked build does not allow — so a build with the `raw` feature
-  (every build today, the browser app's wasm included) is not one lapstack
-  may distribute until rawler is split out into a separately loaded module.
-  The obligations and the plan are in `vendor/rawler/LAPSTACK-PATCH.md`.
+- The camera raw decoder is LGPL-2.1: `vendor/rawler` (MIT and LGPL-2.1 per
+  file, copyright Daniel Vogelbacher) inside `crates/lapstack-raw`, RAGTUX's
+  own LGPL-2.1 shim around it. The LGPL lets a proprietary program use the
+  library on the condition that the user can replace it, so lapstack never
+  links it: `lapstack-raw` is built as a shared library the CLI loads at run
+  time and as a wasm module the browser app loads beside its engine, and its
+  source — the crate and the patched rawler, with a workspace file so it
+  builds as it is — travels with every build (`web/dist.sh` puts
+  `legal/lapstack-raw-src.tar.gz` in the app; the CLI's downloads carry the
+  same tarball). `vendor/rawler/LAPSTACK-PATCH.md` has the obligations in
+  full; `crates/lapstack-raw/README.md` how to rebuild and drop in a
+  replacement.
 - The papers the algorithm is written from are cited in `docs/README.md`
   rather than redistributed: they are their authors' and publishers' work,
   under their own copyright.

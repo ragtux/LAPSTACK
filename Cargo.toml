@@ -2,10 +2,12 @@
 # vendor/rawler is a patched copy of rawler (its own crate, not a member): see vendor/rawler/LAPSTACK-PATCH.md
 exclude = ["vendor/rawler"]
 resolver = "3"
-members = ["crates/lapstack-core", "crates/lapstack-cli", "crates/lapstack-web", "crates/lapstack-cc"]
+# lapstack-raw (LGPL: rawler behind a small interface) is a member, but inherits nothing
+# from the workspace, so that it builds on its own from the source tarball that ships with the app
+members = ["crates/lapstack-core", "crates/lapstack-cli", "crates/lapstack-web", "crates/lapstack-cc", "crates/lapstack-raw"]
 # lapstack-web and lapstack-cc only target wasm32 (see web/build.sh); keep plain
-# `cargo build` working anywhere by defaulting to core + cli.
-default-members = ["crates/lapstack-core", "crates/lapstack-cli"]
+# `cargo build` working anywhere by defaulting to core + cli + the raw library the cli loads.
+default-members = ["crates/lapstack-core", "crates/lapstack-cli", "crates/lapstack-raw"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,8 +19,6 @@ authors = ["RAGTUX LLC"]
 [workspace.dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
 rayon = "1.10"
-# camera raw decoding and development (raw.rs): dnglab's library
-rawler = { version = "0.8", default-features = false }
 # GPU (optional): dynamic-loading = dlopen libcuda/libnvrtc at runtime (no CUDA at
 # build time; NixOS-friendly). Enable with `--features gpu`.
 cudarc = { version = "0.16", default-features = false, features = ["driver", "nvrtc", "cuda-12050", "dynamic-loading"] }
@@ -36,6 +36,5 @@ opt-level = 2
 [profile.dev.package.lapstack-core]
 opt-level = 3
 
-# camera raw decoding in the browser: rawler as published panics on wasm32 (std::time), see vendor/rawler/LAPSTACK-PATCH.md
-[patch.crates-io]
-rawler = { path = "vendor/rawler" }
+[profile.dev.package.lapstack-raw]
+opt-level = 3
