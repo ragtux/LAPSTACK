@@ -5,10 +5,10 @@
   "author": {
     "name": "RAGTUX LLC"
   },
-  "homepage": "https://github.com/ragtux/lapstack",
+  "homepage": "https://lapstack.ragtux.com",
   "main": "main.js",
   "private": true,
-  "license": "AGPL-3.0-only",
+  "license": "UNLICENSED",
   "scripts": {
     "start": "electron .",
     "smoke": "electron . --smoke",

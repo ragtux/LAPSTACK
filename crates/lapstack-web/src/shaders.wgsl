@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 // lapstack WebGPU kernels. Same maths as lapstack-core/src/pyramid.rs + fuse.rs
 // (and the CUDA twins in gpu.rs): binomial [1 4 6 4 1]/16 taps, reflect-101

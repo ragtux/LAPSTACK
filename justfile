@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 RAGTUX LLC
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 # lapstack developer commands — `just` lists them.
 set shell := ["bash", "-euo", "pipefail", "-c"]
@@ -105,6 +105,14 @@ test-all: test build-web (test-web "--align")
 # Regenerate the browser test frames + references from a directory of aligned frames
 test-frames dir:
     ./web/test/make-frames.sh {{dir}}
+
+# The deployable app: web/ minus its tests and scripts, cache-busting pinned to the build, into web/dist
+dist-web:
+    ./web/dist.sh
+
+# Regenerate THIRD-PARTY.md (every crate a build can contain, its licence and notices) from the Cargo metadata
+third-party:
+    python3 tools/third-party.py
 
 # ---- desktop app (Electron wrapper of web/, see desktop/README.md) ----
 

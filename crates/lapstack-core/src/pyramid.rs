@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 //! Gaussian / Laplacian pyramid (Burt & Adelson 1983; Adelson et al. 1984).
 //!

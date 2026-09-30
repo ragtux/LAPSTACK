@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 //! Content credentials (C2PA, https://contentcredentials.org) for the browser
 //! app: a self-signed ES256 certificate made in the browser, and a signed

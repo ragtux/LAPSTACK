@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 //! Dust map removal: sensor dust shows in every
 //! frame of a stack at the same place, as a soft dark spot, and the fusion

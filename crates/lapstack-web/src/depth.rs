@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 //! Depth from focus on WebGPU — the pipeline of `lapstack_core::depth`
 //! (ring difference filter, guided-filter aggregation, streamed sub-frame peak

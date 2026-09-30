@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 //! Camera raw files as input frames, developed with rawler (dnglab's library):
 //! decoded, black and white levels applied, demosaicked, white-balanced as

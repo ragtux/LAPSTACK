@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 // Metadata pass-through: the EXIF, ICC profile and XMP of the first frame,
 // read out of its JPEG / PNG / TIFF and written into the stacked image's file,

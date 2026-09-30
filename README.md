@@ -1258,8 +1258,7 @@ binary, the unpacked build and the AppImage, and the window maps and
 presents; NixOS needs the FHS environment `desktop/nix-fhs.nix` for the npm
 Electron binary and electron-builder's tools (`desktop/README.md`). The
 pickers, the Save As dialog and the Windows and macOS builds have not been
-exercised here; `package.json`'s `homepage` is a placeholder the deb target
-insists on.
+exercised here.
 
 ## GPU acceleration (CUDA, optional)
 
@@ -1279,24 +1278,25 @@ time with a message, everything else works.
 
 ## License
 
-lapstack is free software under the **GNU Affero General Public License,
-version 3** (`LICENSE`; SPDX `AGPL-3.0-only`).
+lapstack is proprietary software: Copyright (C) 2026 RAGTUX LLC, all rights
+reserved. `LICENSE` (SPDX `LicenseRef-RAGTUX-Proprietary`) is the whole of
+it — no licence to the source, and an end-user licence for the programs built
+from it. The revisions from 2026-09-24 to 2026-09-30 were published under the
+AGPL-3.0-only; that licence stays with the copies distributed under it and
+does not extend to later revisions.
 
-Copyright (C) 2026 RAGTUX LLC.
+Third-party components keep their own licences and are listed with their
+notices in `THIRD-PARTY.md`, which `just third-party` regenerates from the
+Cargo metadata and the crates' own licence files; a distributed build carries
+it. Two need more than a listing:
 
-This program is distributed in the hope that it will be useful, but WITHOUT
-ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
-FOR A PARTICULAR PURPOSE. See the license for details.
-
-The AGPL's network clause (section 13) is the reason for the *A*: the browser
-app in `web/` is the engine compiled to WASM, so anyone who offers a modified
-lapstack to users over a network has to offer them its source as well —
-serving it is not a loophole around shipping it.
-
-`vendor/rawler` is a patched copy of a third-party crate (MIT and LGPL-2.1
-per file, copyright Daniel Vogelbacher) and keeps its own licenses; combining
-the LGPL-2.1 files with the AGPL needs the election recorded in
-`vendor/rawler/LAPSTACK-PATCH.md`, which anyone redistributing a build with the
-`raw` feature should read. The papers the algorithm is written from are cited
-in `docs/README.md` rather than redistributed: they are their authors' and
-publishers' work, under their own copyright.
+- `vendor/rawler`, the camera raw decoder, is LGPL-2.1 (MIT and LGPL-2.1 per
+  file, copyright Daniel Vogelbacher). The LGPL lets a proprietary program use
+  the library on the condition that the user can replace it, which a
+  statically linked build does not allow — so a build with the `raw` feature
+  (every build today, the browser app's wasm included) is not one lapstack
+  may distribute until rawler is split out into a separately loaded module.
+  The obligations and the plan are in `vendor/rawler/LAPSTACK-PATCH.md`.
+- The papers the algorithm is written from are cited in `docs/README.md`
+  rather than redistributed: they are their authors' and publishers' work,
+  under their own copyright.

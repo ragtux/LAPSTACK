@@ -1,5 +1,5 @@
 -- SPDX-FileCopyrightText: 2026 RAGTUX LLC
--- SPDX-License-Identifier: AGPL-3.0-only
+-- SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 -- What both doors share once the frames are rendered: the command line built
 -- from the settings, run with its stderr in a log file next to the output, the

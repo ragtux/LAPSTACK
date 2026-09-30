@@ -1,5 +1,5 @@
 -- SPDX-FileCopyrightText: 2026 RAGTUX LLC
--- SPDX-License-Identifier: AGPL-3.0-only
+-- SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 -- The plug-in's section in the Plug-in Manager: the settings bound to the
 -- preferences, which the Plug-in Extras menu item uses and an Export dialog

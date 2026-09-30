@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 // mux.js — the two containers of the Save step's video export, written here rather than
 // pulled in: the encoder is the browser's (WebCodecs), and what it hands back — H.264 samples

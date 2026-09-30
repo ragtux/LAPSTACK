@@ -1,5 +1,5 @@
 -- SPDX-FileCopyrightText: 2026 RAGTUX LLC
--- SPDX-License-Identifier: AGPL-3.0-only
+-- SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 -- The export service: "lapstack" in the Export dialog's Export To menu. The
 -- dialog keeps Lightroom's own file settings (a 16-bit TIFF is the right

@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 //! Orchestration: decode → (align) → fuse → (depth) → (slabs). Frames are
 //! consumed one at a time, so the stack is streamed from disk with a bounded

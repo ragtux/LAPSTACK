@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 //! lapstack-web — the lapstack pipeline for the browser: frames are decoded in
 //! WASM, aligned and fused on WebGPU (`shaders.wgsl`), one frame at a time, so

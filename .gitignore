@@ -9,3 +9,4 @@ web/test/big25/
 docs/*
 !docs/README.md
 web/test/expected_conf.*
+web/dist/

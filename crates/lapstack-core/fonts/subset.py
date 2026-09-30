@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 RAGTUX LLC
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 """Subset a TrueType (glyf) font to a set of characters, standard library only.
 

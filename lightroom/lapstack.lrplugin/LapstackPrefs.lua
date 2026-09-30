@@ -1,5 +1,5 @@
 -- SPDX-FileCopyrightText: 2026 RAGTUX LLC
--- SPDX-License-Identifier: AGPL-3.0-only
+-- SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 -- The plug-in's settings: one table of defaults, the persistent preferences
 -- (LrPrefs, kept by Lightroom between sessions) filled from it, and the copy
