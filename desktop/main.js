@@ -22,7 +22,7 @@
 
 'use strict';
 
-const { app, BrowserWindow, session, dialog } = require('electron');
+const { app, BrowserWindow, session, dialog, shell } = require('electron');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -196,7 +196,12 @@ async function main() {
       sandbox: true,
     },
   });
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));   // the dust map preview's "larger view" opens a tab: not here
+  // No windows out of the app (the dust map preview's "larger view" opens a tab: not here).
+  // The one exception is the toolbar's support link, which goes to the system browser.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https:\/\/(donate|buy)\.stripe\.com\//.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
   win.on('closed', () => server.close());
   if (!SMOKE) win.once('ready-to-show', () => win.show());
 

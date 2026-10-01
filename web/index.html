@@ -62,7 +62,9 @@
     <button data-step="stack" class="on"><b>1</b> Stack</button>
     <button data-step="save" disabled><b>2</b> Save</button>
   </div>
-  <div id="tb-right"></div>
+  <!-- the one link out of the app: a Stripe payment page in a new tab (the desktop app hands it
+       to the system browser). Nothing is sent and nothing comes back; app.js does not touch it. -->
+  <div id="tb-right"><a id="support" class="btn" href="https://buy.stripe.com/5kQ8wQditbElbCugAp6wE00" target="_blank" rel="noopener" title="lapstack is free; a contribution helps keep it that way. Opens Stripe's payment page in a new tab."><span class="heart" aria-hidden="true">&#9829;</span> Support lapstack</a></div>
 </div>
 <div id="main">
   <div id="left">

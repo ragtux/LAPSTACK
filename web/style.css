@@ -40,6 +40,11 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #toolbar { display: grid; grid-template-columns: minmax(max-content, 1fr) auto minmax(0, 1fr); column-gap: 10px; }
 #toolbar button { white-space: nowrap; }
 #tb-left, #tb-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
+#tb-right { justify-content: flex-end; }
+/* a link dressed as a button, for the support link: the plain button's box, no underline */
+a.btn { display: inline-flex; align-items: center; gap: 6px; background: var(--widget); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 3px 10px; text-decoration: none; white-space: nowrap; }
+a.btn:hover { border-color: #666; }
+#support .heart { color: var(--pop); font-size: 13px; line-height: 1; }
 #runwrap { position: relative; display: inline-flex; }
 #runseg { border-color: var(--accent); } #runseg button { padding: 3px 12px; } #run-more { padding: 3px 7px; border-left: 1px solid rgba(255,255,255,.35); }
 #runseg button:disabled { opacity: 1; background: var(--widget); border-color: var(--border); color: var(--dim); }
