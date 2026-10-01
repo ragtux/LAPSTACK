@@ -49,6 +49,7 @@ globalThis.lapstackRawPreview = (bytes) => { const d = rawMod ? rawMod.preview(b
 globalThis.lapstackRawMetadata = (bytes) => (rawMod && rawMod.metadata(bytes)) || null;
 
 let engine = null;
+let initError = null;     // why 'init' left no engine (no WebGPU adapter, usually): every later call reports it
 let gifw = null;          // the animated GIF being written (gif_begin … gif_end), see gif.rs
 let cancelled = false;
 let running = false;
@@ -107,6 +108,10 @@ let chain = Promise.resolve();
 const enqueue = (fn) => { chain = chain.then(fn).catch((e) => post({ type: 'error', text: (e && e.message) ? e.message : String(e) })); };
 // Requests carrying an `rid` are remote calls from the page (see call() there): the reply
 // echoes the rid, and a failure answers that call instead of surfacing as a run error.
+// Without an engine (init failed) a call that would reach it fails with that reason instead
+// of a null property error; thumbnails and the content credentials don't need the engine.
+const NO_ENGINE = new Set(['init', 'thumbs', 'make_cert', 'sign']);
+const needEngine = (m) => { if (!engine && !NO_ENGINE.has(m.type)) throw new Error('WebGPU failed to initialise, so there is nothing to run on: ' + (initError || 'the engine is not ready')); };
 const rpc = (m, fn) => enqueue(async () => {
   try { await fn(); } catch (e) { post({ type: 'rpc-error', rid: m.rid, text: (e && e.message) ? e.message : String(e) }); }
 });
@@ -126,6 +131,7 @@ self.onmessage = (ev) => {
 // do: full-resolution aligned frames (plain or In focus), the stereo / rocking views, the
 // 3D model, GIF quantisation + LZW, image encoding, and content credentials.
 async function handleCall(m) {
+  needEngine(m);
   if (m.type === 'save') {
     // m.overlay: the scale bar and caption (JSON, see overlay.rs) burned into the stacked images; '' = none
     const bytes = engine.encode(m.kind, m.format || 'png', m.quality || 90, !!m.meta, !!m.crop, m.overlay || '');
@@ -251,6 +257,7 @@ async function handleCall(m) {
 
 async function handle(m) {
   try {
+    needEngine(m);
     if (m.type === 'init') {
       if (m.debug && self.navigator.gpu) {
         const dbg = (t) => post({ type: 'debug', text: t });
@@ -276,7 +283,7 @@ async function handle(m) {
       let adapter = null;
       try { adapter = await self.navigator.gpu?.requestAdapter(); if (!adapter) adapter = await self.navigator.gpu?.requestAdapter(); } catch {}
       const ainfo = adapter ? { vendor: adapter.info.vendor, architecture: adapter.info.architecture, description: adapter.info.description, fallback: !!adapter.isFallbackAdapter } : null;
-      engine = await create_engine();
+      try { engine = await create_engine(); } catch (e) { initError = (e && e.message) ? e.message : String(e); throw e; }
       post({ type: 'ready', info: { ...JSON.parse(engine.info()), ...(ainfo || {}) } });
     } else if (m.type === 'thumbs') {
       if (thumbJob) { thumbJob.files.push(...m.files); thumbJob.indices.push(...m.indices); thumbJob.uids.push(...m.uids); }
