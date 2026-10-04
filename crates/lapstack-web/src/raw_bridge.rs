@@ -64,7 +64,7 @@ fn take(o: JsValue) -> Result<RawImage, String> {
         (b, c) => return Err(format!("raw: the decoder returned {b}-bit, {c}-channel pixels")),
     };
     let color = match Reflect::get(&o, &JsValue::from_str("color")).ok().and_then(|v| v.as_string()) {
-        Some(s) => Some(serde_json::from_str::<RawColor>(&s).map_err(|e| format!("raw: the decoder's colour description does not parse: {e}"))?),
+        Some(s) => Some(serde_json::from_str::<RawColor>(&s).map_err(|e| format!("raw: the decoder's color description does not parse: {e}"))?),
         None => None,
     };
     if let Ok(f) = Reflect::get(&o, &JsValue::from_str("free")) {

@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
 // SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
-// lapstack WebGPU kernels. Same maths as lapstack-core/src/pyramid.rs + fuse.rs
+// lapstack WebGPU kernels. Same math as lapstack-core/src/pyramid.rs + fuse.rs
 // (and the CUDA twins in gpu.rs): binomial [1 4 6 4 1]/16 taps, reflect-101
 // borders, luma energy, binomial window, winner-take-all select, halo-control weights.
 //
-// Every level's three colour planes live in ONE buffer, plane c at offset
+// Every level's three color planes live in ONE buffer, plane c at offset
 // c * w * h (keeps the storage-buffer count per dispatch small). Kernels take a
 // uniform `P` with the geometry they need; plane offsets are passed explicitly.
 
@@ -231,7 +231,7 @@ fn lanczos3(d: f32) -> f32 {
     return sin(a) / a * (sin(b) / b);
 }
 // the kernel's weights at fraction t, taps at 1 - taps/2 .. from the floor; the
-// distance-form kernels normalised to sum 1 (Lanczos needs it, the others are exact)
+// distance-form kernels normalized to sum 1 (Lanczos needs it, the others are exact)
 fn kweights(k: u32, t: f32) -> array<f32, 6> {
     var w = array<f32, 6>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     switch k {
@@ -332,7 +332,7 @@ fn cost(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
     }
 }
 
-// ---- brightness normalisation (lapstack_core::brightness) ----
+// ---- brightness normalization (lapstack_core::brightness) ----
 // frame 0's channel means per 64x64 block: `a` = 3 planes (p.w x p.h) -> o[(by*p.ow+bx)*3 + c]
 @compute @workgroup_size(16, 16)
 fn blk_mean(@builtin(global_invocation_id) g: vec3<u32>) {
@@ -492,7 +492,7 @@ fn conv_taps(@builtin(global_invocation_id) g: vec3<u32>) {
     o[y * p.w + x] = select(s, abs(s), p.flag == 1u);
 }
 // box filter with border clipping (mean over the in-image part of the window).
-// box_h: a -> b (row sums); box_v: b -> o (column sums, normalised by count). klen = radius.
+// box_h: a -> b (row sums); box_v: b -> o (column sums, normalized by count). klen = radius.
 @compute @workgroup_size(16, 16)
 fn box_h(@builtin(global_invocation_id) g: vec3<u32>) {
     let x = g.x; let y = g.y;
@@ -639,7 +639,7 @@ fn median3(@builtin(global_invocation_id) g: vec3<u32>) {
     }
     o[y * p.w + x] = v[4];
 }
-// o = min(1, a * f0) + f1   (confidence normalisation / data weights)
+// o = min(1, a * f0) + f1   (confidence normalization / data weights)
 @compute @workgroup_size(256)
 fn scale_clamp(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = gid1(g, nwg); if (i >= p.w * p.h) { return; }
@@ -879,7 +879,7 @@ fn wav_weight(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgrou
 }
 // wav_acc: the re-warped frame `a` (3 planes) accumulates into b (3 planes) and its
 // weight into o, the weight map `wt` on the ow×oh grid of klen-pixel blocks taken
-// bilinearly (samples at block centres).
+// bilinearly (samples at block centers).
 @compute @workgroup_size(256)
 fn wav_acc(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = gid1(g, nwg); let n = p.w * p.h; if (i >= n) { return; }

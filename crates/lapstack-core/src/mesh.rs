@@ -16,7 +16,7 @@
 //!
 //! Coordinates are right-handed with the image's width as the unit: x runs
 //! along the width (−0.5 … 0.5), y up the height (±0.5 · h/w), z out of the
-//! image towards the viewer, so the far end of the stack lies on z = 0 and
+//! image toward the viewer, so the far end of the stack lies on z = 0 and
 //! the near end on z = `relief` (the depth of the stack as a fraction of the
 //! width, the one number the depth map cannot know). With `near_first` frame
 //! 0 is the near end (the focus went front to back), as in [`crate::view`].
@@ -239,7 +239,7 @@ pub fn encode_texture(rgb8: &[u8], w: usize, h: usize, f: TexFormat) -> Result<V
 /// library `mtl` (a file name).
 pub fn obj(m: &Mesh, mtl: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(m.vertices() * 80 + m.triangles() * 40);
-    let _ = writeln!(out, "# lapstack 3D model: {}x{} vertices, {} triangles; x = width (1 unit), y up, z towards the viewer", m.nx, m.ny, m.triangles());
+    let _ = writeln!(out, "# lapstack 3D model: {}x{} vertices, {} triangles; x = width (1 unit), y up, z toward the viewer", m.nx, m.ny, m.triangles());
     let _ = writeln!(out, "mtllib {mtl}\no stack");
     for p in &m.pos {
         let _ = writeln!(out, "v {:.6} {:.6} {:.6}", p[0], p[1], p[2]);

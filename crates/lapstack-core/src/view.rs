@@ -18,10 +18,10 @@
 //!
 //! The shear is a forward warp per row ([`shear_row`]): consecutive samples
 //! whose destinations are less than [`MAX_SPAN`] apart form a patch of the
-//! surface, rasterised with a nearness test so the nearer surface wins where
+//! surface, rasterized with a nearness test so the nearer surface wins where
 //! two overlap (a foreground edge sliding over the background); a larger gap
 //! is a depth discontinuity, and the hole it opens is filled from the farther
-//! of its two neighbours (the background shows through, the foreground is not
+//! of its two neighbors (the background shows through, the foreground is not
 //! stretched). Pixels are sampled linearly between source columns, so a view
 //! is as smooth as the image.
 
@@ -39,7 +39,7 @@ pub struct View {
     /// The depth that stays where it is, as a fraction of the stack
     /// (0.5 = the middle of the stack, on the "window" plane of a stereo pair).
     pub pivot: f32,
-    /// Frame 0 is the near end (the focus travelled front to back). This
+    /// Frame 0 is the near end (the focus traveled front to back). This
     /// decides which surface wins where two overlap, and which way a view
     /// turns for a given shift.
     pub near_first: bool,
@@ -161,8 +161,8 @@ pub fn shear_row(z: &[f32], k: f32, pivot: f32, near: f32, src: &mut [f32], zb: 
         }
         return;
     }
-    // holes: the farther of the two neighbours reaches across; at the row's
-    // ends the one neighbour there does
+    // holes: the farther of the two neighbors reaches across; at the row's
+    // ends the one neighbor there does
     let mut c = 0;
     while c < w {
         if !src[c].is_nan() {
@@ -352,7 +352,7 @@ mod tests {
         }
         // left of it the background slid right by 5: column 34 shows source 29
         assert!((out[34] - 29.0).abs() < 1e-4, "{}", out[34]);
-        // the strip the block vacated, 55..65, is a hole: the far neighbour (background from column 60 → 65) fills it, not the block
+        // the strip the block vacated, 55..65, is a hole: the far neighbor (background from column 60 → 65) fills it, not the block
         for c in 55..65 {
             assert_eq!(out[c], 60.0, "column {c} shows the background, got {}", out[c]);
         }

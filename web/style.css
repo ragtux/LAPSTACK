@@ -36,7 +36,7 @@ select { background: var(--widget); color: var(--text); border: 1px solid var(--
 #toolbar { align-items: center; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--border); }
 /* wordmark: all caps, tracked out, and the one place the display font is used */
 #toolbar .title { font-family: var(--font-logo); font-size: 21px; font-weight: 600; line-height: 1; text-transform: uppercase; letter-spacing: .13em; padding-right: 14px; }
-/* toolbar: [file + run] [steps] [ ]; equal outer columns keep the steps centred */
+/* toolbar: [file + run] [steps] [ ]; equal outer columns keep the steps centered */
 #toolbar { display: grid; grid-template-columns: minmax(max-content, 1fr) auto minmax(0, 1fr); column-gap: 10px; }
 #toolbar button { white-space: nowrap; }
 #tb-left, #tb-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -111,8 +111,8 @@ a.btn:hover { border-color: #666; }
 /* viewer header: floats over the canvas as glass chips (like the zoom bar), so the image gets
    the full height and the controls read against dark glass in larger type. Layer + context
    controls stack down the left edge in one fixed-width column, every chip the full column
-   width in the same lg type (segmented controls become vertical stacks); vs sits at the top centre and the compare partner + its controls
-   run in a row to its right. Equal outer grid columns keep vs at the exact horizontal centre
+   width in the same lg type (segmented controls become vertical stacks); vs sits at the top center and the compare partner + its controls
+   run in a row to its right. Equal outer grid columns keep vs at the exact horizontal center
    of the canvas. Only the chips take the pointer, so the canvas stays draggable around them. */
 #vhead { position: absolute; left: 10px; right: 10px; top: 10px; z-index: 3; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: start; column-gap: 10px; font-size: var(--fs-lg); pointer-events: none; }
 #vhead * { pointer-events: auto; }
@@ -126,15 +126,15 @@ a.btn:hover { border-color: #666; }
 #vhead .seg, #vhead .tog, #vhead .stepper { height: 34px; background: var(--glass); border: 1px solid var(--glass-border); border-radius: 8px; backdrop-filter: blur(4px); }
 #vhead .seg button { background: transparent; padding: 0 14px; font-size: var(--fs-lg); border-right-color: var(--glass-border); }
 #vhead .seg button.on { background: var(--gc, var(--accent)); }
-/* layer groups are colour-coded so what is on screen reads at a glance: Source orange, Stack blue,
-   Depth green. data-group on a chip (or a container of chips) picks the group colour; it tints the
+/* layer groups are color-coded so what is on screen reads at a glance: Source orange, Stack blue,
+   Depth green. data-group on a chip (or a container of chips) picks the group color; it tints the
    selected button, the chip border and the toggle box, and the pane labels below */
 [data-group=source] { --gc: var(--c-source); } [data-group=stack] { --gc: var(--c-stack); } [data-group=depth] { --gc: var(--c-depth); }
 #vhead .seg[data-group], #vhead [data-group] .seg, #vhead [data-group] .tog, #vhead [data-group] .stepper { border-color: color-mix(in srgb, var(--gc) 65%, var(--glass-border)); }
 #vhead #viewseg button:not(.on):not(:disabled), #vhead .drop[data-group] > button { color: var(--gc); }
-/* the compare partner picker is a chip with its own drop-down list (a native select cannot colour
+/* the compare partner picker is a chip with its own drop-down list (a native select cannot color
    its rows: Chrome paints the popup's hover/selected rows with the system highlight), each row in
-   its layer's colour, the hovered and current rows filled with it */
+   its layer's color, the hovered and current rows filled with it */
 #vhead .drop { position: relative; overflow: visible; }
 #vhead .drop > .menu { left: 0; width: max-content; min-width: 100%; padding: 4px; gap: 2px; }
 #vhead .drop .menu button { background: transparent; border: 0; border-radius: 5px; text-align: left; padding: 6px 12px; font-size: var(--fs-lg); color: var(--gc, var(--text)); white-space: nowrap; }
@@ -298,17 +298,17 @@ body.log-collapsed #toasts { bottom: 46px; }
 #keys-list > div > span:last-child { white-space: nowrap; line-height: 20px; }
 #keys kbd { display: inline-block; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 4px; background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.22); box-shadow: 0 1px 0 rgba(0,0,0,.5); color: #fff; font: 600 var(--fs-sm)/18px var(--font); text-align: center; }
 #keys.collapsed #keys-list { display: none; }
-/* pane labels: block letters floating over every visible image (pane centres when split,
-   hugging the divider in swipe, centred when a single image fills the canvas); draw() keeps
-   them below the header row. White letters on a box filled with the layer's group colour
-   (Source orange, Stack blue, Depth green; dark grey for a neutral label), stroked in white
+/* pane labels: block letters floating over every visible image (pane centers when split,
+   hugging the divider in swipe, centered when a single image fills the canvas); draw() keeps
+   them below the header row. White letters on a box filled with the layer's group color
+   (Source orange, Stack blue, Depth green; dark gray for a neutral label), stroked in white
    and hugging the letters. A hint ("drag to paint", "loading full res") sits under the name in
    smaller mixed case */
 #panelabels { position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; overflow: hidden; z-index: 2; }
 .plab { position: absolute; top: 8px; display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 5px 10px 7px; border: 3px solid #fff; border-radius: 6px; background: var(--gc, #333); color: #fff; font-size: 34px; font-weight: 700; line-height: 1; text-transform: uppercase; letter-spacing: .1em; white-space: nowrap; }
 .plab.l { align-items: flex-start; } .plab.r { align-items: flex-end; }
 .plab .hint { font-size: var(--fs-lg); font-weight: 600; line-height: 1.2; text-transform: none; letter-spacing: 0; }
-/* frame scrubber: vertical slider overlaid on the canvas, centred on its left edge; frame 1
+/* frame scrubber: vertical slider overlaid on the canvas, centered on its left edge; frame 1
    at the top like the filmstrip, so wheel-down and slider-down both advance. The frame
    counter (e.g. 49/100) is the more useful readout, so it gets its own large box directly
    below the track. Its default height is min(50%, 420px); layoutScrub() overrides top and
@@ -331,7 +331,7 @@ body.log-collapsed #toasts { bottom: 46px; }
 #zoombar #zoom { min-width: 40px; text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
 #zoombar .seg, #cmpbar .seg { background: transparent; height: 32px; } #zoombar .seg button, #cmpbar .seg button, #cmpbar > button { padding: 0 14px; }
 #cmpbar > button { height: 32px; border-radius: 6px; }
-/* compare mode + flip, centred at the bottom of the canvas under the split */
+/* compare mode + flip, centered at the bottom of the canvas under the split */
 #cmpbar { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); z-index: 2; display: inline-flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 8px; background: var(--glass); border: 1px solid var(--glass-border); backdrop-filter: blur(4px); cursor: default; font-size: var(--fs-lg); }
 /* workflow steps + step panels */
 .steps button { padding: 4px 16px; } .steps button b { font-weight: 600; opacity: .6; margin-right: 6px; } .steps button.on b { opacity: 1; }
@@ -343,7 +343,7 @@ body.log-collapsed #toasts { bottom: 46px; }
 .panel .val { color: var(--text); }
 .panel .dim button { height: 20px; padding: 0 7px; margin-left: 6px; font-size: var(--fs-xs); vertical-align: middle; }
 /* Save step: body.step-save hides the filmstrip, canvas, panel and log; #savepage fills #main
-   and centres one card that reuses the panel's row grid at a wider measure */
+   and centers one card that reuses the panel's row grid at a wider measure */
 body.step-save #left, body.step-save #center, body.step-save #logwrap { display: none; }
 body.step-save #toasts { bottom: 16px; }
 #savepage { flex: 1; min-width: 0; overflow-y: auto; display: flex; justify-content: center; align-items: flex-start; padding: 48px 24px; }

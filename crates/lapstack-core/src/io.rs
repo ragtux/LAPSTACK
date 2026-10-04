@@ -195,7 +195,7 @@ pub fn load_capture_time(path: &str) -> Result<Option<f64>, String> {
     Ok(meta::extract(&whole).capture_time())
 }
 
-/// The focus distance a frame's metadata records, in metres: the EXIF
+/// The focus distance a frame's metadata records, in meters: the EXIF
 /// SubjectDistance (a raw's own reader when its EXIF is not a TIFF
 /// structure), read like `load_capture_time` reads the time — the head of the
 /// file, or a window around a trailing IFD; failing that, what `exiftool`

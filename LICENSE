@@ -1,4 +1,4 @@
-lapstack — proprietary licence
+lapstack — proprietary license
 
 Copyright (c) 2026 RAGTUX LLC, Minnesota, USA. All rights reserved.
 
@@ -8,22 +8,22 @@ lapstack is proprietary software. This file covers the source code in this
 repository and everything built from it — the lapstack command-line tool, the
 browser application, the desktop application, the Lightroom Classic plug-in,
 the documentation, the images and the test data (together, "the Software").
-It is not open-source software, and no open-source licence applies to it.
+It is not open-source software, and no open-source license applies to it.
 Earlier revisions of this repository were published under the GNU Affero
-General Public License, version 3; that licence continues to apply to the
+General Public License, version 3; that license continues to apply to the
 copies distributed under it, and not to this or any later revision.
 
 
 1. THE SOURCE CODE
 
-No licence to the source code is granted by this file or by access to this
+No license to the source code is granted by this file or by access to this
 repository. You may not copy, modify, compile, merge, publish, distribute,
 sublicense, sell or create derivative works from the source code, in whole or
 in part, without the prior written permission of RAGTUX LLC. The source code
 is confidential.
 
 
-2. THE PROGRAMS: END-USER LICENCE
+2. THE PROGRAMS: END-USER LICENSE
 
 If RAGTUX LLC makes a compiled program, a browser application or an
 installable package of the Software available to you (a "Program"), the
@@ -31,20 +31,20 @@ following terms govern your use of it, unless a signed agreement between you
 and RAGTUX LLC says otherwise.
 
 2.1 Grant. Subject to these terms, RAGTUX LLC grants you a personal,
-    non-exclusive, non-transferable, revocable licence to use the Program:
+    non-exclusive, non-transferable, revocable license to use the Program:
 
     (a) on the free tier, for personal, educational and evaluation use, with
         the capabilities and limits RAGTUX LLC sets for that tier;
 
     (b) on a paid tier, within the term, the number of seats and machines and
-        the permitted use (personal or commercial) stated for the licence key
+        the permitted use (personal or commercial) stated for the license key
         you bought, as published at https://lapstack.ragtux.com/pricing/ at
         the time of purchase.
 
-    A yearly licence does not renew on its own; when it ends, the Program
+    A yearly license does not renew on its own; when it ends, the Program
     continues under the free tier.
 
-2.2 Licence keys. A licence key is issued to a named person or organisation
+2.2 License keys. A license key is issued to a named person or organization
     and may not be shared, published, resold or transferred. RAGTUX LLC may
     revoke a key that has been shared or obtained by fraud.
 
@@ -54,7 +54,7 @@ and RAGTUX LLC says otherwise.
     (a) copy the Program other than for backup, or distribute it;
     (b) reverse engineer, decompile, disassemble or otherwise attempt to
         derive the source code of the Program, or defeat, remove or
-        circumvent a licence check, a tier limit or a watermark;
+        circumvent a license check, a tier limit or a watermark;
     (c) modify the Program or make a derivative work of it;
     (d) rent, lease, lend, sublicense or host the Program for others, or
         offer its functions as a service;
@@ -64,19 +64,19 @@ and RAGTUX LLC says otherwise.
     the Program or in the results. The Program processes them on your own
     machine; the browser application does not upload them.
 
-2.5 Updates. Updates within a major version are included in a licence. A new
-    major version may require a new or upgraded licence.
+2.5 Updates. Updates within a major version are included in a license. A new
+    major version may require a new or upgraded license.
 
 2.6 Third-party components. The Program includes components under their own
-    licences, listed with their notices in THIRD-PARTY.md. In particular,
+    licenses, listed with their notices in THIRD-PARTY.md. In particular,
     camera raw decoding is provided by rawler, licensed under the GNU Lesser
-    General Public License, version 2.1: that licence, not this one, governs
+    General Public License, version 2.1: that license, not this one, governs
     that component, including your right to obtain its source and to modify
     and relink it (see vendor/rawler/LAPSTACK-PATCH.md). The bundled Fira
     fonts are under the SIL Open Font License, version 1.1. Nothing in this
-    file restricts a right those licences grant.
+    file restricts a right those licenses grant.
 
-2.7 Termination. This licence ends automatically if you breach it. On
+2.7 Termination. This license ends automatically if you breach it. On
     termination you must stop using the Program and destroy your copies.
     Sections 2.4, 3, 4 and 5 survive termination.
 
@@ -97,25 +97,25 @@ you.
 TO THE MAXIMUM EXTENT PERMITTED BY LAW, RAGTUX LLC SHALL NOT BE LIABLE FOR ANY
 INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL OR PUNITIVE DAMAGES, OR FOR ANY
 LOSS OF DATA, IMAGES, PROFITS OR BUSINESS, ARISING OUT OF OR IN CONNECTION
-WITH THE SOFTWARE OR THIS LICENCE, HOWEVER CAUSED AND ON ANY THEORY OF
+WITH THE SOFTWARE OR THIS LICENSE, HOWEVER CAUSED AND ON ANY THEORY OF
 LIABILITY, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES. RAGTUX LLC'S
-TOTAL LIABILITY UNDER THIS LICENCE SHALL NOT EXCEED THE AMOUNT YOU PAID FOR
-THE LICENCE IN THE TWELVE MONTHS BEFORE THE CLAIM, OR TEN US DOLLARS IF YOU
+TOTAL LIABILITY UNDER THIS LICENSE SHALL NOT EXCEED THE AMOUNT YOU PAID FOR
+THE LICENSE IN THE TWELVE MONTHS BEFORE THE CLAIM, OR TEN US DOLLARS IF YOU
 PAID NOTHING.
 
 
 5. GENERAL
 
-This licence is governed by the laws of the State of Minnesota, USA, without
+This license is governed by the laws of the State of Minnesota, USA, without
 regard to its conflict-of-laws rules. The state and federal courts located in
 Minnesota have exclusive jurisdiction over any dispute arising from it, and
-you consent to that jurisdiction. If a provision of this licence is held
-unenforceable, the rest remains in force. This licence is the entire
+you consent to that jurisdiction. If a provision of this license is held
+unenforceable, the rest remains in force. This license is the entire
 agreement between you and RAGTUX LLC about the Software and supersedes any
 prior understanding. RAGTUX LLC may publish revised terms with later versions
 of the Program; the terms that came with the version you use apply to it.
 
-"lapstack" and "RAGTUX" are names of RAGTUX LLC; this licence grants no right
+"lapstack" and "RAGTUX" are names of RAGTUX LLC; this license grants no right
 to use them.
 
 Licensing questions: https://lapstack.ragtux.com/

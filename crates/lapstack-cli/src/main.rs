@@ -212,7 +212,7 @@ fn main() {
             "--gpu-align" => a.gpu = true,
             "--scale-bar" => {
                 // CAL[:LENGTH]: the size of a pixel (0.325 = µm; 325nm), auto (the first frame's TIFF) or px (no
-                // calibration: the bar is labelled in pixels), and the bar's length
+                // calibration: the bar is labeled in pixels), and the bar's length
                 let s = next(&mut i);
                 let mut it = s.splitn(2, ':');
                 let cal = it.next().unwrap_or("");
@@ -659,7 +659,7 @@ fn help() {
            --save-conf            write the depth confidence map (16-bit, 65535 = 1)\n\
            --no-metadata          do not copy the first frame's EXIF / ICC profile / XMP into the output\n\
            --no-crop              keep the full frame instead of cropping to the area every aligned frame covers\n\
-           --no-brightness        do not equalise the frames' brightness to frame 0 (exposure flicker)\n\
+           --no-brightness        do not equalize the frames' brightness to frame 0 (exposure flicker)\n\
            --slabs SIZE[:OVERLAP] also fuse slabs of SIZE consecutive frames, overlapping by OVERLAP [2],\n\
                                   each on its own: thick planes of focus to retouch from\n\
            --slab-dir DIR         where the slabs go, in the output's format [<output stem>_slabs]\n\
@@ -716,14 +716,14 @@ fn help() {
            --mesh-texture EDGE[:jpeg[:Q] | png]   the texture's long edge, 0 = full [8192], and format [jpeg:92]\n\
          Linear DNG (-o stacked.dng; raw in, DNG out): the raws are developed to the camera's own linear\n\
          space (no white balance, matrix or curve baked in), fused in the look that frame 0's white balance and\n\
-         matrix give, and the result is written back in camera space with the camera's colour matrices, so a\n\
+         matrix give, and the result is written back in camera space with the camera's color matrices, so a\n\
          raw converter develops the stack like a raw, highlights past white and all; frames that are not raws\n\
          are taken as sRGB and written as a linear sRGB DNG. The slabs, the weighted average and the stereo pair\n\
          are DNGs too; the rocking views are TIFFs; a stack must be all raws or none.\n\
          Scale bar and caption (microscopy), burned into the fused image, the weighted average and the views:\n\
            --scale-bar CAL[:LENGTH]   CAL = the size of one pixel of the frames in µm (0.325, or 325nm), auto = read\n\
                                   from the first frame's TIFF (ImageJ's unit=, OME-XML's PhysicalSizeX, a resolution in\n\
-                                  cm or inch from a writer that is not a camera), or px = no calibration, a bar labelled\n\
+                                  cm or inch from a writer that is not a camera), or px = no calibration, a bar labeled\n\
                                   in pixels of the frames; LENGTH = the bar's length with a unit (100um, 2mm, 500nm; in\n\
                                   pixels after px) [auto: the 1-2-5 value nearest a fifth of the width]; the label picks\n\
                                   its unit (500 nm, 100 µm, 2.5 mm)\n\
@@ -732,14 +732,14 @@ fn help() {
            --overlay-pos BAR[,TEXT]   the corners, tl | tr | bl | br [br,bl]; in one corner the text goes above the bar\n\
            --overlay-size PCT     the font size as % of the image height; everything else scales with it [3]\n\
            --overlay-color C      white | black [white]\n\
-           --overlay-style S      halo (a thin outline in the other colour) | box (a translucent box behind) | plain [halo]\n\
+           --overlay-style S      halo (a thin outline in the other color) | box (a translucent box behind) | plain [halo]\n\
            --depth MODE           dff = depth from focus (default) | winner = pyramid winner map\n\
            --depth-level L        (winner) pyramid level the map is read from [2 = 1/4 res]\n\
          Depth from focus (Jeon et al. 2019 focus measure, guided-filter aggregation,\n\
          sub-frame peaks, confidence-weighted edge-aware WLS):\n\
            --depth-scale S        work at 1/2^S resolution [1]\n\
            --depth-focus F        rdf[:RIN[:ROUT]] ring difference filter [rdf:1:3] | sml[:STEP]\n\
-           --depth-agg R[:EPS]    guided-filter aggregation radius / regulariser [3:1e-4]; 0 = off\n\
+           --depth-agg R[:EPS]    guided-filter aggregation radius / regularizer [3:1e-4]; 0 = off\n\
            --depth-lambda L       WLS smoothness [3]; 0 = off\n\
            --depth-sigma S        WLS guide-edge sensitivity, luma units [0.04]\n\
            --depth-cg N           WLS conjugate-gradient iteration cap [200]\n\

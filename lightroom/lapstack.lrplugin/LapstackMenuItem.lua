@@ -2,10 +2,10 @@
 -- SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 -- Library > Plug-in Extras > Stack with lapstack: the selected frames are
--- rendered with the plug-in's preferences (a 16-bit TIFF in the chosen colour
+-- rendered with the plug-in's preferences (a 16-bit TIFF in the chosen color
 -- space, or the originals as they are) into a folder of the system's
 -- temporary directory, lapstack runs over them in the order of the selection,
--- the result is added to the catalogue stacked with the first frame, and the
+-- the result is added to the catalog stacked with the first frame, and the
 -- rendered files go. No dialog opens: the settings are those of the Plug-in
 -- Manager's section, or of the last export through the lapstack service.
 

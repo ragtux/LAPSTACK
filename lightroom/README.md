@@ -1,6 +1,6 @@
 # lapstack for Lightroom Classic
 
-`lapstack.lrplugin` sends the frames of a focus stack out of the catalogue to
+`lapstack.lrplugin` sends the frames of a focus stack out of the catalog to
 the `lapstack` command-line tool and brings the stacked image back into it,
 stacked with the first frame — the usual focus-stacking round trip. It needs
 Lightroom Classic 6 or later and a `lapstack` binary
@@ -19,7 +19,7 @@ by default), alignment on or off with its `--align-coarsen`, `--halo-control`,
 the weighted average and the depth map as extra files, CUDA, and a free line of
 extra options appended to the command as typed (`--interpolation lanczos3
 --stereo 3`, say). The result is written next to the first frame and added to
-the catalogue stacked above it; lapstack's log goes next to it as
+the catalog stacked above it; lapstack's log goes next to it as
 `<name>.lapstack.log`.
 
 ## Use
@@ -29,7 +29,7 @@ Two doors, the same run behind them:
 - **Library > Plug-in Extras > Stack with lapstack** — select the frames of
   one stack (in order: sort the grid by capture time), choose the item. The
   frames are rendered with the settings of the Plug-in Manager (a 16-bit TIFF
-  in the chosen colour space, or *the originals* — the raws as shot, which is
+  in the chosen color space, or *the originals* — the raws as shot, which is
   what a DNG output wants) into a temporary folder, lapstack runs, the result
   is imported and selected, the rendered files go (*keep the rendered frames*
   copies them next to the output first). No dialog opens.
@@ -37,7 +37,7 @@ Two doors, the same run behind them:
   own file settings (render 16-bit TIFF, or Original for the raws), image
   sizing, output sharpening and metadata sections, and the plug-in's own
   section with the same lapstack settings; the location and naming sections
-  are hidden (Lightroom renders into a temporary folder it removes afterwards).
+  are hidden (Lightroom renders into a temporary folder it removes afterward).
   The settings are saved in the export preset, and closing the dialog with
   Export makes them the menu item's too.
 

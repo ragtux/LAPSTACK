@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
 // SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
-//! Fusion rules of Wang & Chang 2011 (§III), generalised to N frames.
+//! Fusion rules of Wang & Chang 2011 (§III), generalized to N frames.
 //!
 //! * Band-pass levels `0 ≤ l < N` — **maximum region energy** (eq. 13–14):
 //!   `RE_l(i,j) = Σ ω(m,n) L_l(i+m, j+n)²` over a small window, and the fused
@@ -19,7 +19,7 @@
 //!
 //! Decisions are made on luminance (Y = .299R + .587G + .114B of the
 //! coefficients — the pyramid is linear, so that *is* the luma pyramid) and
-//! applied to all three channels, so colour never splits at a selection edge.
+//! applied to all three channels, so color never splits at a selection edge.
 //!
 //! * **Halo control** (`halo` > 0) — the levels coarser than `depth_level`
 //!   do not pick their own winners. Each level's winner-take-all is blind to
@@ -305,7 +305,7 @@ pub fn fuse_residuals(tops: &[Img3], params: &FuseParams) -> Img3 {
     out
 }
 
-/// Nearest-neighbour upsample of a level-`level` index map to `w×h`, as f32.
+/// Nearest-neighbor upsample of a level-`level` index map to `w×h`, as f32.
 pub fn upsample_index<T: Copy + Into<f32> + Sync>(win: &[T], dw: usize, dh: usize, w: usize, h: usize, level: usize) -> Vec<f32> {
     let scale = 1usize << level;
     let mut depth = vec![0f32; w * h];

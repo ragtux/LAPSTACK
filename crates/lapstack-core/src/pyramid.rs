@@ -15,7 +15,7 @@
 
 use rayon::prelude::*;
 
-/// 3-plane float image (RGB, normalised to [0, 1]). Row-major, plane-separated.
+/// 3-plane float image (RGB, normalized to [0, 1]). Row-major, plane-separated.
 #[derive(Clone)]
 pub struct Img3 {
     pub w: usize,
@@ -119,7 +119,7 @@ pub fn reduce(src: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
 }
 
 /// 1-D EXPAND weights. Even output samples sit on a coarse sample and blend
-/// its two neighbours; odd samples are the midpoint of their two neighbours.
+/// its two neighbors; odd samples are the midpoint of their two neighbors.
 /// (2·[1 6 1]/16 and 2·[4 4]/16 — the factor 4 of eq. (5) is 2 per axis.)
 const EVEN: [f32; 3] = [2.0 * KERNEL[0], 2.0 * KERNEL[2], 2.0 * KERNEL[4]];
 const ODD: f32 = 2.0 * KERNEL[1];

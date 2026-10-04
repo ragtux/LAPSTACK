@@ -3,7 +3,7 @@
 lapstack is a from-scratch implementation: the algorithm comes from these
 papers, not from anyone's source. They are cited here rather than redistributed
 — they are their authors' and publishers' work, under their own copyright, and
-this repository has no licence to hand them on.
+this repository has no license to hand them on.
 
 ## The pyramid
 

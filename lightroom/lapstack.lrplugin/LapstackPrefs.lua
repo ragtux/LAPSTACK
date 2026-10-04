@@ -26,7 +26,7 @@ M.defaults = {
     lapstack_extra = '',             -- appended to the command line as typed
     lapstack_keep = false,           -- keep the rendered frames next to the output
     lapstack_render = 'TIFF',        -- the menu item's render: TIFF (16-bit) | ORIGINAL (the raws as they are)
-    lapstack_colorspace = 'AdobeRGB', -- the menu item's TIFF colour space
+    lapstack_colorspace = 'AdobeRGB', -- the menu item's TIFF color space
 }
 
 -- The order the settings are declared in for the export presets (exportPresetFields).

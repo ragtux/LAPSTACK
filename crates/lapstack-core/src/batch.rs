@@ -127,7 +127,7 @@ pub fn expand_dirs(inputs: &[String]) -> Result<Vec<String>, String> {
 
 /// The frames a `--skip` list leaves out of a list of `n`: 1-based positions
 /// and ranges, comma-separated (`3,7-9,12`), returned as sorted 0-based
-/// indices. A position past the end or a backwards range is an error: a typo
+/// indices. A position past the end or a backward range is an error: a typo
 /// should not stack the wrong frames.
 pub fn skip_list(spec: &str, n: usize) -> Result<Vec<usize>, String> {
     let mut out = Vec::new();
@@ -139,7 +139,7 @@ pub fn skip_list(spec: &str, n: usize) -> Result<Vec<usize>, String> {
         let pos = |s: &str| s.parse::<usize>().ok().filter(|&v| v >= 1).ok_or_else(|| format!("--skip: '{part}' is not a frame position (1-based) or range a-b"));
         let (a, b) = (pos(a)?, pos(b)?);
         if b < a {
-            return Err(format!("--skip: '{part}' runs backwards"));
+            return Err(format!("--skip: '{part}' runs backward"));
         }
         if b > n {
             return Err(format!("--skip: '{part}' is past the end ({n} frames)"));
@@ -162,7 +162,7 @@ pub fn split_count(inputs: &[String], n: usize) -> Vec<Stack> {
 }
 
 /// A new stack starts wherever the capture time steps by more than `gap`
-/// seconds (backwards too: a rewound clock is a different session). `times`
+/// seconds (backward too: a rewound clock is a different session). `times`
 /// are the frames' capture times, one per input.
 pub fn split_gap(inputs: &[String], times: &[f64], gap: f64) -> Vec<Stack> {
     assert_eq!(inputs.len(), times.len());
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn by_gap() {
         let inputs = v(&["a", "b", "c", "d", "e", "f"]);
-        // 1 s cadence, a 40 s pause, then a clock that went backwards
+        // 1 s cadence, a 40 s pause, then a clock that went backward
         let times = [100.0, 101.0, 102.5, 142.0, 143.0, 50.0];
         let s = split_gap(&inputs, &times, 5.0);
         assert_eq!(s.len(), 3);

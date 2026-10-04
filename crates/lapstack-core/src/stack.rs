@@ -223,7 +223,7 @@ struct LazyFrames {
     cur: Option<(usize, Img3)>,
     pending: VecDeque<(usize, JoinHandle<Result<Decoded, String>>)>,
     notes: Vec<String>,
-    /// Brightness normalisation: frame 0's channel means, and each frame's
+    /// Brightness normalization: frame 0's channel means, and each frame's
     /// gains once found (the depth pass decodes the frames a second time).
     ref_means: Option<[f64; 3]>,
     gains: Vec<Option<[f32; 3]>>,
@@ -239,7 +239,7 @@ struct LazyFrames {
     look: Option<DngInfo>,
 }
 
-/// One frame decoded: the image, its bit depth, and its own colour space in a
+/// One frame decoded: the image, its bit depth, and its own color space in a
 /// linear-DNG run (to catch a raw among TIFFs or the reverse).
 type Decoded = (Img3, Depth, Option<DngInfo>);
 
@@ -285,7 +285,7 @@ impl LazyFrames {
         self.ref_means?;
         let gs: Vec<f32> = self.gains.iter().flatten().flat_map(|g| g.iter().copied()).collect();
         let (lo, hi) = gs.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
-        Some(format!("brightness equalised to frame 0: gains {lo:.3} … {hi:.3}"))
+        Some(format!("brightness equalized to frame 0: gains {lo:.3} … {hi:.3}"))
     }
     /// Keep decoders running for frames `from..from+READ_AHEAD`.
     fn prefetch(&mut self, from: usize) {
@@ -463,12 +463,12 @@ impl AlignedFrames {
         }
         let gs: Vec<f32> = self.gains.iter().flatten().flat_map(|g| g.iter().copied()).collect();
         let (lo, hi) = gs.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
-        Some(format!("brightness equalised to frame 0: gains {lo:.3} … {hi:.3}"))
+        Some(format!("brightness equalized to frame 0: gains {lo:.3} … {hi:.3}"))
     }
 
     /// Frame `i` through the device: decoded here, then registered (the first
-    /// time), warped and equalised there; its focus slice when `measure`
-    /// asks. Afterwards the device holds it.
+    /// time), warped and equalized there; its focus slice when `measure`
+    /// asks. Afterward the device holds it.
     #[cfg(feature = "gpu")]
     fn process_gpu(&mut self, i: usize, measure: Option<&DepthParams>) -> Result<Option<Vec<f32>>, String> {
         let img = self.src.take(i)?;
@@ -716,7 +716,7 @@ fn weighted(src: &mut dyn FrameSource, params: &Params, floor: Option<&[f32]>, l
 }
 
 /// After the result: the slabs of `Params::slabs`, each fused on its own
-/// over the same (aligned, equalised) frames, cropped like the result, and
+/// over the same (aligned, equalized) frames, cropped like the result, and
 /// handed to `on_slab` one at a time — none is kept.
 fn fuse_slabs(
     src: &mut dyn FrameSource,

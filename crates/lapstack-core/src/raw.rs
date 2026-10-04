@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 //! Camera raw files as input frames: decoded, black and white levels applied,
-//! demosaicked, white-balanced as shot, taken through the camera's colour
+//! demosaicked, white-balanced as shot, taken through the camera's color
 //! matrix to sRGB and given the sRGB curve — the 16-bit RGB every other input
 //! becomes, turned the way the camera said. There is no exposure or tone
 //! adjustment: the frames of a stack are shot alike, and what matters to the
@@ -66,7 +66,7 @@ pub struct RawImage {
     /// mirror); the others come turned.
     pub turns: u8,
     pub flip: bool,
-    /// A linear development's camera colour.
+    /// A linear development's camera color.
     pub color: Option<RawColor>,
 }
 
@@ -94,7 +94,7 @@ pub struct RawMeta {
 /// The raw decoder, wherever it lives.
 pub trait RawBackend: Send + Sync {
     /// `develop` (turned 16-bit RGB or gray) or, `linear`, `develop_linear`
-    /// (three f32 planes, not turned, with the camera's colour).
+    /// (three f32 planes, not turned, with the camera's color).
     fn develop(&self, bytes: &[u8], linear: bool) -> Result<RawImage, String>;
     /// The camera's own JPEG preview, turned, 8-bit RGB.
     fn preview(&self, bytes: &[u8]) -> Option<RawImage>;
@@ -155,7 +155,7 @@ pub fn develop(bytes: &[u8]) -> Result<DynamicImage, String> {
 /// Decode a raw to the camera's own linear space — black and white levels,
 /// demosaic, the sensor's crop, turned as the camera said; no white balance,
 /// matrix or curve — with what the linear DNG needs to know about it
-/// (`dng.rs`). Three-colour sensors only: a monochrome or four-colour sensor
+/// (`dng.rs`). Three-color sensors only: a monochrome or four-color sensor
 /// has no place in an RGB DNG here.
 pub fn develop_linear(bytes: &[u8]) -> Result<(Img3, DngInfo), String> {
     let r = backend()?.develop(bytes, true)?;
@@ -164,7 +164,7 @@ pub fn develop_linear(bytes: &[u8]) -> Result<(Img3, DngInfo), String> {
         Pixels::Planes3(p) if p.iter().all(|v| v.len() == w * h) => p,
         _ => return Err("raw: the decoder returned no linear planes".into()),
     };
-    let c = r.color.ok_or_else(|| "raw: the decoder returned no camera colour".to_string())?;
+    let c = r.color.ok_or_else(|| "raw: the decoder returned no camera color".to_string())?;
     let img = Img3 { w, h, p };
     let img = if r.turns % 4 == 0 && !r.flip { img } else { crate::prep::rotate(&img, r.turns, r.flip) };
     let info = DngInfo::of_raw(&c.make, &c.model, c.matrices, c.wb, c.d65)?;
@@ -177,7 +177,7 @@ pub fn preview(bytes: &[u8]) -> Option<DynamicImage> {
     image_of(backend().ok()?.preview(bytes)?).ok()
 }
 
-/// The focus distance in metres from the file's own metadata (EXIF
+/// The focus distance in meters from the file's own metadata (EXIF
 /// SubjectDistance), for the files whose EXIF the TIFF reader does not reach.
 pub fn subject_distance(bytes: &[u8]) -> Option<f64> {
     backend().ok()?.metadata(bytes)?.subject_distance
@@ -320,7 +320,7 @@ mod dylib {
                 None
             } else {
                 let s = unsafe { CStr::from_ptr(o.color) }.to_string_lossy();
-                Some(serde_json::from_str::<RawColor>(&s).map_err(|e| format!("raw: the decoder's colour description does not parse: {e}"))?)
+                Some(serde_json::from_str::<RawColor>(&s).map_err(|e| format!("raw: the decoder's color description does not parse: {e}"))?)
             };
             Ok(RawImage { w, h, px, turns: o.turns, flip: o.flip != 0, color })
         }

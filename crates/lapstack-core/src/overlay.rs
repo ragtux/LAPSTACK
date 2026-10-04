@@ -13,7 +13,7 @@
 //   brings every frame onto frame 0's pixel grid and the crop only cuts that
 //   grid, so one number serves every output at full size; an output shrunk
 //   to a smaller long edge (an animation) passes the shrink as `scale`.
-//   A bar asked for without a calibration is labelled in pixels of the
+//   A bar asked for without a calibration is labeled in pixels of the
 //   frames ("500 px"), so a bar is drawn whenever one is asked for and a
 //   figure that is not calibrated still carries a scale.
 // * The bar's length is the 1-2-5 value nearest a fifth of the width, or the
@@ -25,15 +25,15 @@
 //   settings give the same figure at every resolution.
 // * The text is set in Fira Sans, the app's own face — a 30 KB subset of the
 //   Regular weight embedded below (`fonts/subset.py` made it from Mozilla's
-//   TTF; SIL OFL 1.1) — and rasterised by this module: a TrueType outline
+//   TTF; SIL OFL 1.1) — and rasterized by this module: a TrueType outline
 //   reader (glyf / loca / cmap / hmtx, simple and composite glyphs, no
 //   hinting) and the signed-area coverage accumulation of font-rs /
 //   stb_truetype v2: each edge deposits the area it sweeps into the pixels
 //   it crosses, and a running sum along the row gives the exact coverage of
 //   the nonzero-winding fill, anti-aliased for free.
 // * The result is a few `Patch`es of coverage over the corners they occupy
-//   (the ink, and behind it a halo — the ink dilated by a disc, in the
-//   other colour — or a translucent box), so nothing the size of the image
+//   (the ink, and behind it a halo — the ink dilated by a disk, in the
+//   other color — or a translucent box), so nothing the size of the image
 //   is ever allocated, and compositing costs the patches alone. The same
 //   patches serve the float image of the native path (`apply_f32`), the
 //   16-bit master of the browser (`apply_u16`) and the viewer's preview
@@ -118,9 +118,9 @@ impl Ink {
 pub enum Style {
     /// The ink alone.
     Plain,
-    /// A thin outline in the other colour (the ink dilated by a disc).
+    /// A thin outline in the other color (the ink dilated by a disk).
     Halo,
-    /// A translucent box in the other colour behind each block.
+    /// A translucent box in the other color behind each block.
     Box,
 }
 
@@ -145,7 +145,7 @@ impl Style {
 /// The overlay asked for. Empty (`is_empty`) when there is neither a bar nor text.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OverlayParams {
-    /// A scale bar wanted even without a calibration: labelled in pixels of the frames.
+    /// A scale bar wanted even without a calibration: labeled in pixels of the frames.
     pub bar: bool,
     /// The size of one pixel of the frames (frame 0's grid) in µm; 0 = not calibrated
     /// (no bar unless `bar` asks for a pixel one).
@@ -198,7 +198,7 @@ impl OverlayParams {
 // ---------------------------------------------------------------------------
 // lengths and units
 
-/// Micrometres in one of a unit: nm, µm (um, μm, micron), mm, cm, m, inch, Å.
+/// Micrometers in one of a unit: nm, µm (um, μm, micron), mm, cm, m, inch, Å.
 /// `None` for a unit that is not a length (ImageJ's "pixel") or unknown.
 pub fn unit_um(u: &str) -> Option<f64> {
     Some(match u.trim().trim_end_matches('.').to_lowercase().as_str() {
@@ -753,10 +753,10 @@ impl Raster {
     }
 }
 
-/// The `Ink` mask grown by a disc of radius `r` px (the halo): the maximum of
-/// the coverage over the disc, so soft edges stay soft. Each row of the
-/// output takes, for each row of the disc, the sliding maximum of that
-/// source row over the disc's half-width there.
+/// The `Ink` mask grown by a disk of radius `r` px (the halo): the maximum of
+/// the coverage over the disk, so soft edges stay soft. Each row of the
+/// output takes, for each row of the disk, the sliding maximum of that
+/// source row over the disk's half-width there.
 fn dilate(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     let mut out = src.to_vec();
     if r == 0 {
@@ -874,7 +874,7 @@ pub struct Patch {
 }
 
 /// The rendered overlay for an image of `w`×`h`: a patch per block, the
-/// colours, and what the bar came to.
+/// colors, and what the bar came to.
 pub struct Overlay {
     pub w: usize,
     pub h: usize,
@@ -1413,7 +1413,7 @@ mod tests {
     }
 
     /// A bar asked for without a calibration is a round count of frame pixels,
-    /// labelled so; at half the output size it measures the same frame pixels.
+    /// labeled so; at half the output size it measures the same frame pixels.
     #[test]
     fn uncalibrated_bar_in_pixels() {
         let p = OverlayParams { bar: true, ..Default::default() };

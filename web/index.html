@@ -106,7 +106,7 @@
       </div>
       <div id="zoombar"><span id="zoom"></span><div class="seg"><button id="fit" title="fit to view (f)">Fit</button><button id="z100" title="actual pixels (z)">100%</button></div></div>
       <div id="cmpbar" hidden><div class="seg"><button id="cm-swipe" title="one view, draggable divider">swipe</button><button id="cm-split" title="two panes, one zoom/pan">side by side</button></div><button id="flip" title="hold to flip (space)">flip</button></div>
-      <!-- frame scrubber: vertical, centred on the left edge of the canvas (frame 1 at the top, like the
+      <!-- frame scrubber: vertical, centered on the left edge of the canvas (frame 1 at the top, like the
            filmstrip), with the frame counter in its own box directly below the track; layoutScrub()
            shortens or lowers it when the chip column above would overlap it -->
       <div id="scrub" hidden><div id="scrubtrack"><input id="scrubber" type="range" min="0" max="0" value="0"></div><div id="scrubname"></div></div>
@@ -124,7 +124,7 @@
           <button data-tab="dmap" data-group="stack" title="rendered from the depth map: each pixel blends the frames (or the slabs) nearest its depth">DFR</button>
           <button data-tab="wav" data-group="stack" title="the weighted average: every frame's pixels weighed by their local contrast">WAV</button>
           <button data-tab="depth" data-group="depth" title="depth from focus (working grid)">Focus depth</button>
-          <button data-tab="conf" data-group="depth" title="how sure the depth is, per pixel: the peak-ratio confidence of its focus profile (1 = the 90th percentile and above; dark = the depth there was filled in from the neighbours)">Confidence</button>
+          <button data-tab="conf" data-group="depth" title="how sure the depth is, per pixel: the peak-ratio confidence of its focus profile (1 = the 90th percentile and above; dark = the depth there was filled in from the neighbors)">Confidence</button>
           <button data-tab="focus" data-group="depth" title="the scrubbed frame's own pixels, dimmed where it is out of focus: scrub to sweep the plane of focus">In focus</button>
         </div>
         <span class="sep"></span>
@@ -141,7 +141,7 @@
           </span>
         </span>
         </div>
-        <!-- compare toggle, centred over the canvas (where the side-by-side split falls) -->
+        <!-- compare toggle, centered over the canvas (where the side-by-side split falls) -->
         <label class="vs" title="compare with another layer: swipe or side by side"><input type="checkbox" id="ab" disabled><span>vs</span></label>
         <div id="vh-right">
           <span id="ctx-compare" class="ctx" hidden>
@@ -179,7 +179,7 @@
         <div id="bs-slab-ctl" hidden>
           <label class="stepper">slab ± frames <span><button data-step="p-slab" data-d="-1">−</button><span id="p-slab" data-min="1" data-max="50">5</span><button data-step="p-slab" data-d="1">+</button></span></label>
         </div>
-        <div class="dim small" id="bs-slab-hint" hidden>A slab is the scrubbed frame and its neighbours (± this many) stacked on their own with the run's settings — a thick plane of focus to paint from. It is fused on demand when the scrub settles (well under a second per frame at 45 MP); the filmstrip marks its frames.</div>
+        <div class="dim small" id="bs-slab-hint" hidden>A slab is the scrubbed frame and its neighbors (± this many) stacked on their own with the run's settings — a thick plane of focus to paint from. It is fused on demand when the scrub settles (well under a second per frame at 45 MP); the filmstrip marks its frames.</div>
       </div>
       <h3 class="sec-h"><button class="section" type="button" data-sec="brush-history">History</button></h3>
       <div class="sec-body">
@@ -202,7 +202,7 @@
     </div>
     <h3 class="sec-h"><button class="section" type="button" data-sec="alignment">Alignment</button></h3>
     <div class="sec-body">
-      <label title="one gain per channel brings each frame's mean to frame 0's, over the area the frame covers: exposure and colour flicker between frames"><input type="checkbox" id="p-bright" checked> equalise brightness</label>
+      <label title="one gain per channel brings each frame's mean to frame 0's, over the area the frame covers: exposure and color flicker between frames"><input type="checkbox" id="p-bright" checked> equalize brightness</label>
       <label><input type="checkbox" id="p-align" checked> align frames</label>
       <label><input type="checkbox" id="p-shift" checked> shift</label>
       <label><input type="checkbox" id="p-scale" checked> scale</label>
@@ -241,8 +241,8 @@
       <label title="the corner the text sits in; in the bar's corner it goes above the bar (below it at the top)">text corner <select id="p-ov-txtpos"><option value="bl">bottom left</option><option value="br">bottom right</option><option value="tl">top left</option><option value="tr">top right</option></select></label>
       <label for="p-ov-size" title="the font size as a share of the image height; the bar's thickness, the margins and the halo follow it, so the figure looks the same at every resolution">size <span class="val" id="p-ov-size-val">3 %</span></label>
       <input type="range" id="p-ov-size" min="1" max="10" step="0.5" value="3">
-      <label>colour <select id="p-ov-color"><option value="white">white</option><option value="black">black</option></select></label>
-      <label title="what sits behind the ink so it reads on any background — halo: a thin outline in the other colour; box: a translucent box in the other colour behind each block; plain: nothing">style <select id="p-ov-style"><option value="halo">halo</option><option value="box">box</option><option value="plain">plain</option></select></label>
+      <label>color <select id="p-ov-color"><option value="white">white</option><option value="black">black</option></select></label>
+      <label title="what sits behind the ink so it reads on any background — halo: a thin outline in the other color; box: a translucent box in the other color behind each block; plain: nothing">style <select id="p-ov-style"><option value="halo">halo</option><option value="box">box</option><option value="plain">plain</option></select></label>
       <div class="dim small" id="ov-info">off</div>
     </div>
     <h3 class="sec-h"><button class="section" type="button" data-sec="results">Results</button></h3>
@@ -261,7 +261,7 @@
       <div id="gpuinfo" class="dim small">—</div>
     </div>
   </aside>
-  <!-- Save step: the whole main area is one centred card (the filmstrip, canvas, panel and log
+  <!-- Save step: the whole main area is one centered card (the filmstrip, canvas, panel and log
        are hidden by body.step-save), so nothing competes with the save settings -->
   <div id="savepage" hidden>
     <div id="savecard" class="panel">
@@ -310,7 +310,7 @@
       <label class="stepper">every Nth frame <span><button data-step="an-step" data-d="-1">−</button><span id="an-step" data-min="1" data-max="50">1</span><button data-step="an-step" data-d="1">+</button></span></label>
       <label>speed <select id="an-fps"><option value="5">5 fps</option><option value="10" selected>10 fps</option><option value="15">15 fps</option><option value="25">25 fps</option></select></label>
       <label>loop <select id="an-loop"><option value="pingpong">back and forth</option><option value="forward">forward</option></select></label>
-      <label>format <select id="an-format" title="GIF: 256 colours, loops by itself, every browser; MP4 (H.264) plays everywhere; WebM (VP9) is smaller at the same quality — the videos are encoded by the browser (WebCodecs) and written by the page"><option value="gif">GIF</option><option value="mp4">MP4 (H.264)</option><option value="webm">WebM (VP9)</option></select></label>
+      <label>format <select id="an-format" title="GIF: 256 colors, loops by itself, every browser; MP4 (H.264) plays everywhere; WebM (VP9) is smaller at the same quality — the videos are encoded by the browser (WebCodecs) and written by the page"><option value="gif">GIF</option><option value="mp4">MP4 (H.264)</option><option value="webm">WebM (VP9)</option></select></label>
       <label id="an-vq-row" hidden>video quality <select id="an-vq" title="the bit rate, as bits per pixel per second: high 0.2, medium 0.1, low 0.05"><option value="0.2">high</option><option value="0.1" selected>medium</option><option value="0.05">low</option></select></label>
       <div class="dim small" id="an-vinfo" hidden>This browser has no WebCodecs video encoder: the animations are GIFs.</div>
       <div class="dim small" id="an-info">—</div>
@@ -335,7 +335,7 @@
       <label>mesh <select id="m3-grid"><option value="500">500 vertices along the long edge</option><option value="1000" selected>1000 vertices along the long edge</option><option value="1500">1500 vertices along the long edge</option><option value="2000">2000 vertices along the long edge</option><option value="3000">3000 vertices along the long edge</option></select></label>
       <label>texture long edge <select id="m3-tex"><option value="0">full resolution</option><option value="8192" selected>8192 px</option><option value="4096">4096 px</option><option value="2048">2048 px</option></select></label>
       <div class="dim small" id="m3-info">—</div>
-      <div class="dim small">The 3D model: the depth map makes the stacked image a relief, and the model is that relief as a mesh — a grid of vertices over the image, each raised by the depth there, with the stacked image as its texture (the LAP or DFR image chosen under <i>Stereo and rocking</i>, whose near-end switch also says which way the relief stands). The <i>relief</i> is the depth of the stack as a percentage of the image width, the one thing the depth map cannot know: measure the subject, or set it by eye. Each vertex takes the mean depth of the pixels around it, so a finer mesh follows finer detail and a coarser one is smoother; a step in depth becomes a wall between the near surface and the far one, since a relief shows nothing behind an edge. The texture is 8-bit in the image format above (JPEG at its quality, or PNG), capped at the texture long edge because many viewers refuse textures over 8192 px; the model is cropped like the other files, x runs along the width (1 unit), y up, z towards the viewer. GLB opens in Windows 3D Viewer, macOS Quick Look, Blender and any web viewer; OBJ is plain text that most tools read (the browser may ask to allow the three downloads); STL is for printing and has no texture. No content credentials are attached to 3D files.</div>
+      <div class="dim small">The 3D model: the depth map makes the stacked image a relief, and the model is that relief as a mesh — a grid of vertices over the image, each raised by the depth there, with the stacked image as its texture (the LAP or DFR image chosen under <i>Stereo and rocking</i>, whose near-end switch also says which way the relief stands). The <i>relief</i> is the depth of the stack as a percentage of the image width, the one thing the depth map cannot know: measure the subject, or set it by eye. Each vertex takes the mean depth of the pixels around it, so a finer mesh follows finer detail and a coarser one is smoother; a step in depth becomes a wall between the near surface and the far one, since a relief shows nothing behind an edge. The texture is 8-bit in the image format above (JPEG at its quality, or PNG), capped at the texture long edge because many viewers refuse textures over 8192 px; the model is cropped like the other files, x runs along the width (1 unit), y up, z toward the viewer. GLB opens in Windows 3D Viewer, macOS Quick Look, Blender and any web viewer; OBJ is plain text that most tools read (the browser may ask to allow the three downloads); STL is for printing and has no texture. No content credentials are attached to 3D files.</div>
       <div class="section" role="heading" aria-level="3">Content credentials</div>
       <label class="check"><input type="checkbox" id="cc-on"> <span>attach content credentials (C2PA)</span></label>
       <label>signed as <input type="text" id="cc-name" placeholder="your name"></label>

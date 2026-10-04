@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
 // SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
-// Brightness (flicker) normalisation: every frame is brought to the brightness
+// Brightness (flicker) normalization: every frame is brought to the brightness
 // of frame 0 by one gain per channel before it is fused.
 //
 // Flash recycling, mains-powered lights, a shutter that is not quite repeatable
@@ -13,10 +13,10 @@
 // The correction compares means, not pixels: a frame out of focus is a blurred
 // copy of the scene, and a blur leaves the mean of an area alone while any
 // least-squares fit of one frame's pixels against another's would slope
-// towards zero with the blur. So each channel's mean is taken over the pixels
+// toward zero with the blur. So each channel's mean is taken over the pixels
 // the frame's warp actually covers (its smeared edge left out), in both the
 // frame and frame 0, and the gain is their ratio; per channel, so a light
-// whose colour flickers is corrected too, and an exposure flicker gives the
+// whose color flickers is corrected too, and an exposure flicker gives the
 // same gain three times. Gains are clamped to [1/4, 4]: a larger difference
 // is not flicker.
 

@@ -114,7 +114,7 @@ pub struct Metadata {
     pub sub_sec_time_original: Option<String>,
     pub create_date: Option<String>,
     pub sub_sec_time_digitized: Option<String>,
-    /// EXIF SubjectDistance in metres, when the file has a positive one.
+    /// EXIF SubjectDistance in meters, when the file has a positive one.
     pub subject_distance: Option<f64>,
 }
 
@@ -177,7 +177,7 @@ pub fn develop(bytes: &[u8]) -> Result<Image, String> {
 /// Decode a raw to the camera's own linear space — black and white levels,
 /// demosaic, the sensor's crop; no white balance, matrix or curve — not
 /// turned, with how to turn it and what the linear DNG needs to know. Three-
-/// colour sensors only: a monochrome or four-colour sensor has no place in an
+/// color sensors only: a monochrome or four-color sensor has no place in an
 /// RGB DNG.
 pub fn develop_linear(bytes: &[u8]) -> Result<Image, String> {
     let src = RawSource::new_from_slice(bytes);
@@ -189,7 +189,7 @@ pub fn develop_linear(bytes: &[u8]) -> Result<Image, String> {
     let px = match im {
         Intermediate::ThreeColor(px) => px,
         Intermediate::Monochrome(_) => return Err("raw: a monochrome sensor cannot be written as an RGB linear DNG".into()),
-        Intermediate::FourColor(_) => return Err("raw: a four-colour sensor cannot be written as a linear DNG here".into()),
+        Intermediate::FourColor(_) => return Err("raw: a four-color sensor cannot be written as a linear DNG here".into()),
     };
     let (w, h) = (px.width, px.height);
     let n = w * h;
@@ -206,7 +206,7 @@ pub fn develop_linear(bytes: &[u8]) -> Result<Image, String> {
     let mut matrices: Vec<(u16, [f32; 9])> = raw.color_matrix.iter().filter(|(_, m)| m.len() == 9).map(|(i, m)| (*i as u16, <[f32; 9]>::try_from(&m[..]).unwrap())).collect();
     matrices.sort_by_key(|(i, _)| kelvin(*i));
     if matrices.is_empty() {
-        return Err(format!("raw: no colour matrix is known for the {} {}", raw.clean_make, raw.clean_model));
+        return Err(format!("raw: no color matrix is known for the {} {}", raw.clean_make, raw.clean_model));
     }
     let d65 = match raw.color_matrix_find_first([Illuminant::D65, Illuminant::A, Illuminant::B, Illuminant::C, Illuminant::D50, Illuminant::D55, Illuminant::D75, Illuminant::Daylight, Illuminant::Flash]) {
         Some((Illuminant::D65, m)) if m.len() == 9 => <[f32; 9]>::try_from(&m[..]).unwrap(),
@@ -222,7 +222,7 @@ pub fn develop_linear(bytes: &[u8]) -> Result<Image, String> {
     Ok(Image { w, h, px: Pixels::Planes3(planes), turns, flip, color: Some(color) })
 }
 
-/// The colour temperature of an EXIF LightSource, roughly, to order a
+/// The color temperature of an EXIF LightSource, roughly, to order a
 /// camera's matrices the way Adobe writes them (the cooler light first) —
 /// the same table as lapstack's `dng.rs`, which reads them in this order.
 fn kelvin(illuminant: u16) -> u32 {

@@ -10,7 +10,7 @@
 -- plug-in's own section holds the lapstack settings; they go into the export
 -- preset, and closing the dialog with Export makes them the menu item's too.
 -- processRenderedPhotos waits for every frame, runs lapstack over them in the
--- order of the selection and adds the result to the catalogue.
+-- order of the selection and adds the result to the catalog.
 
 local LrDialogs = import 'LrDialogs'
 local LrView = import 'LrView'
@@ -58,7 +58,7 @@ function provider.sectionsForTopOfDialog(f, propertyTable)
     end
     section[#section + 1] = f:static_text {
         title = 'Select the frames of one stack in order (sort by capture time), render them as 16-bit TIFF — or Original for the raws, '
-             .. 'which is what a DNG output wants — and Export: the stacked image lands next to the first frame and in the catalogue, stacked with it.',
+             .. 'which is what a DNG output wants — and Export: the stacked image lands next to the first frame and in the catalog, stacked with it.',
         height_in_lines = 3, width_in_chars = 70,
     }
     return { section }

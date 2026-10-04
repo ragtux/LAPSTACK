@@ -17,7 +17,7 @@ for k in 0 3 6 9 12 15 18 21; do
     i=$((i + 1))
 done
 python3 -c "import json,os; json.dump(sorted(f for f in os.listdir('web/test/frames') if f.endswith('.png')), open('web/test/frames/list.json','w'))"
-# --no-brightness: test.html runs with brightness off (the crops are equalised by the CLI otherwise, ~0.3 % of full scale)
+# --no-brightness: test.html runs with brightness off (the crops are equalized by the CLI otherwise, ~0.3 % of full scale)
 target/release/lapstack --no-align --no-brightness --depth-scale 2 --depth-raw web/test/expected_dff.png --save-conf -o web/test/expected.png web/test/frames/f0*.png
 # the same fusion with halo control (test.html?halo=2&expected=test/expected_halo2.png&expected_dff=&expected_conf=)
 target/release/lapstack --no-align --no-brightness --depth winner --halo-control 2 -o web/test/expected_halo2.png web/test/frames/f0*.png

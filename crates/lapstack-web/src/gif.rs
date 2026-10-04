@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 //! Animated GIF export. Frames arrive from the page as RGBA8 at the output
-//! size; each is quantised to its own 256-colour palette (median cut on a pixel
-//! sample, nearest colour through a 6-bit cube cache, Floyd–Steinberg
+//! size; each is quantized to its own 256-color palette (median cut on a pixel
+//! sample, nearest color through a 6-bit cube cache, Floyd–Steinberg
 //! dithering) and LZW-encoded. The encoded bytes are handed back after every
 //! frame, so the page assembles the file as a Blob and the whole GIF never
 //! sits in wasm memory (a full-resolution stack runs to gigabytes).
@@ -54,7 +54,7 @@ impl GifWriter {
         Ok(GifWriter { w: w as u16, h: h as u16, dither, sink, enc: Some(enc) })
     }
 
-    /// Quantise and encode one RGBA8 frame (w·h·4 bytes) shown for `delay_cs`
+    /// Quantize and encode one RGBA8 frame (w·h·4 bytes) shown for `delay_cs`
     /// hundredths of a second; returns the bytes written since the last call.
     pub fn push(&mut self, rgba: &[u8], delay_cs: u16) -> Result<js_sys::Uint8Array, JsValue> {
         let (w, h) = (self.w as usize, self.h as usize);
@@ -97,7 +97,7 @@ fn quantize(rgba: &[u8], w: usize, h: usize, dither: bool) -> (Vec<u8>, Vec<u8>)
     let stride = (n / (1 << 18)).max(1);
     let mut samples: Vec<[u8; 3]> = (0..n).step_by(stride).map(|i| [rgba[4 * i], rgba[4 * i + 1], rgba[4 * i + 2]]).collect();
     let palette = median_cut(&mut samples, 256);
-    // nearest palette entry for a colour, cached on its 6-bit cube cell
+    // nearest palette entry for a color, cached on its 6-bit cube cell
     let mut cache = vec![u16::MAX; 1 << 18];
     let mut nearest = |c: [i32; 3]| -> usize {
         let key = ((c[0] as usize >> 2) << 12) | ((c[1] as usize >> 2) << 6) | (c[2] as usize >> 2);
@@ -150,9 +150,9 @@ fn quantize(rgba: &[u8], w: usize, h: usize, dither: bool) -> (Vec<u8>, Vec<u8>)
     (palette.iter().flatten().copied().collect(), out)
 }
 
-/// Median cut: split the box with the largest (colour span × population) at
+/// Median cut: split the box with the largest (color span × population) at
 /// the median of its widest channel until there are `k` boxes; a palette entry
-/// is the mean colour of a box.
+/// is the mean color of a box.
 fn median_cut(px: &mut [[u8; 3]], k: usize) -> Vec<[u8; 3]> {
     if px.is_empty() {
         return vec![[0, 0, 0]];

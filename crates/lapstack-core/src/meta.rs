@@ -3,7 +3,7 @@
 
 // Metadata pass-through: the EXIF, ICC profile and XMP of the first frame,
 // read out of its JPEG / PNG / TIFF and written into the stacked image's file,
-// so the result keeps the camera, lens, exposure and colour information of the
+// so the result keeps the camera, lens, exposure and color information of the
 // stack it came from (as other focus stackers do).
 //
 // EXIF is a TIFF structure (byte-order mark, IFD0, and the Exif / GPS /
@@ -169,9 +169,9 @@ fn exif_time(tiff: &[u8]) -> Option<f64> {
     parse_datetime(&ascii(&ifd0, 306)?, ascii(&exif, 37520).as_deref())
 }
 
-/// The EXIF SubjectDistance (tag 37382, metres) out of a TIFF structure: the
+/// The EXIF SubjectDistance (tag 37382, meters) out of a TIFF structure: the
 /// focus distance some cameras record, the one sure sign of which way a
-/// stack's focus travelled. Also the XMP packet's `exif:SubjectDistance`
+/// stack's focus traveled. Also the XMP packet's `exif:SubjectDistance`
 /// (a rational as text, `123/100`) when the EXIF has none.
 pub fn subject_distance(m: &Meta) -> Option<f64> {
     if let Some(v) = m.exif.as_deref().and_then(exif_subject_distance) {
@@ -458,7 +458,7 @@ impl<'a> Tiff<'a> {
     }
 }
 
-/// An IFD to serialise: its entries, and the sub-IFDs hanging off some of them.
+/// An IFD to serialize: its entries, and the sub-IFDs hanging off some of them.
 struct Node {
     entries: Vec<Entry>,
     subs: Vec<(u16, Node)>,
@@ -588,7 +588,7 @@ fn parse(tiff: &[u8]) -> Option<(Node, bool)> {
     Some((node, t.le))
 }
 
-fn serialise(node: Node, le: bool) -> Vec<u8> {
+fn serialize(node: Node, le: bool) -> Vec<u8> {
     let mut w = Writer { out: Vec::new(), le, base: 0 };
     w.out.extend_from_slice(if le { b"II*\0" } else { b"MM\0*" });
     w.w32(0);
@@ -607,7 +607,7 @@ pub fn tiff_ifd0_offset(b: &[u8]) -> Option<u32> {
 /// APP1 payload, a PNG eXIf chunk), in the source's byte order.
 pub fn rebuild(tiff: &[u8]) -> Option<Vec<u8>> {
     let (node, le) = parse(tiff)?;
-    Some(serialise(node, le))
+    Some(serialize(node, le))
 }
 
 /// The file the EXIF goes into: the Exif spec asks for slightly different tags
@@ -692,7 +692,7 @@ fn deflate(data: &[u8]) -> Vec<u8> {
 
 fn embed_png(b: &[u8], meta: &Meta) -> Vec<u8> {
     let (w, h) = (be32(b, 16).unwrap_or(0), be32(b, 20).unwrap_or(0));   // IHDR
-    // the chunks we add, in the order the spec wants them: colour space, then the rest
+    // the chunks we add, in the order the spec wants them: color space, then the rest
     let mut ours: Vec<u8> = Vec::new();
     let mut replaced: Vec<&[u8]> = Vec::new();
     if let Some(icc) = &meta.icc {
@@ -708,7 +708,7 @@ fn embed_png(b: &[u8], meta: &Meta) -> Vec<u8> {
         png_chunk(&mut ours, b"cHRM", &d);
         replaced.push(b"cHRM".as_slice());
     }
-    if let Some(exif) = meta.exif.as_ref().and_then(|e| adapt(e, w, h, Container::Png)).map(|(n, le)| serialise(n, le)) {
+    if let Some(exif) = meta.exif.as_ref().and_then(|e| adapt(e, w, h, Container::Png)).map(|(n, le)| serialize(n, le)) {
         png_chunk(&mut ours, b"eXIf", &exif);
         replaced.push(b"eXIf".as_slice());
     }
@@ -771,7 +771,7 @@ fn jpeg_dims(b: &[u8]) -> (u32, u32) {
 fn embed_jpeg(b: &[u8], meta: &Meta) -> Vec<u8> {
     let (w, h) = jpeg_dims(b);
     let mut ours: Vec<u8> = Vec::new();
-    if let Some(exif) = meta.exif.as_ref().and_then(|e| adapt(e, w, h, Container::Jpeg)).map(|(n, le)| serialise(n, le)) {
+    if let Some(exif) = meta.exif.as_ref().and_then(|e| adapt(e, w, h, Container::Jpeg)).map(|(n, le)| serialize(n, le)) {
         if exif.len() + 6 <= SEG_MAX {
             let mut d = b"Exif\0\0".to_vec();
             d.extend_from_slice(&exif);
@@ -841,9 +841,9 @@ pub fn write_tiff<W: Write>(w: W, width: usize, height: usize, bits: u16, sample
 }
 
 /// A linear DNG (Adobe DNG 1.4): 16-bit demosaiced camera-space samples,
-/// `PhotometricInterpretation` LinearRaw, the camera's colour matrices and the
+/// `PhotometricInterpretation` LinearRaw, the camera's color matrices and the
 /// neutral it shot from `info` (`dng.rs`), the make and model in IFD0, the
-/// Exif IFD and XMP from `meta` (no ICC profile: a DNG's colour is its
+/// Exif IFD and XMP from `meta` (no ICC profile: a DNG's color is its
 /// matrices), the orientation 1.
 pub fn write_dng<W: Write>(w: W, width: usize, height: usize, samples: &[u16], info: &crate::dng::DngInfo, meta: Option<&Meta>) -> std::io::Result<()> {
     let le32 = |v: u32| v.to_le_bytes().to_vec();
@@ -949,7 +949,7 @@ pub fn with_orientation(exif: &[u8], o: u16) -> Option<Vec<u8>> {
     let (mut node, le) = parse(exif)?;
     node.entries.retain(|e| e.tag != 274);
     node.entries.push(Entry { tag: 274, typ: 3, count: 1, data: if le { o.to_le_bytes().to_vec() } else { o.to_be_bytes().to_vec() } });
-    Some(serialise(node, le))
+    Some(serialize(node, le))
 }
 
 // ---------------------------------------------------------------------------

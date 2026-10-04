@@ -12,12 +12,12 @@
 //! white balance, the camera matrix to linear sRGB and the sRGB curve, exactly
 //! the normal development except that nothing is clipped — the curve is
 //! extended above 1 and mirrored below 0, so a highlight past white or a
-//! colour outside sRGB keeps its value and the transform stays invertible.
+//! color outside sRGB keeps its value and the transform stays invertible.
 //! The fusion then makes the same decisions as on a normally developed stack
 //! (the luma it selects by is the ordinary one), the viewer shows an ordinary
 //! image, and the DNG writer takes the fused look image back through the
 //! inverse curve, inverse matrix and inverse white balance to camera space,
-//! 16 bits per sample, with the camera's colour matrices and the neutral it
+//! 16 bits per sample, with the camera's color matrices and the neutral it
 //! shot (`AsShotNeutral`) in the tags. The frames' own white balance is that
 //! of frame 0, applied to every frame, so the stack is developed alike.
 //! Non-raw frames are taken as sRGB: their camera space is linear sRGB and
@@ -35,7 +35,7 @@ pub const SRGB_TO_XYZ_D65: [[f32; 3]; 3] = [[0.4124564, 0.3575761, 0.1804375], [
 /// EXIF LightSource code of D65, the DNG's CalibrationIlluminant.
 pub const D65: u16 = 21;
 
-/// The colour temperature of an EXIF LightSource, roughly, to order a
+/// The color temperature of an EXIF LightSource, roughly, to order a
 /// camera's matrices the way Adobe writes them (the cooler light first).
 pub fn kelvin(illuminant: u16) -> u32 {
     match illuminant {
@@ -124,7 +124,7 @@ impl DngInfo {
     /// matrices by illuminant, its as-shot white balance (any scale; green
     /// is made 1) and the D65 matrix the look is built from (the camera's own
     /// D65 matrix, or another adapted to D65 — the raw path's choice). The
-    /// look's matrix is dcraw's: XYZ→cam · sRGB→XYZ, rows normalised so that
+    /// look's matrix is dcraw's: XYZ→cam · sRGB→XYZ, rows normalized so that
     /// white balances to white, inverted.
     pub fn of_raw(make: &str, model: &str, matrices: Vec<(u16, [f32; 9])>, wb: [f32; 3], xyz2cam_d65: [f32; 9]) -> Result<DngInfo, String> {
         let g = if wb[1].is_finite() && wb[1] > 0.0 { wb[1] } else { 1.0 };
@@ -145,8 +145,8 @@ impl DngInfo {
                 }
             }
         }
-        let cam2rgb = inverse3(rgb2cam).ok_or("the camera's colour matrix is singular")?;
-        let source = format!("{} {} ({} colour matri{})", make.trim(), model.trim(), matrices.len(), if matrices.len() == 1 { "x" } else { "ces" });
+        let cam2rgb = inverse3(rgb2cam).ok_or("the camera's color matrix is singular")?;
+        let source = format!("{} {} ({} color matri{})", make.trim(), model.trim(), matrices.len(), if matrices.len() == 1 { "x" } else { "ces" });
         Ok(DngInfo { make: make.trim().to_string(), model: model.trim().to_string(), matrices, wb, cam2rgb, rgb2cam, source })
     }
 
@@ -248,7 +248,7 @@ pub fn srgb_to_linear(img: &mut Img3) {
 /// Write the look image as a linear DNG: `info` says how it maps back to the
 /// camera space and what the camera was; `meta` (the first frame's) supplies
 /// the Exif IFD, XMP and the make and model when it has them. The ICC profile
-/// is left out (a DNG's colour is its matrices), the orientation is 1 (the
+/// is left out (a DNG's color is its matrices), the orientation is 1 (the
 /// frames were turned as decoded).
 pub fn write<W: Write>(w: W, img: &Img3, info: &DngInfo, meta: Option<&Meta>) -> std::io::Result<()> {
     let samples = info.from_look(img);
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(info.wb, [2.1, 1.0, 1.6]);
         let n = info.as_shot_neutral();
         assert!((n[0] - 1.0 / 2.1).abs() < 1e-6 && n[1] == 1.0);
-        // a neutral in camera space balances to grey and comes back
+        // a neutral in camera space balances to gray and comes back
         let mut img = Img3::zeros(4, 1);
         let cam = [[1.0 / 2.1, 1.0, 1.0 / 1.6], [0.5 / 2.1, 0.5, 0.5 / 1.6], [0.9, 0.2, 0.1], [0.02, 0.7, 0.99]];
         for (i, c) in cam.iter().enumerate() {

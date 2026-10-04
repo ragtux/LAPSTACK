@@ -25,7 +25,7 @@
 //!
 //! `apply` takes the spots out of a frame, before it is aligned (the dust
 //! sits on the sensor, so it is fixed in the frame as shot — and a fixed
-//! pattern in every frame is exactly what pulls a registration towards zero
+//! pattern in every frame is exactly what pulls a registration toward zero
 //! shift). `Fill` interpolates each spot from its surroundings with the
 //! pull-push of Gortler et al. (the masked window's pyramid is built with the
 //! spot's pixels weighted out, and on the way back down every hole takes the
@@ -133,14 +133,14 @@ fn coarse_levels(w: usize, h: usize, cell: usize) -> usize {
 /// Large-scale background of `v` (width `w`, height `h`) with the weights
 /// `wt` in [0, 1]: at each cell of the pyramid level `levels` up, a plane is
 /// fitted to the pixels under the cell's binomial window (a first-order
-/// normalised convolution: the nine weighted moments of v, x and y are
+/// normalized convolution: the nine weighted moments of v, x and y are
 /// REDUCEd, and the 3×3 normal equations solved per cell), and the plane's
-/// value at the cell's centre is EXPANDed back. A plain mean would sit too
-/// high at the frame's edges wherever the illumination falls off towards
-/// them (a one-sided window's mean lies inward of its centre), and dust
+/// value at the cell's center is EXPANDed back. A plain mean would sit too
+/// high at the frame's edges wherever the illumination falls off toward
+/// them (a one-sided window's mean lies inward of its center), and dust
 /// would be seen along every edge; the plane follows the slope out.
 fn background(v: &[f32], wt: &[f32], w: usize, h: usize, levels: usize) -> Vec<f32> {
-    // coordinates normalised to about [-1/2, 1/2], so the moments stay O(1) in f32
+    // coordinates normalized to about [-1/2, 1/2], so the moments stay O(1) in f32
     let (sx, sy) = (1.0 / w.max(h) as f32, 1.0 / w.max(h) as f32);
     let xs: Vec<f32> = (0..w * h).map(|i| ((i % w) as f32 - w as f32 / 2.0) * sx).collect();
     let ys: Vec<f32> = (0..w * h).map(|i| ((i / w) as f32 - h as f32 / 2.0) * sy).collect();
@@ -177,9 +177,9 @@ fn background(v: &[f32], wt: &[f32], w: usize, h: usize, levels: usize) -> Vec<f
             let k = j * cw + i;
             let s = m[0][k] as f64;
             if s < 1e-3 {
-                continue;   // (almost) no weight under this cell: filled from its neighbours below
+                continue;   // (almost) no weight under this cell: filled from its neighbors below
             }
-            // the cell's centre (coarse sample i sits on fine pixel i·2^levels), and the moments about it
+            // the cell's center (coarse sample i sits on fine pixel i·2^levels), and the moments about it
             let xc = ((i as f32 * step) - w as f32 / 2.0) as f64 * sx as f64;
             let yc = ((j as f32 * step) - h as f32 / 2.0) as f64 * sy as f64;
             let (sxg, syg, sv, sxv, syv, sxx, sxy, syy) = (m[1][k] as f64, m[2][k] as f64, m[3][k] as f64, m[4][k] as f64, m[5][k] as f64, m[6][k] as f64, m[7][k] as f64, m[8][k] as f64);
@@ -190,7 +190,7 @@ fn background(v: &[f32], wt: &[f32], w: usize, h: usize, levels: usize) -> Vec<f
             let dyy = syy - 2.0 * yc * syg + yc * yc * s;
             let dxv = sxv - xc * sv;
             let dyv = syv - yc * sv;
-            // normal equations [s dx dy; dx dxx dxy; dy dxy dyy] [a b c] = [sv dxv dyv]; a is the value at the centre
+            // normal equations [s dx dy; dx dxx dxy; dy dxy dyy] [a b c] = [sv dxv dyv]; a is the value at the center
             let det = s * (dxx * dyy - dxy * dxy) - dx * (dx * dyy - dxy * dy) + dy * (dx * dxy - dxx * dy);
             let scale = s * (dxx * dyy).abs().max(1e-30);
             bg[k] = if det.abs() > 1e-9 * scale {
@@ -201,7 +201,7 @@ fn background(v: &[f32], wt: &[f32], w: usize, h: usize, levels: usize) -> Vec<f
             };
         }
     }
-    // a coarse cell with no weight (all dust, or all outside) takes its neighbours' mean
+    // a coarse cell with no weight (all dust, or all outside) takes its neighbors' mean
     if bg.iter().any(|v| v.is_nan()) {
         let mean = {
             let (s, n) = bg.iter().filter(|v| !v.is_nan()).fold((0.0f64, 0usize), |(s, n), &v| (s + v as f64, n + 1));
@@ -257,7 +257,7 @@ fn expand_linear(coarse: &[f32], cw: usize, ch: usize, ow: usize, oh: usize) -> 
     let mut pad = vec![0f32; pw * ph];
     let at = |x: isize, y: isize| -> f32 {
         let ext = |i: isize, n: usize| -> (usize, usize, f32) {
-            // sample index, its neighbour, and the extrapolation factor (0 inside)
+            // sample index, its neighbor, and the extrapolation factor (0 inside)
             if i < 0 { (0, 1.min(n - 1), 1.0) } else if i as usize >= n { (n - 1, n.saturating_sub(2), 1.0) } else { (i as usize, i as usize, 0.0) }
         };
         let (x0, x1, fx) = ext(x, cw);
@@ -402,7 +402,7 @@ pub fn detect_half(ys: &[f32], hw: usize, hh: usize, w: usize, h: usize, p: &Dus
         }
         let smask = dilate(&smask, sw, sh, m);
         // the attenuation under the spot, for the flat-field mode: ≥ 1, capped at ×10,
-        // the half-resolution ratio sampled bilinearly (half-res pixel k is centred on 2k)
+        // the half-resolution ratio sampled bilinearly (half-res pixel k is centered on 2k)
         let ratio = |hx: usize, hy: usize| -> f32 {
             let (v, b) = (ys[hy * hw + hx], bg[hy * hw + hx]);
             if v > 1e-6 && b > v { (b / v).min(10.0) } else { 1.0 }
@@ -496,7 +496,7 @@ impl DustMap {
 
     /// One plane: every spot is filled (or flattened) in turn, each from a
     /// window of the plane around it in which every spot's pixels (its own
-    /// and its neighbours') are weighted out.
+    /// and its neighbors') are weighted out.
     fn apply_plane(&self, plane: &mut dyn Plane) {
         for s in &self.spots {
             match self.params.mode {
@@ -623,7 +623,7 @@ pub fn pull_push(v: &[f32], wt: &[f32], w: usize, h: usize) -> Vec<f32> {
 mod tests {
     use super::*;
 
-    /// A softly lit white frame with soft dark spots at the given centres and radii.
+    /// A softly lit white frame with soft dark spots at the given centers and radii.
     fn dust_frame(w: usize, h: usize, spots: &[(f32, f32, f32, f32)]) -> Img3 {
         let mut im = Img3::zeros(w, h);
         for y in 0..h {
@@ -666,10 +666,10 @@ mod tests {
         assert_eq!(map.spots.len(), 3, "{}", map.describe());
         assert_eq!(map.rejected, 0);
         for &(cx, cy, r, _) in &spots {
-            let s = map.spots.iter().find(|s| (s.x as f32) < cx && cx < (s.x + s.w) as f32 && (s.y as f32) < cy && cy < (s.y + s.h) as f32).expect("a spot covers each centre");
+            let s = map.spots.iter().find(|s| (s.x as f32) < cx && cx < (s.x + s.w) as f32 && (s.y as f32) < cy && cy < (s.y + s.h) as f32).expect("a spot covers each center");
             let seen = s.size(map.params.margin) as f32;
             assert!(seen > r && seen < 2.6 * r, "spot at {cx},{cy} r={r}: window {}x{} seen {seen}", s.w, s.h);
-            assert!(s.mask[(cy as usize - s.y) * s.w + (cx as usize - s.x)] != 0, "the centre is masked");
+            assert!(s.mask[(cy as usize - s.y) * s.w + (cx as usize - s.x)] != 0, "the center is masked");
         }
         let plane = map.plane();
         assert_eq!(plane.iter().filter(|&&v| v > 0.0).count(), map.covered());

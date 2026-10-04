@@ -45,7 +45,7 @@ impl RawImage {
     pub fn flip(&self) -> bool {
         self.img.flip
     }
-    /// The camera's colour as JSON (`develop_linear`), else undefined.
+    /// The camera's color as JSON (`develop_linear`), else undefined.
     #[wasm_bindgen(getter)]
     pub fn color(&self) -> Option<String> {
         self.img.color.as_ref().and_then(|c| serde_json::to_string(c).ok())

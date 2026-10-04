@@ -59,13 +59,13 @@ to float precision. The number of band-pass levels defaults to as many as
 keep the residual's short side ≥ 32 px (7 levels on 8280×5520, residual
 65×44); `--levels N` overrides.
 
-**Fusion** (`fuse.rs`), generalised from the paper's two frames to N:
+**Fusion** (`fuse.rs`), generalized from the paper's two frames to N:
 
 - Band-pass levels: region energy `RE = Σ ω·L²` over a binomial window
   (`--energy-radius`, default 1 = 3×3) of the *luminance* coefficient
   (Y = .299R+.587G+.114B of the RGB coefficients — the pyramid is linear, so
   that is the luma pyramid), winner-take-all per coefficient, ties to the
-  earlier frame. The selection is applied to all three channels so colour
+  earlier frame. The selection is applied to all three channels so color
   never splits at a selection edge. Radius 0 is Adelson's per-node |L| max.
 - Residual: local deviation D and local entropy E (`--top-radius`, default
   2 = 5×5; `--entropy-bins`, default 256). The paper's rule takes A when A
@@ -141,7 +141,7 @@ grows with them), and on a stack that needs none the extra ones only fit
 noise, so the default stays the similarity. Checked on a frame keystoned by
 a known perspective (ImageMagick's `-distort Perspective`, the top corners
 moved 12 px inwards): against the original, the frame the projective fit
-brings back differs by an RMSE of 0.0029 of full scale over the centre,
+brings back differs by an RMSE of 0.0029 of full scale over the center,
 the floor of resampling (a pure scale and rotation, which the similarity
 model recovers exactly, leaves 0.0028), where the similarity fit leaves
 0.0076 and the affine 0.0071; the browser's aligner finds the same eight
@@ -168,8 +168,8 @@ already aligned to the pixel, or to see the pixels as shot), `bilinear`
 (Panorama Tools' spline16, our default), `spline6x6` (spline36,
 sharper, a little ringing at hard edges) and `lanczos3` (three lobes, the
 sharpest and the most ringing). All are separable and interpolating (a
-pixel-centred sample comes back as it is; the weights sum to 1, Lanczos's
-normalised to make it so). The registration search itself always resamples
+pixel-centered sample comes back as it is; the weights sum to 1, Lanczos's
+normalized to make it so). The registration search itself always resamples
 with spline4x4 — the fit does not depend on the kernel, and the CUDA and
 WebGPU cost kernels stay one thing — so the choice changes only how the
 frames are read, not where they land. The crop below keeps each kernel's own
@@ -179,7 +179,7 @@ wider kernel loses a pixel or two more at the border.
 **Slabs** (`--slabs SIZE[:OVERLAP]`, `--slab-dir DIR`): slabbing
 for the native path — after the result, every run of SIZE consecutive
 frames overlapping by OVERLAP (default 2) is fused on its own with the same
-settings over the same aligned, equalised frames, cropped like the result,
+settings over the same aligned, equalized frames, cropped like the result,
 and written as it is made to DIR (default `<output stem>_slabs`) in the
 output's format with the same metadata, as `slab_01_000-009.tif` and so on
 (0-based frame indices). Slabs are thick planes of focus to retouch from in
@@ -231,9 +231,9 @@ input works, as with CUDA; in the browser `web/pkg-raw`, a wasm module the
 worker imports when the first raw comes in and the engine reaches through
 three globals (`lapstack-web`'s `raw_bridge.rs`). `raw.rs` is the client of
 that interface: the five functions the rest of lapstack calls, a `RawBackend`
-either side installs, and the JSON shapes of the camera's colour and
+either side installs, and the JSON shapes of the camera's color and
 metadata that cross it. Each is developed as shot — black and white levels,
-demosaic, the white balance the camera recorded, the camera's colour matrix
+demosaic, the white balance the camera recorded, the camera's color matrix
 to sRGB, the sRGB curve — into the 16-bit RGB every other input becomes,
 turned the way the EXIF orientation says; a monochrome sensor gives gray.
 There is no exposure or tone adjustment: the frames of a stack are shot
@@ -261,7 +261,7 @@ the sensor's crop, turned by its orientation, and nothing else
 frame 0's as-shot white balance and the camera's D65 matrix followed by the
 sRGB curve, the ordinary development except that nothing is clipped: the
 curve is extended above 1 and mirrored below 0, so a highlight past white or
-a colour outside sRGB keeps its value and the transform stays invertible
+a color outside sRGB keeps its value and the transform stays invertible
 (`DngInfo::to_look`). The fusion therefore makes the same decisions it makes
 on a normally developed stack (the luma it selects by is the ordinary one),
 every frame is developed alike (frame 0's white balance is applied to all,
@@ -272,13 +272,13 @@ space (`DngInfo::from_look`) and written as a DNG 1.4 with
 65535, the camera's `ColorMatrix1` / `ColorMatrix2` with their illuminants
 (the cooler light first, as Adobe writes them), `AsShotNeutral` (the
 reciprocal of the white balance, green = 1), `UniqueCameraModel`, Make and
-Model, the first frame's Exif IFD and XMP (no ICC profile: a DNG's colour is
+Model, the first frame's Exif IFD and XMP (no ICC profile: a DNG's color is
 its matrices) and Orientation 1 (`meta::write_dng`). A raw converter then
 develops the stacked image like one of the raws — exposure, white balance,
 profile and highlight recovery still open, since the camera data above the
 balanced white is kept where an sRGB development would have clipped it.
 Checked on five NEFs of the Z 8: darktable develops the DNG and the first NEF
-to the same colours and brightness. Frames that are not raws are taken as
+to the same colors and brightness. Frames that are not raws are taken as
 sRGB — their linear values are the "camera space", `ColorMatrix1` is XYZ →
 sRGB at D65 and the neutral is 1, 1, 1 — so any stack can come out as a DNG,
 but only a raw's carries more than its file did; a stack must be all raws or
@@ -324,7 +324,7 @@ depth pass aggregates its slices the same way before it takes their
 statistics): a cell's pick is its region's — one
 cell's measure strays over the gate below by chance and picks a noisy frame
 where a flat area should average them all, and along a silhouette, where
-one frame holds the edge and another the blurred halo over it, neighbouring
+one frame holds the edge and another the blurred halo over it, neighboring
 cells picked different frames and the 2 px ramp between them showed as
 jagged speckle along every depth edge; over the window the frames
 cross-fade instead. What weighs is the contrast *above the cell's noise
@@ -348,12 +348,12 @@ taken back to full resolution bilinearly. One more pass over the frames.
 **Frame list** (`--skip LIST`, `--reverse`): `--skip` leaves frames out of the
 list — 1-based positions and ranges, comma-separated (`--skip 3,7-9,12`),
 counted after directories are expanded and before any split, each skipped
-frame reported; a position past the end or a backwards range is an error,
+frame reported; a position past the end or a backward range is an error,
 since a typo should not stack the wrong frames. `--reverse` turns the order
 round for a stack shot back to front, so frame 0 is the near end again for
 `--stereo` and `--mesh` (the alternative is `--far-first`, which leaves the
 fusion alone and tells only those two); with `--split` each stack is reversed
-on its own, which is what a rail run backwards means for every stack of the
+on its own, which is what a rail run backward means for every stack of the
 batch. Reordering beyond that is the shell's: the frames are stacked in the
 order they are given.
 
@@ -364,11 +364,11 @@ square of the gain, so a brighter frame wins ties it should not and the
 seams between winners show as patches). Every frame is brought to frame 0's
 brightness by one gain per channel — the ratio of the two frames' channel
 *means* over the pixels the frame's warp covers, since a blur leaves a
-mean alone while a pixel-wise fit would slope towards zero with the defocus;
-per channel, so a light that flickers in colour is corrected too. Gains are
+mean alone while a pixel-wise fit would slope toward zero with the defocus;
+per channel, so a light that flickers in color is corrected too. Gains are
 clamped to [1/4, 4] and logged; `--no-brightness` turns it off. The browser
 app does the same on the GPU (block means of frame 0 kept, one small readback
-per frame), *equalise brightness* in the parameter panel, and each filmstrip
+per frame), *equalize brightness* in the parameter panel, and each filmstrip
 entry shows its gain.
 
 **Dust map** (`dust.rs`; `--dust-map FILE`, `--dust-threshold PCT`,
@@ -381,7 +381,7 @@ focus (a white wall, the sky, a sheet of paper) at the stack's aperture
 shows nothing but the dust, and that frame is the dust map: its luma at
 half resolution (one REDUCE, which also tames the noise) is divided by its
 own large-scale background — a plane fitted under each cell four pyramid
-levels up (a first-order normalised convolution: the illumination's falloff
+levels up (a first-order normalized convolution: the illumination's falloff
 is followed out to the frame's edges, a spot is not; estimated twice, the
 second time with the first pass's spots weighted out) — and a pixel darker
 than that by more than the threshold (default 3 %) is dust. The connected
@@ -390,7 +390,7 @@ and the little a spot moves between apertures), are the spots; a component
 under 16 px is noise, and a blob wider than a quarter of the frame is not
 dust and is reported. The spots are then taken out of every frame **as
 decoded, before alignment** — the dust is fixed on the sensor, and a fixed
-pattern in every frame is exactly what pulls a registration towards zero
+pattern in every frame is exactly what pulls a registration toward zero
 shift. `fill` (the default) interpolates each spot from its
 surroundings by pull-push (Gortler et al. 1996: the window's pyramid is
 built with the dust weighted out, and on the way down every hole takes the
@@ -425,7 +425,7 @@ width, or `LENGTH` (`100um`, `2mm`, `500nm`; one that does not fit is brought
 down to the largest 1-2-5 value that does, and the log says so), snapped to
 whole pixels, with its length written over it in the unit that keeps the
 number under a thousand (500 nm, 100 µm, 2.5 mm). `--scale-bar px` asks for
-a bar without a calibration: a round count of the frames' pixels, labelled so
+a bar without a calibration: a round count of the frames' pixels, labeled so
 (*500 px*; `px:LENGTH` takes the count), so a figure that is not calibrated
 still carries a scale. `--text` is a caption:
 `\n` breaks a line, and `{date}` / `{time}` (the first frame's capture time,
@@ -434,7 +434,7 @@ and `{n}` (the stack's number in a batch) are filled in. Bar and text each
 take a corner (`--overlay-pos BAR[,TEXT]`, `tl | tr | bl | br`, default
 bottom right and bottom left; in one corner the text goes above the bar,
 below it at the top), in white with a black halo — the ink dilated by a
-disc, a thin outline that reads on any background — or black with a white
+disk, a thin outline that reads on any background — or black with a white
 one (`--overlay-color`), or on a translucent box, or plain
 (`--overlay-style halo | box | plain`). Every size follows the image: the
 font's em is `--overlay-size` % of the image height (3 by default), and the
@@ -444,7 +444,7 @@ resolution, and an animation shrunk to a long edge carries the same bar,
 shrunk with it. The text is set in Fira Sans, the browser app's own face — a
 30 KB subset of the Regular weight embedded in the core crate
 (`crates/lapstack-core/fonts`, made by `subset.py` there from Mozilla's TTF;
-SIL OFL) — and rasterised by lapstack itself: a TrueType outline reader
+SIL OFL) — and rasterized by lapstack itself: a TrueType outline reader
 (glyf / loca / cmap / hmtx, simple and composite glyphs, no hinting) and the
 signed-area coverage accumulation of font-rs / stb_truetype v2, where each
 edge deposits the area it sweeps into the pixels it crosses and a running
@@ -467,7 +467,7 @@ relative to the near end (the maximum X shift; ±3 % suits most subjects —
 for a scene d deep and w wide a viewing angle a is tan(a)·d/w), the middle
 of the stack staying put. The shear is a
 forward warp per row: consecutive samples less than 2 px apart in the view
-form a patch of surface, rasterised with a nearness test so a near edge
+form a patch of surface, rasterized with a nearness test so a near edge
 slides over the background; a larger gap is a depth discontinuity, and the
 hole it opens is filled from the farther side (the background shows
 through, the foreground is not stretched); pixels are sampled linearly.
@@ -492,7 +492,7 @@ Canon's FocusDistanceUpper / Lower and Sony's FocusDistance2
 here (0.78 m in the first frame, 1.44 m in the last: frame 0 near). The
 frames' scale over the stack is logged as a hint but does not decide: on a
 rail, or with a lens that extends to focus closer, the near frames are the
-larger ones and a stack shot near to far is enlarged towards its end to fit
+larger ones and a stack shot near to far is enlarged toward its end to fit
 frame 0; an internal-focus lens that widens as it focuses closer breathes
 the other way, and the sign says nothing without knowing the lens. The
 symptom of the wrong choice is a relief that looks inside out; the run logs
@@ -505,7 +505,7 @@ edge, default 1000; each vertex takes the mean depth of the cell of pixels
 around it, so the mesh is smooth at its own scale; each cell is cut along the
 diagonal with the smaller depth step) raised by the depth and textured with
 the stacked image. Coordinates are right-handed with the width as the unit:
-x along the width, y up, z towards the viewer, the far end of the stack on
+x along the width, y up, z toward the viewer, the far end of the stack on
 z = 0 and the near end at `--mesh-relief PCT` % of the width (default 25 —
 the depth of the stack is the one thing the depth map cannot know, so
 measure the subject or set it by eye; `--far-first` applies). `glb` writes
@@ -541,14 +541,14 @@ written from the papers:
    guide (`--depth-agg R:EPS`, default 3:1e-4), the edge-aware aggregation
    of fast cost-volume filtering.
 3. **Peak search** — streamed over the frame axis with O(1) memory in the
-   stack size: the global peak with its two neighbours (Gaussian
+   stack size: the global peak with its two neighbors (Gaussian
    interpolation of Nayar & Nakagawa 1994 → fractional frame index), the
    second-best local maximum (peak-ratio confidence), the profile mean
    (prominence) and a noise gate against the median profile minimum
-   (`--depth-gate`). Confidence is normalised so its 90th percentile is 1.
-4. **Regularisation** — edge-aware *weighted least squares* (Farbman et al.
+   (`--depth-gate`). Confidence is normalized so its 90th percentile is 1.
+4. **Regularization** — edge-aware *weighted least squares* (Farbman et al.
    2008) with the confidence as data weight: flat, noisy or ambiguous
-   pixels take their depth from confident neighbours without crossing image
+   pixels take their depth from confident neighbors without crossing image
    edges. The separable fast global smoother (Min et al. 2014) gives the
    initial guess, and a conjugate gradient solves the 2-D system
    (`--depth-lambda`, `--depth-sigma`, `--depth-cg`) to a relative residual
@@ -571,7 +571,7 @@ written from the papers:
    (`--depth-upsample guided:R:EPS` | `bilinear`), so depth edges land on
    image edges.
 
-`--save-depth` writes the 8-bit visualisation, `--depth-raw PATH` a 16-bit
+`--save-depth` writes the 8-bit visualization, `--depth-raw PATH` a 16-bit
 PNG with a fixed scale (65535 = last frame) for numeric use, `--save-conf`
 the confidence map.
 
@@ -779,7 +779,7 @@ scaled to the chosen *long edge*), and **Rocking**, the stacked image
 rocking from side to side; *every Nth frame*, speed and loop
 (back and forth or forward) are settings, and the card estimates the size —
 a full-resolution GIF of a long 45 MP stack runs to gigabytes, so pick a
-long edge or a frame step for those. Frames are quantised (median cut,
+long edge or a frame step for those. Frames are quantized (median cut,
 Floyd–Steinberg) and LZW-encoded in the worker (`crates/lapstack-web/src/gif.rs`),
 the bytes streaming back so the file never sits in wasm memory whole.
 The section's *format* makes the same animations **videos** instead —
@@ -862,7 +862,7 @@ worker loads on the first signed save.
 pipeline of `crates/lapstack-core/src/depth.rs` as WGSL kernels
 (`crates/lapstack-web/src/depth.rs`): ring difference filter per frame
 during the run, block-averaged to a working grid of 1/2^N the frame size
-(*grid*, default N = 2) and kept as a quantised u16 slice; after the
+(*grid*, default N = 2) and kept as a quantized u16 slice; after the
 collapse the slices are aggregated with the guided filter (fused luma as
 guide), the peaks are tracked with sub-frame interpolation and confidence,
 the confidence-weighted WLS with its robust reweight runs as fast-global-
@@ -872,13 +872,13 @@ when it has converged instead of at the iteration cap), and the map is
 guided-upsampled to full resolution for saving. The viewer shows the
 working-grid map under **Depth → Focus depth** and its confidence under
 **Depth → Confidence** — the peak-ratio confidence of each pixel's focus
-profile, normalised so the 90th percentile is 1: the weight the WLS gave the
+profile, normalized so the 90th percentile is 1: the weight the WLS gave the
 pixel's own depth, so the dark parts are where the map was filled in from
-the neighbours (flat, noisy or ambiguous areas); the ctrl+G readout logs
+the neighbors (flat, noisy or ambiguous areas); the ctrl+G readout logs
 both values for the clicked pixel. The 16-bit saves write the full-resolution
 depth and the confidence bilinearly upsampled (65535 = 1, as `--save-conf`).
 The browser map matches the native one on the same frames to
-4 × 10⁻⁴ frames (the u16 quantisation) and the confidence to 3 × 10⁻³ on
+4 × 10⁻⁴ frames (the u16 quantization) and the confidence to 3 × 10⁻³ on
 average (0.1 % of the pixels, near-ties between two peaks, differ by
 more), see `web/test.html`. The pass costs
 no measurable wall time on a 25 × 45 MP run and keeps one u16 slice per
@@ -888,14 +888,14 @@ is not shown as a layer; it drives the ctrl+G pixel lookup and has its own
 save button.
 
 **In focus** (the second Depth layer) is the scrubbed frame's own pixels,
-in colour, showing only the parts of it the result uses — a source map:
+in color, showing only the parts of it the result uses — a source map:
 every pixel is darkened by how far, in frames, the depth map
 puts it from that frame (full brightness within ±0.5 frames, 8 % beyond
 ±0.75, linear between), so the plane of focus stands out with a crisp edge
 and scrubbing sweeps it through the scene. The out-of-focus part keeps its
 outlines: the local contrast of its luminance (|luma − box blur|, radius
-≈ width/1000) is added back in grey, so blurred edges and fibres read as
-light lines against the dimmed colour. The page builds a preview from the
+≈ width/1000) is added back in gray, so blurred edges and fibers read as
+light lines against the dimmed color. The page builds a preview from the
 proxy and the depth map's working grid straight away; the engine then
 returns the full-resolution aligned frame rendered the same way from the
 guided-upsampled depth map (`source_focus`, ~1 s at 45 MP, cached with the
@@ -926,7 +926,7 @@ LAP within a slab, while the far-out-of-focus frames that build up noise
 and halos over a whole stack never blend in, since a slab's frames all lie
 near its depth. Frames in the overlaps are decoded once per slab, and the
 blend keeps its own accumulator on the GPU (4 floats per pixel, freed
-afterwards) while the run's fuses the slabs. A single slab of the whole
+afterward) while the run's fuses the slabs. A single slab of the whole
 stack reproduces the LAP result exactly, which the test page checks.
 
 **Frame list**: the filmstrip is editable. Its head counts the frames in the
@@ -972,7 +972,7 @@ then written as linear DNGs by `encode` / `view_stereo` / `refold_stereo`
 through the core writer, with the first frame's EXIF and XMP; the maps and
 animations are what they always are. The browser's frames are 16-bit, so a
 highlight past the balanced white is clipped here where the CLI keeps it;
-the colour matrices, neutral and metadata are the same. Checked headless on
+the color matrices, neutral and metadata are the same. Checked headless on
 five NEFs: the DNG darktable develops from the browser matches the CLI's.
 
 **Batch** (the same ▾ menu, *split into stacks*): the CLI's `--split` for
@@ -1015,7 +1015,7 @@ or `S` to cycle): DFR while LAP is painted, LAP while DFR is, so the
 pyramid's fine detail can be brushed into the depth-map rendering and its
 smooth areas back into the pyramid image. A slab is fused on demand: the
 scrubbed frame and its
-neighbours (*slab ± frames*, default 5) fused on their own, with the run's
+neighbors (*slab ± frames*, default 5) fused on their own, with the run's
 registration, brightness gains and fusion settings, so the brush copies a
 thick plane of focus instead of one frame's sliver of it — on a deep stack
 that is what most retouching paints from. The engine fuses it when the scrub
@@ -1103,10 +1103,10 @@ the project's own.
 
 **Scale bar and text** (the panel's *Scale bar and text* section; the CLI's
 `--scale-bar` and `--text`, above): the *scale bar* tick, the calibration in
-µm per pixel (empty: the bar is labelled in pixels of the frames), the bar's
+µm per pixel (empty: the bar is labeled in pixels of the frames), the bar's
 length (empty = the 1-2-5 value nearest a fifth of the width), a caption with
 the same tokens (`{date}`, `{time}`, `{frames}`, `{first}`, `{n}`; `\n` breaks
-a line), the corners, the size, the colour and the style. The engine renders
+a line), the corners, the size, the color and the style. The engine renders
 the overlay for the saved file's size (`overlay_patches`, core `overlay.rs`)
 and returns RGBA patches over the corners it occupies, which the viewer draws
 over the Stack layers — LAP, DFR, WAV and the kept results — inside the crop
@@ -1132,7 +1132,7 @@ depth map.
 `--halo-control`; off by default): the fold selects only up to the depth
 level, turns that level's region energy into the weights on the GPU
 (`wgt`), REDUCEs them down the pyramid and folds every coarser level and
-the residual as Σ w·L and Σ w (`wacc`), normalised at the collapse
+the residual as Σ w·L and Σ w (`wacc`), normalized at the collapse
 (`wnorm`); no residual crosses to the host. Slabs and refolds use the same
 fold, so a slab or a stereo view is halo-controlled like the run. The
 browser result matches the native one as the plain fold does — a handful
@@ -1214,7 +1214,7 @@ sends).
 ## Lightroom Classic plugin (`lightroom/`)
 
 `lightroom/lapstack.lrplugin` is the usual focus-stacking round trip from
-Lightroom: the frames of a stack go out of the catalogue
+Lightroom: the frames of a stack go out of the catalog
 to the `lapstack` CLI and the stacked image comes back into it. Add the
 folder in File › Plug-in Manager and set the path to the lapstack binary and
 the stacking settings in its section (output format tif / png / dng, a name
@@ -1254,7 +1254,7 @@ the MIME types and `Cache-Control: no-store` of `serve.sh`, and opens one
 sandboxed window on it (no Node in the page, context isolation on, a CSP).
 The Chromium switches are `chrome.sh`'s: `enable-unsafe-webgpu` everywhere,
 and on Linux the Vulkan trio and the X11 ozone platform — which the browser
-process only honours on its real command line, so on Linux the app
+process only honors on its real command line, so on Linux the app
 relaunches itself once with `--ozone-platform=x11` (a Wayland window with an
 X11 Vulkan surface never maps; `LAPSTACK_SWITCHES` replaces the Linux
 switches for troubleshooting). The File System Access pickers the app uses
@@ -1292,14 +1292,14 @@ time with a message, everything else works.
 
 lapstack is proprietary software: Copyright (C) 2026 RAGTUX LLC, all rights
 reserved. `LICENSE` (SPDX `LicenseRef-RAGTUX-Proprietary`) is the whole of
-it — no licence to the source, and an end-user licence for the programs built
+it — no license to the source, and an end-user license for the programs built
 from it. The revisions from 2026-09-24 to 2026-09-30 were published under the
-AGPL-3.0-only; that licence stays with the copies distributed under it and
+AGPL-3.0-only; that license stays with the copies distributed under it and
 does not extend to later revisions.
 
-Third-party components keep their own licences and are listed with their
+Third-party components keep their own licenses and are listed with their
 notices in `THIRD-PARTY.md`, which `just third-party` regenerates from the
-Cargo metadata and the crates' own licence files; a distributed build carries
+Cargo metadata and the crates' own license files; a distributed build carries
 it. Two need more than a listing:
 
 - The camera raw decoder is LGPL-2.1: `vendor/rawler` (MIT and LGPL-2.1 per

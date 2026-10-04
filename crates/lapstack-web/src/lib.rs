@@ -177,7 +177,7 @@ struct Run {
     /// Focus-peaking map: region energy of the level `peak.4` band, area-averaged
     /// to (peak.1 x peak.2) by factor peak.3.
     peak: (wgpu::Buffer, usize, usize, usize, usize),
-    /// Brightness normalisation: frame 0's channel means per 64x64 block
+    /// Brightness normalization: frame 0's channel means per 64x64 block
     /// (blocks across, blocks down), the per-block partial sums of a frame, and
     /// the gains found for each frame (applied again when a frame is re-warped).
     ref_blk: (wgpu::Buffer, usize, usize),
@@ -362,7 +362,7 @@ fn encode_rgb16(v: &[u16], w: u32, h: u32, format: &str, quality: u8, bits16: bo
 }
 
 /// The scale bar and caption (`lapstack_core::overlay`) as the page sends it: the
-/// fields of `OverlayParams` as JSON, the corners, colour and style by name.
+/// fields of `OverlayParams` as JSON, the corners, color and style by name.
 #[derive(Deserialize)]
 #[serde(default)]
 struct OverlayJson {
@@ -529,7 +529,7 @@ fn depth_full_u16(run: &Run) -> Result<std::borrow::Cow<'_, [u16]>, JsValue> {
 }
 
 /// The DFF confidence at full resolution, bilinear from the working grid like the
-/// native pipeline (`lapstack_core::depth`), quantised to u16 with 65535 = 1.
+/// native pipeline (`lapstack_core::depth`), quantized to u16 with 65535 = 1.
 fn conf_full_u16(run: &Run) -> Result<Vec<u16>, JsValue> {
     let c = run.conf_small.as_ref().ok_or_else(|| JsValue::from_str("no confidence map with the winner depth"))?;
     let dff = run.dff.as_ref().ok_or_else(|| JsValue::from_str("not finished"))?;
@@ -1314,7 +1314,7 @@ impl Engine {
     /// less (1 + `gate`) × the least contrast any frame showed at the cell, raised to
     /// `power`, the weights smoothed again; where nothing is above the floor every
     /// frame weighs the same — into the same accumulator; `render_finish(true)`
-    /// normalises it into `wav_rgb16`.
+    /// normalizes it into `wav_rgb16`.
     pub async fn render_push(&mut self, index: usize, bytes: &[u8], raw: bool, wav: bool, power: f32, smooth: u32, gate: f32) -> Result<JsValue, JsValue> {
         let t0 = now();
         let frame = self.decode_for_run(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
@@ -1441,7 +1441,7 @@ impl Engine {
         }
     }
 
-    /// Normalise the depth-map rendering (from frames, or from slabs) and read
+    /// Normalize the depth-map rendering (from frames, or from slabs) and read
     /// it back: {w, h, rgba, ms}.
     pub async fn render_finish(&mut self, wav: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
@@ -1655,7 +1655,7 @@ impl Engine {
     /// frames, none beyond ±w1 — and the out-of-focus part keeps its outlines:
     /// out = rgb·(w + (1 − w)·dim) + (1 − w)·soft(tex·|luma − box(luma)|),
     /// the box being (2r+1)² with r = w/1000 px and soft(t) = cap·(1 − e^(−t/cap)),
-    /// cap = 0.4, so hard edges stay light grey. Three kernels (luma, its row
+    /// cap = 0.4, so hard edges stay light gray. Three kernels (luma, its row
     /// sums, the `focus_out` combine) and one RGBA8 readback; `en` and
     /// `tmp_full` are scratch. Returns {index, w, h, rgba}.
     pub async fn source_focus(&self, dim: f32, w0: f32, w1: f32, tex: f32) -> Result<JsValue, JsValue> {

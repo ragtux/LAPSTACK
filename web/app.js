@@ -196,7 +196,7 @@ for (const id of Object.keys(stepDefaults)) setStep(id, stepVal(id));
 // are dropped from the settings in hand and applyParams fills them in again from its own
 // defaults, then the section's own followers run — so a default lives in one place and a reset
 // is the same path as a page load. (applyParams re-applies the other sections' keys as it goes,
-// exactly the round-trip every reload already makes, so a typed "0,5" normalises to "0.5"
+// exactly the round-trip every reload already makes, so a typed "0,5" normalizes to "0.5"
 // there and then.) The button is disabled while the section is already at its defaults, which
 // makes the panel say at a glance which groups have been changed. Sections that hold no
 // settings — History, How to, GPU — get no button.
@@ -667,7 +667,7 @@ function keptTip(k) {
   const p = k.params || {};
   const fus = `levels ${p.levels || 'auto'}, energy radius ${p.energy_radius}, top ${p.top} r${p.top_radius}${p.use_chroma ? ', chroma' : ''}${p.halo ? `, halo control ${p.halo}` : ''}`;
   const al = p.align ? `aligned (${p.model && p.model !== 'similarity' ? `${p.model}, ` : ''}coarsen ${p.coarsen}${p.interp && p.interp !== 'spline4x4' ? `, ${p.interp}` : ''}${!p.shift ? ', no shift' : ''}${!p.scale ? ', no scale' : ''}${!p.rotation ? ', no rotation' : ''})` : 'not aligned';
-  return `run ${k.run}: ${k.frames} frames, ${k.first} .. ${k.last}\n${al}${p.brightness ? ', brightness equalised' : ''}${k.dust ? `, dust map ${k.dust}` : ''}\n${fus}\ndepth scale ${p.depth_scale}${p.render_dmap ? `, DFR${p.render_slabs ? ` from slabs of ${p.slab_size} (overlap ${p.slab_overlap})` : ''}` : ''}${p.render_wav ? `, WAV (power ${p.wav_power}, smoothing ${p.wav_smooth}, gate ${p.wav_gate ?? 0.5})` : ''}\n${k.w}×${k.h}, ${k.bits}-bit, ${k.secs} s, ${k.when.toLocaleTimeString()}`;
+  return `run ${k.run}: ${k.frames} frames, ${k.first} .. ${k.last}\n${al}${p.brightness ? ', brightness equalized' : ''}${k.dust ? `, dust map ${k.dust}` : ''}\n${fus}\ndepth scale ${p.depth_scale}${p.render_dmap ? `, DFR${p.render_slabs ? ` from slabs of ${p.slab_size} (overlap ${p.slab_overlap})` : ''}` : ''}${p.render_wav ? `, WAV (power ${p.wav_power}, smoothing ${p.wav_smooth}, gate ${p.wav_gate ?? 0.5})` : ''}\n${k.w}×${k.h}, ${k.bits}-bit, ${k.secs} s, ${k.when.toLocaleTimeString()}`;
 }
 function keepResult(why) {
   const r = st.result; if (!r || inBatch()) return [];
@@ -817,7 +817,7 @@ function captionText(t) {
     .replace(/\{frames\}/g, String(st.files.length)).replace(/\{first\}/g, f0 ? stemOf(f0.name) : '').replace(/\{n\}/g, String(B.all ? B.k + 1 : 1));
 }
 // the overlay as the engine takes it (OverlayParams by name), or null when there is nothing to draw;
-// a bar without a calibration is labelled in pixels, so the bar is drawn whenever it is ticked
+// a bar without a calibration is labeled in pixels, so the bar is drawn whenever it is ticked
 function overlayParams() {
   const p = readParams();
   const draft = st.result && st.result.meta ? (st.result.meta.draft || 0) : p.draft;   // a draft's pixels are 2^N frame pixels wide
@@ -873,7 +873,7 @@ function renderOverlayInfo() {
     const b = document.createElement('button'); b.textContent = 'use'; b.title = 'take the calibration the first frame carries';
     b.addEventListener('click', () => { $('p-ov-um').value = String(cal); $('p-ov-bar').checked = true; overlayChanged(); });
     el.append(b);
-  } else el.textContent = (p && p.bar && !p.um_per_px ? 'no calibration: the bar is labelled in pixels of the frames; ' : '')
+  } else el.textContent = (p && p.bar && !p.um_per_px ? 'no calibration: the bar is labeled in pixels of the frames; ' : '')
     + (st.result ? 'the first frame carries no pixel size (a TIFF from ImageJ or an OME-TIFF would); calibrate with a stage micrometer' : 'a frame\'s own calibration (ImageJ, OME-TIFF) shows here after a run');
   const have = !!(st.result || st.kept.length), [W, H] = outDims();
   const hit = p && have && W ? OV.cache.get(JSON.stringify([p, W, H, 1])) : null;
@@ -1266,7 +1266,7 @@ async function onDone(m) {
   st.nearAuto = null; nearCue();
   resetRetouch();
   const secs = ((performance.now() - st.t0) / 1000).toFixed(1);
-  Object.assign(st.result, { run: st.runNo, params: st.runParams, dust: st.runDust, frames: m.frames, first: st.runFirst, last: st.runLast, secs: Number(secs), when: new Date() });   // what a kept result is labelled with
+  Object.assign(st.result, { run: st.runNo, params: st.runParams, dust: st.runDust, frames: m.frames, first: st.runFirst, last: st.runLast, secs: Number(secs), when: new Date() });   // what a kept result is labeled with
   log(`[lapstack] fused ${m.frames} frames -> ${m.w}x${m.h} ${m.bits}-bit  (${secs}s)`);
   st.frameCount = m.frames;
   if (st.pending.length) { setProgress(RENDER_STAGE[st.pending[0]], 0, st.files.length); setView('fused'); return; }
@@ -1323,7 +1323,7 @@ function onReply(m) {
 // ---------- save step ----------
 // One row per output the run can produce. Stills come from the engine's encoder; the
 // animations are composed here frame by frame (the layer as the viewer draws it, at the
-// chosen size) and quantised + LZW-encoded by the worker (gif.rs), the bytes streaming
+// chosen size) and quantized + LZW-encoded by the worker (gif.rs), the bytes streaming
 // back so the file is assembled as a Blob. `token` is the layer part of the file name.
 const OUTPUTS = [
   { id: 'lap', token: 'lap', kind: 'fused', name: 'LAP stack', desc: 'the fused image', avail: () => !!st.result },
@@ -1469,7 +1469,7 @@ async function captureDate(file, want = null) {   // want: {v} — fill v with t
     })());
   } catch { return done(null); }
 }
-// the focus distance the first frame's EXIF records (SubjectDistance, metres), or null — most cameras
+// the focus distance the first frame's EXIF records (SubjectDistance, meters), or null — most cameras
 // keep it in their MakerNote, which is beyond this reader (the CLI asks exiftool)
 async function subjectDistance(file) { const r = { v: null }; await captureDate(file, r); return r.v; }
 // the near end of the stack from the frames' focus distances, for the stereo, rocking and 3D model
@@ -1620,7 +1620,7 @@ function updateAnimInfo() {
   const plan = animPlan(), fmt = animFormat(), fps = Number($('an-fps').value), bpp = Number($('an-vq').value);
   $('an-format').disabled = !window.VideoEncoder; $('an-vinfo').hidden = !!window.VideoEncoder; $('an-vq-row').hidden = fmt === 'gif';
   const anims = OUTPUTS.filter((o) => o.anim && o.avail() && SV.sel.has(o.id));
-  // a GIF's size from its pixels (the depth map's flat colours pack tighter); a video's from its bit rate
+  // a GIF's size from its pixels (the depth map's flat colors pack tighter); a video's from its bit rate
   const est = anims.reduce((b, o) => { const p = animPlan(o); return b + (fmt === 'gif' ? p.seq.length * p.ow * p.oh * (o.id === 'anim-depth' ? 0.15 : 0.7) : (p.ow * p.oh * fps * bpp * p.seq.length) / fps / 8); }, 0);
   $('an-info').textContent = `${plan.seq.length} frames of ${plan.ow}×${plan.oh} (rocking: ${v3().views})` + (anims.length ? ` · roughly ${fmtMB(est)} for the ${anims.length} selected animation${anims.length > 1 ? 's' : ''}` : '') +
     (fmt === 'gif' && est > 1e9 ? ' — a GIF that large may exhaust the browser: use a smaller long edge or a larger frame step.' : '');
@@ -1957,9 +1957,9 @@ function turbo(t) { // Google Turbo colormap, polynomial fit
 }
 // The depth layers drawn from the working grid: Focus depth, depth from focus (DFF) as a
 // fractional frame index, min–max scaled; and Confidence, how sure that depth is — the
-// peak-ratio confidence of each pixel's focus profile, normalised so the 90th percentile
+// peak-ratio confidence of each pixel's focus profile, normalized so the 90th percentile
 // and everything above it is 1 (the weight the WLS gives the pixel's own depth), on a
-// fixed 0–1 scale so dark means the depth there was taken from the neighbours.
+// fixed 0–1 scale so dark means the depth there was taken from the neighbors.
 const isDepthLayer = (t) => t === 'depth' || t === 'conf';
 const haveConf = () => !!(st.result && st.result.conf && st.result.conf.length);
 function depthData(kind = 'depth') {
@@ -2069,9 +2069,9 @@ $('slice').addEventListener('change', (e) => { st.slice = e.target.checked; save
 // beyond ±FOCUS_W1, linear between — so the plane of focus stands out with a
 // crisp edge and scrubbing sweeps it through the scene. The out-of-focus part
 // is dimmed to FOCUS_DIM but keeps its outlines: the local contrast of its
-// luminance (|luma − box blur|, radius ≈ width/1000) is added back in grey,
+// luminance (|luma − box blur|, radius ≈ width/1000) is added back in gray,
 // scaled by FOCUS_TEX and soft-clipped at FOCUS_CAP so hard edges stay light
-// grey, so blurred edges and fibres read as light lines.
+// gray, so blurred edges and fibers read as light lines.
 //   out = rgb·(w + (1 − w)·dim) + (1 − w)·soft(tex·|luma − box(luma)|),  soft(t) = cap·(1 − e^(−t/cap))
 // Two renderings share the formula: a preview built here from the proxy and
 // the depth map's working grid, and the full-resolution frame rendered by the
@@ -2081,7 +2081,7 @@ const FOCUS_DIM = 0.08;   // brightness left to a pixel the frame does not contr
 const FOCUS_W0 = 0.5;     // frames: fully lit within this distance of the plane
 const FOCUS_W1 = 0.75;    // frames: fully dimmed beyond this distance (a quarter-frame feather)
 const FOCUS_TEX = 3;      // gain of the out-of-focus local contrast
-const FOCUS_CAP = 0.4;    // brightness the local contrast term saturates towards
+const FOCUS_CAP = 0.4;    // brightness the local contrast term saturates toward
 const focusParams = () => ({ dim: FOCUS_DIM, w0: FOCUS_W0, w1: FOCUS_W1, tex: FOCUS_TEX });
 const focusWeight = (d, ix) => Math.min(1, Math.max(0, (FOCUS_W1 - Math.abs(d - ix)) / (FOCUS_W1 - FOCUS_W0)));
 // |luma − box blur| of an RGBA image, radius r, as a Float32Array in [0, 1]
@@ -2456,7 +2456,7 @@ function fit() {
 function zoom100() {
   const [w, h] = imageDims(); if (!w) return;
   const cw = canvas.clientWidth, ch = canvas.clientHeight; const z = 1 / dpr();
-  const cx = (cw / 2 - st.ox) / st.zoom, cy = (ch / 2 - st.oy) / st.zoom; // keep the centre
+  const cx = (cw / 2 - st.ox) / st.zoom, cy = (ch / 2 - st.oy) / st.zoom; // keep the center
   st.zoom = z; st.ox = cw / 2 - cx * z; st.oy = ch / 2 - cy * z; st.fitted = false; draw();
 }
 function layerFor(tab) {
@@ -2594,7 +2594,7 @@ function paintMarks(c, d, paintPane) {
 }
 // Pane labels: block letters over every visible image. 'a' is the view layer, 'b' the
 // compare partner, plain = neutral (the retouch source). Positions are inline so one
-// element serves the pane centres, the swipe divider and the centred single view; a
+// element serves the pane centers, the swipe divider and the centered single view; a
 // " — hint" suffix in the text becomes a smaller line under the name.
 function showLabel(el, text, kind, pos) {
   el.hidden = !text;
@@ -2602,9 +2602,9 @@ function showLabel(el, text, kind, pos) {
   const [name, hint] = text.split(' — ');
   el.textContent = name;
   if (hint) { const h = document.createElement('span'); h.className = 'hint'; h.textContent = hint; el.append(h); }
-  // letters on the divider line up against it; everything else centres on its anchor
+  // letters on the divider line up against it; everything else centers on its anchor
   el.className = 'plab' + (kind ? ' ' + kind : '') + (pos.right ? ' r' : pos.left && !pos.transform ? ' l' : '');
-  // the box and letters take their layer's group colour (kind 'a' = the view, 'b' = the compare partner)
+  // the box and letters take their layer's group color (kind 'a' = the view, 'b' = the compare partner)
   const g = kind === 'a' ? groupOf(st.view) : kind === 'b' ? groupOf(st.cmp) : null;
   if (g) el.dataset.group = g; else delete el.dataset.group;
   el.style.left = pos.left || 'auto';
@@ -2943,9 +2943,9 @@ function updateTabs() {
   $('scrub').title = st.files[st.selected] ? st.files[st.selected].name : '';
   layoutScrub();
 }
-// The scrubber wants to sit centred on the left edge at min(50%, 420px) tall. The chip
-// column floats above it on the same edge, so when the centred track would run into the
-// chips, shorten it (down to 160px) to keep the centre; if even that overlaps, centre it
+// The scrubber wants to sit centered on the left edge at min(50%, 420px) tall. The chip
+// column floats above it on the same edge, so when the centered track would run into the
+// chips, shorten it (down to 160px) to keep the center; if even that overlaps, center it
 // in the free band between the chips and the zoom bar instead.
 function layoutScrub() {
   const sc = $('scrub'); if (sc.hidden) return;

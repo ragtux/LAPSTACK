@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
 // SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
-//! CUDA fusion path (feature `gpu`). Same maths as `pyramid.rs` + `fuse.rs`
+//! CUDA fusion path (feature `gpu`). Same math as `pyramid.rs` + `fuse.rs`
 //! — the binomial taps, reflect-101 borders, luma energy, binomial window and
 //! winner-take-all select are transcribed kernel for kernel — so the output
 //! matches the CPU path to float rounding. Per frame only the three RGB
@@ -200,7 +200,7 @@ extern "C" __global__ void burtV(const float* tmp,float* out,int w,int h,int ow,
 }
 // the warp's kernels (align::Interp::id): 0 nearest, 1 bilinear, 2 bicubic, 3 spline4x4,
 // 4 spline6x6, 5 lanczos3; `ktaps` taps at 1 - taps/2 .. from the floor of the source point,
-// the distance-form kernels normalised to sum 1 (align::taps_of)
+// the distance-form kernels normalized to sum 1 (align::taps_of)
 __device__ __forceinline__ int ktaps(int k){ return k<2?2:(k<4?4:6); }
 __device__ __forceinline__ float keysf(float d){ if(d<1.f) return (1.5f*d-2.5f)*d*d+1.f; if(d<2.f) return ((-0.5f*d+2.5f)*d-4.f)*d+2.f; return 0.f; }
 __device__ __forceinline__ float spline36f(float d){
@@ -546,7 +546,7 @@ impl GpuFuser {
 }
 
 /// A frame on the device, as `GpuFrames` hands it to the fuser: its three
-/// warped, equalised planes (consumed by `GpuFuser::push_device`) and, when
+/// warped, equalized planes (consumed by `GpuFuser::push_device`) and, when
 /// the depth pass asked for it, its focus slice (`depth::focus_slice`).
 pub struct DeviceFrame<'a> {
     pub planes: &'a mut [CudaSlice<f32>; 3],
@@ -587,10 +587,10 @@ pub struct GpuFrames {
     w: usize,
     h: usize,
     interp: Interp,
-    /// The frame as decoded, and as warped and equalised.
+    /// The frame as decoded, and as warped and equalized.
     src: [CudaSlice<f32>; 3],
     out: [CudaSlice<f32>; 3],
-    /// The frame's luma (the search's target; later the equalised frame's, for
+    /// The frame's luma (the search's target; later the equalized frame's, for
     /// the focus measure), the warped frame's luma (the next search's
     /// reference), and a full-size scratch plane.
     yt: CudaSlice<f32>,
@@ -722,12 +722,12 @@ impl GpuFrames {
         Sim::from_vec(&cur)
     }
 
-    /// Frame `img` onto the device, registered, warped and equalised:
+    /// Frame `img` onto the device, registered, warped and equalized:
     /// searched from `guess` (the previous frame's transform) unless
     /// `known` gives its transform and gains already (a later pass), or it
     /// is the first frame, which sits at the identity and becomes the
     /// brightness reference. Returns the transform, the gains and, for
-    /// `measure`, the focus slice. Afterwards `planes` holds the frame and
+    /// `measure`, the focus slice. Afterward `planes` holds the frame and
     /// `yr` its luma for the next frame's search.
     #[allow(clippy::too_many_arguments)]
     pub fn process(
@@ -1066,7 +1066,7 @@ extern "C" __global__ void scalk(double* acc,double* scal,int mode){
 }
 extern "C" __global__ void axpyk(float* y,const float* x,const double* scal,int n,float sign){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n) y[i]+=sign*(float)scal[1]*x[i]; }
 extern "C" __global__ void pupdk(float* p,const float* z,const double* scal,int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n) p[i]=z[i]+(float)scal[2]*p[i]; }
-// bilinear from the dw x dh grid of k-pixel blocks (samples at block centres) to w x h
+// bilinear from the dw x dh grid of k-pixel blocks (samples at block centers) to w x h
 __device__ __forceinline__ float bil(const float* g,int dw,int dh,int k,int x,int y){
     float inv=1.f/(float)k;
     float fy=fminf(fmaxf(((float)y+0.5f)*inv-0.5f,0.f),(float)(dh-1)), fx=fminf(fmaxf(((float)x+0.5f)*inv-0.5f,0.f),(float)(dw-1));
@@ -1301,7 +1301,7 @@ impl DWls {
 
 /// The depth pass on the device (`depth::depth_from_slices`): the slices,
 /// each uploaded as it comes, are aggregated with the guided filter and
-/// folded into the peak tracker; the sub-frame depth is regularised by the
+/// folded into the peak tracker; the sub-frame depth is regularized by the
 /// WLS solve and upsampled on the fused luma, all on the device. Only the
 /// noise floor and the confidence's 90th percentile (medians of a
 /// subsample) are taken on the host, and the depth and confidence maps
@@ -1397,8 +1397,8 @@ pub fn depth_from_slices(
     let mut conf_h = g.s.memcpy_dtov(&conf).map_err(|e| format!("{e:?}"))?;
     let p90 = normalize_conf(&mut conf_h);
     let mean_conf = conf_h.iter().map(|&c| c as f64).sum::<f64>() / conf_h.len() as f64;
-    log(format!("depth: peaks found, confidence p90 {p90:.3}, mean (normalised) {mean_conf:.3}  ({:.1}s)", t.elapsed().as_secs_f64()));
-    // the normalised confidence, the data weight and the map that comes back
+    log(format!("depth: peaks found, confidence p90 {p90:.3}, mean (normalized) {mean_conf:.3}  ({:.1}s)", t.elapsed().as_secs_f64()));
+    // the normalized confidence, the data weight and the map that comes back
     e(g.s.memcpy_htod(&conf_h, &mut conf))?;
     let mut u = al(m)?;
     let (rel, iters) = if p.lambda > 0.0 {

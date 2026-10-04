@@ -8,7 +8,7 @@
 //! as WGSL kernels (`shaders.wgsl`, "Depth from focus" section).
 //!
 //! During the run every frame's focus measure is block-averaged to the
-//! working grid on the GPU and kept on the CPU side as a quantised u16 slice
+//! working grid on the GPU and kept on the CPU side as a quantized u16 slice
 //! (≈ 2 bytes per working-grid pixel per frame). After fusion the slices are
 //! streamed back through the guided filter — the aggregation is guided by the
 //! *fused* luma, which does not exist before the end of the run — into the
@@ -27,7 +27,7 @@ pub struct DepthGpu {
     taps: wgpu::Buffer,
     ntaps: u32,
     slice: wgpu::Buffer,
-    /// Per frame: the block-averaged focus measure, quantised (values, scale).
+    /// Per frame: the block-averaged focus measure, quantized (values, scale).
     pub slices: Vec<(Vec<u16>, f32)>,
     /// Two working-grid planes for the weighted average's smoothed weight map.
     wtmp: wgpu::Buffer,
@@ -132,7 +132,7 @@ impl DepthGpu {
         Ok(&self.wtmp)
     }
 
-    /// Read the recorded slice back and keep it (quantised).
+    /// Read the recorded slice back and keep it (quantized).
     pub async fn take_slice(&mut self, g: &Gpu) -> Result<(), String> {
         let v = g.read_f32(&self.slice, self.dw * self.dh).await?;
         let max = v.iter().cloned().fold(0f32, f32::max).max(1e-20);
@@ -145,8 +145,8 @@ impl DepthGpu {
     /// `full_tmp` and `full_out` are w×h f32 scratch buffers; `up16` is a
     /// buffer of at least dw*dh/2 u32 for slice uploads. Returns the
     /// working-grid depth (fractional frame index, dw×dh), the working-grid
-    /// confidence normalised like the WLS data weight (`min(1, c / p90)`,
-    /// dw×dh) and the full-res depth quantised to u16 (65535 = last frame).
+    /// confidence normalized like the WLS data weight (`min(1, c / p90)`,
+    /// dw×dh) and the full-res depth quantized to u16 (65535 = last frame).
     pub async fn finish(
         &mut self,
         g: &Gpu,
@@ -281,7 +281,7 @@ impl DepthGpu {
         let mean_conf = conf_w.iter().map(|&c| c as f64).sum::<f64>() / n as f64;
         log(&format!("[lapstack] depth: {nf} slices folded on the {dw}x{dh} grid, confidence p90 {p90:.3}, mean {mean_conf:.3}"));
 
-        // ---- WLS (+ one robust reweight): the normalised confidence (t0), the
+        // ---- WLS (+ one robust reweight): the normalized confidence (t0), the
         // data weight with its floor, the edges with lambda in them
         let mut rec = g.rec();
         rec.dispatch("scale_clamp", [Some(&wk.t[1]), None, Some(&wk.t[0]), None, None, None], P { f0: 1.0 / p90.max(1e-6), f1: 0.0, ..pw }, grid1(n));

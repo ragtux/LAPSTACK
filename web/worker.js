@@ -111,7 +111,7 @@ const enqueue = (fn) => { chain = chain.then(fn).catch((e) => post({ type: 'erro
 // Without an engine (init failed) a call that would reach it fails with that reason instead
 // of a null property error; thumbnails and the content credentials don't need the engine.
 const NO_ENGINE = new Set(['init', 'thumbs', 'make_cert', 'sign']);
-const needEngine = (m) => { if (!engine && !NO_ENGINE.has(m.type)) throw new Error('WebGPU failed to initialise, so there is nothing to run on: ' + (initError || 'the engine is not ready')); };
+const needEngine = (m) => { if (!engine && !NO_ENGINE.has(m.type)) throw new Error('WebGPU failed to initialize, so there is nothing to run on: ' + (initError || 'the engine is not ready')); };
 const rpc = (m, fn) => enqueue(async () => {
   try { await fn(); } catch (e) { post({ type: 'rpc-error', rid: m.rid, text: (e && e.message) ? e.message : String(e) }); }
 });
@@ -129,7 +129,7 @@ self.onmessage = (ev) => {
 // ---------- remote calls (Save step) ----------
 // The page composes export frames itself and only needs the engine for what it cannot
 // do: full-resolution aligned frames (plain or In focus), the stereo / rocking views, the
-// 3D model, GIF quantisation + LZW, image encoding, and content credentials.
+// 3D model, GIF quantization + LZW, image encoding, and content credentials.
 async function handleCall(m) {
   needEngine(m);
   if (m.type === 'save') {

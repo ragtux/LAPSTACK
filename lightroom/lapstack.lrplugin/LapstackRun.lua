@@ -3,7 +3,7 @@
 
 -- What both doors share once the frames are rendered: the command line built
 -- from the settings, run with its stderr in a log file next to the output, the
--- result added to the catalogue stacked with the first frame, the rendered
+-- result added to the catalog stacked with the first frame, the rendered
 -- frames kept or removed. LrTasks.execute hands the line to the OS shell — on
 -- Windows through cmd.exe, which drops the outermost pair of double quotes,
 -- so the whole line is wrapped in one more pair there (the SDK's long-known,
@@ -131,7 +131,7 @@ function M.keepFrames(frames, output)
     return dir
 end
 
--- The result into the catalogue, stacked above the first frame, and selected;
+-- The result into the catalog, stacked above the first frame, and selected;
 -- nil and a message when Lightroom would not take the file (the file stays).
 function M.import(output, firstPhoto)
     local catalog = LrApplication.activeCatalog()
@@ -142,7 +142,7 @@ function M.import(output, firstPhoto)
         end, { timeout = 30 })
     end)
     if not ok or not added then
-        return nil, tostring(err or 'the catalogue did not take it')
+        return nil, tostring(err or 'the catalog did not take it')
     end
     catalog:setSelectedPhotos(added, {})
     return added
@@ -216,13 +216,13 @@ function M.progress(context, title)
     return scope
 end
 
--- What became of a run, to the user: a bezel for a result in the catalogue, a
+-- What became of a run, to the user: a bezel for a result in the catalog, a
 -- dialog when the file was written but not imported, an error otherwise.
 function M.report(output, added, why)
     if output and added then
-        LrDialogs.showBezel('lapstack: ' .. LrPathUtils.leafName(output) .. ' added to the catalogue', 3)
+        LrDialogs.showBezel('lapstack: ' .. LrPathUtils.leafName(output) .. ' added to the catalog', 3)
     elseif output then
-        LrDialogs.message('lapstack wrote ' .. output, 'but it could not be added to the catalogue: ' .. tostring(why) .. '\nImport the file by hand.', 'warning')
+        LrDialogs.message('lapstack wrote ' .. output, 'but it could not be added to the catalog: ' .. tostring(why) .. '\nImport the file by hand.', 'warning')
     else
         LrDialogs.showError('lapstack: ' .. tostring(why))
     end

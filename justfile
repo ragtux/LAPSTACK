@@ -110,7 +110,7 @@ test-frames dir:
 dist-web:
     ./web/dist.sh
 
-# Regenerate THIRD-PARTY.md (every crate a build can contain, its licence and notices) from the Cargo metadata
+# Regenerate THIRD-PARTY.md (every crate a build can contain, its license and notices) from the Cargo metadata
 third-party:
     python3 tools/third-party.py
 

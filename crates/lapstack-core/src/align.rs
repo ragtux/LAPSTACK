@@ -95,9 +95,9 @@ pub fn free_mask(shift: bool, scale: bool, rotation: bool, model: AlignModel) ->
 }
 
 /// The interpolation kernel of the warp: how an aligned frame's pixel is read
-/// from between its source's. All separable, all interpolating (a pixel-centred
+/// from between its source's. All separable, all interpolating (a pixel-centered
 /// sample comes back as it is; the sum of the weights is 1 — Lanczos's are
-/// normalised to make it so). The wider the kernel, the sharper the fine
+/// normalized to make it so). The wider the kernel, the sharper the fine
 /// detail survives a fractional shift, and the more the noise and the
 /// ringing at hard edges.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -169,7 +169,7 @@ impl Interp {
 }
 
 /// A frame's transform onto the previous aligned frame, about the frame's
-/// centre: a similarity (shift, scale, rotation); with `aspect` and `shear`
+/// center: a similarity (shift, scale, rotation); with `aspect` and `shear`
 /// an affine transform; with `px` and `py` a projective one (`AlignModel`).
 /// Frame 0 sits at `id()`. `matrix` gives it as a 3×3 homography.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -182,7 +182,7 @@ pub struct Sim {
     pub aspect: f64,
     /// Horizontal shear per unit of height (0 = none).
     pub shear: f64,
-    /// Perspective: the divisor 1 + px·u/w + py·v/h over the centred pixel (u, v).
+    /// Perspective: the divisor 1 + px·u/w + py·v/h over the centered pixel (u, v).
     pub px: f64,
     pub py: f64,
 }
@@ -212,7 +212,7 @@ impl Sim {
     /// Forward 3×3 homography mapping SOURCE(target) -> REFERENCE pixel
     /// coordinates: (x, y) ↦ (X/W, Y/W) with [X, Y, W]ᵀ = M·[x, y, 1]ᵀ. The
     /// linear part is scale · R(rot) · [[1, shear], [0, aspect]] about the
-    /// centre, the perspective terms act on the centred pixel; without them
+    /// center, the perspective terms act on the centered pixel; without them
     /// the last row is exactly [0, 0, 1].
     pub fn matrix(&self, w: usize, h: usize) -> [[f64; 3]; 3] {
         let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
@@ -245,7 +245,7 @@ pub fn inverse(m: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
         let (c0, c1) = ((j + 1) % 3, (j + 2) % 3);
         m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0]
     };
-    // adjugate: the transposed cofactors; the determinant cancels in the normalisation
+    // adjugate: the transposed cofactors; the determinant cancels in the normalization
     let mut inv = [[0f64; 3]; 3];
     for i in 0..3 {
         for j in 0..3 {
@@ -261,7 +261,7 @@ pub fn inverse(m: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
     inv
 }
 
-/// The source point of destination pixel (x, y) under the (normalised)
+/// The source point of destination pixel (x, y) under the (normalized)
 /// inverse `inv`: the division is by exactly 1 when `inv` is affine.
 #[inline]
 pub fn map(inv: &[[f64; 3]; 3], x: f64, y: f64) -> (f64, f64) {
@@ -270,7 +270,7 @@ pub fn map(inv: &[[f64; 3]; 3], x: f64, y: f64) -> (f64, f64) {
 }
 
 /// `inv` for an output moved `dx` pixels to the right: its source is taken
-/// `dx` to the left (inv · T(−dx)), normalised again.
+/// `dx` to the left (inv · T(−dx)), normalized again.
 pub fn shifted(inv: [[f64; 3]; 3], dx: f64) -> [[f64; 3]; 3] {
     let mut m = inv;
     for row in &mut m {
@@ -315,7 +315,7 @@ impl Rect {
 /// one interval, so each row's common interval is an intersection over frames
 /// and the best rectangle is the largest one spanning consecutive rows. Frames
 /// at the identity are sampled straight and cover everything. Rows are pixel
-/// centres, rectangles pixel-aligned; the full frame comes back when nothing
+/// centers, rectangles pixel-aligned; the full frame comes back when nothing
 /// is cut. The whole frame when the frames leave no common area.
 pub fn common_area(sims: &[Sim], w: usize, h: usize, interp: Interp) -> Rect {
     let full = Rect::full(w, h);
@@ -358,7 +358,7 @@ pub fn common_area(sims: &[Sim], w: usize, h: usize, interp: Interp) -> Rect {
         }
         rows.push(if lo <= hi { (lo.ceil() as i64, hi.floor() as i64) } else { (1, 0) });
     }
-    // the largest rectangle over consecutive rows: for each top row, extend downwards
+    // the largest rectangle over consecutive rows: for each top row, extend downward
     // while narrowing to the rows' common interval
     let mut best = Rect { x: 0, y: 0, w: 0, h: 0 };
     for y0 in 0..h {
@@ -420,7 +420,7 @@ fn spline36(d: f64) -> f64 {
     }
 }
 
-/// The 3-lobe Lanczos window at distance `d` (not yet normalised).
+/// The 3-lobe Lanczos window at distance `d` (not yet normalized).
 #[inline]
 fn lanczos3(d: f64) -> f64 {
     if d < 1e-9 {
@@ -434,7 +434,7 @@ fn lanczos3(d: f64) -> f64 {
 }
 
 /// The weights of an `N`-tap kernel `k(d)` at fraction `t`: taps at
-/// `1 − N/2 ..` from the floor, normalised to sum 1.
+/// `1 − N/2 ..` from the floor, normalized to sum 1.
 #[inline]
 fn taps_of<const N: usize>(k: impl Fn(f64) -> f64, t: f64) -> [f64; N] {
     let mut w = [0f64; N];
@@ -517,7 +517,7 @@ fn warp_with<const N: usize>(
 /// edge-clamped, with a validity mask.
 pub fn warp_plane(src: &[f32], w: usize, h: usize, sim: &Sim, ow: usize, oh: usize, interp: Interp) -> (Vec<f32>, Vec<u8>) {
     match interp {
-        // the nearer of the two neighbours, in the bilinear frame
+        // the nearer of the two neighbors, in the bilinear frame
         Interp::Nearest => warp_with::<2>(src, w, h, sim, ow, oh, |t| if t < 0.5 { [1.0, 0.0] } else { [0.0, 1.0] }),
         Interp::Bilinear => warp_with::<2>(src, w, h, sim, ow, oh, |t| [1.0 - t, t]),
         Interp::Bicubic => warp_with::<4>(src, w, h, sim, ow, oh, |t| taps_of::<4>(keys, t)),
@@ -765,7 +765,7 @@ pub fn level_steps(free_idx: &[usize], lvl: usize, w: usize, h: usize) -> (Vec<f
     (step, tol)
 }
 
-/// Bounded Nelder-Mead: minimises `f` over the box `[lo, hi]` from `x0`,
+/// Bounded Nelder-Mead: minimizes `f` over the box `[lo, hi]` from `x0`,
 /// the first simplex `x0` moved by `step[k]` along each axis, until the
 /// vertices agree to `1e-4` relative in `f` and lie within `tol[k]` of the
 /// best along every axis (or 200 iterations). `n = 1..8`.
@@ -1048,7 +1048,7 @@ mod tests {
     }
 
     /// Every kernel reproduces a plane (partition of unity and first-order
-    /// accuracy) at fractional shifts, and nearest picks the nearer neighbour.
+    /// accuracy) at fractional shifts, and nearest picks the nearer neighbor.
     /// Lanczos is the exception: a windowed sinc is not first-order accurate,
     /// and a ramp comes back with a ripple of about a percent of a step.
     #[test]
@@ -1070,7 +1070,7 @@ mod tests {
     }
 
     /// The weights of each kernel sum to 1 and the kernels interpolate (a
-    /// pixel-centred sample takes only that pixel).
+    /// pixel-centered sample takes only that pixel).
     #[test]
     fn kernel_weights() {
         for t in [0.0, 0.1, 0.5, 0.9] {
@@ -1138,7 +1138,7 @@ mod tests {
             let (bx, by) = map(&inv, fx, fy);
             assert!((bx - x).abs() < 1e-9 && (by - y).abs() < 1e-9, "({x},{y}) -> ({fx},{fy}) -> ({bx},{by})");
         }
-        // the centre stays put (up to the shift); affine ones exactly
+        // the center stays put (up to the shift); affine ones exactly
         let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
         let a = Sim { aspect: 1.5, shear: 0.2, ..Sim::id() };
         assert_eq!(map(&a.matrix(w, h), cx, cy), (cx, cy));

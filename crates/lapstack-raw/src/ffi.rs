@@ -16,7 +16,7 @@ use crate::{Image, Pixels};
 /// A developed image. `data` is `len` bytes of pixels in the layout `bits` and
 /// `channels` say (see the crate doc: 16-bit gray or RGB interleaved, 8-bit RGB
 /// interleaved, or three f32 planes when `bits` is 32); `color` is the JSON of
-/// the camera's colour (`develop_linear`) or null. `handle` is the library's own.
+/// the camera's color (`develop_linear`) or null. `handle` is the library's own.
 #[repr(C)]
 pub struct LrImage {
     pub w: u32,

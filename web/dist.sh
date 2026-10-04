@@ -4,7 +4,7 @@
 
 # The deployable browser app, into web/dist: web/ without its tests, probes and
 # scripts (the filter the desktop app's extraResources uses); under /legal the
-# licence, the third-party notices and the source of the raw decoder module
+# license, the third-party notices and the source of the raw decoder module
 # (pkg-raw is lapstack-raw + rawler, LGPL: the source has to travel with the
 # build, and a reader of it can rebuild the module and drop it in); and
 # worker.js's cache-busting query

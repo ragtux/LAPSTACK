@@ -47,9 +47,9 @@ pub fn resize(img: &Img3, w: usize, h: usize, interp: Interp) -> Img3 {
     if img.w == w && img.h == h {
         return img.clone();
     }
-    // the warp maps the source through a transform about its own centre (w/2, the edge
+    // the warp maps the source through a transform about its own center (w/2, the edge
     // between the middle pixels) onto the reference grid: scale it so the source spans the
-    // output, and shift it so that pixel centres correspond — output pixel o reads source
+    // output, and shift it so that pixel centers correspond — output pixel o reads source
     // (o + ½)/k − ½, which the transform gives when its offset is (k − 1)(w + 1)/2
     let (sw, sh) = (img.w as f64, img.h as f64);
     let (kx, ky) = (w as f64 / sw, h as f64 / sh);
@@ -149,7 +149,7 @@ mod tests {
         for c in 0..3 {
             assert!(out.p[c].iter().all(|&v| (v - 0.25 * (c + 1) as f32).abs() < 1e-5));
         }
-        // a linear ramp is resampled onto its own line: the centre keeps its value
+        // a linear ramp is resampled onto its own line: the center keeps its value
         let mut ramp = Img3::zeros(21, 3);
         for y in 0..3 { for x in 0..21 { ramp.p[0][y * 21 + x] = x as f32 / 20.0; } }
         let r = resize(&ramp, 41, 3, Interp::Bilinear);

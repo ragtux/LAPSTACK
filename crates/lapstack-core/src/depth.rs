@@ -22,14 +22,14 @@
 //!    cost-volume filtering (Hosni et al., PAMI 2013) and Jeon et al. 2019.
 //! 3. **Peak search** per pixel over the frame axis, streamed (one slice at a
 //!    time, O(1) memory in the stack size): the global peak, its two
-//!    neighbours for the *Gaussian interpolation* of Nayar & Nakagawa 1994
+//!    neighbors for the *Gaussian interpolation* of Nayar & Nakagawa 1994
 //!    (sub-frame depth), the second-best local maximum for a peak-ratio
 //!    confidence, and the profile mean for a prominence term.
-//! 4. **Regularisation**: the sub-frame depth is smoothed / inpainted with an
+//! 4. **Regularization**: the sub-frame depth is smoothed / inpainted with an
 //!    edge-aware *weighted least squares* energy (Farbman et al., SIGGRAPH
 //!    2008) whose data term is weighted by the confidence — low-confidence
 //!    pixels (flat, noisy, or ambiguous profiles) take their depth from
-//!    confident neighbours along paths that do not cross image edges. The
+//!    confident neighbors along paths that do not cross image edges. The
 //!    separable *fast global smoother* of Min et al. (IEEE TIP 2014) gives the
 //!    initial guess and a conjugate gradient preconditioned by a multigrid
 //!    V-cycle (`WlsSolver`) solves the 2-D system to a relative residual of
@@ -70,7 +70,7 @@ pub struct DepthParams {
     /// Working resolution is 1/2^scale (1 = half resolution).
     pub scale: usize,
     pub focus: FocusMeasure,
-    /// Guided-filter aggregation radius (working-res pixels) and regulariser.
+    /// Guided-filter aggregation radius (working-res pixels) and regularizer.
     pub agg_radius: usize,
     pub agg_eps: f32,
     /// WLS smoothness weight and guide-edge sensitivity (luma units).
@@ -78,7 +78,7 @@ pub struct DepthParams {
     pub sigma_c: f32,
     /// Conjugate-gradient iteration cap for the WLS solve.
     pub cg_iters: usize,
-    /// 3×3 median on the raw sub-frame depth before regularisation.
+    /// 3×3 median on the raw sub-frame depth before regularization.
     pub median: bool,
     pub upsample: Upsample,
     /// Noise gate: full confidence needs a peak ≥ (1 + gate) × the noise floor
@@ -197,7 +197,7 @@ pub fn block_mean(src: &[f32], w: usize, h: usize, k: usize) -> (Vec<f32>, usize
 }
 
 /// Bilinear resampling of a working-grid plane (block size `k`) to `w×h`.
-/// Grid samples sit at block centres.
+/// Grid samples sit at block centers.
 pub fn upsample_bilinear(g: &[f32], dw: usize, dh: usize, w: usize, h: usize, k: usize) -> Vec<f32> {
     let mut out = vec![0f32; w * h];
     let inv = 1.0 / k as f32;
@@ -281,7 +281,7 @@ impl BoxFilter {
         BoxFilter { w, h, r, inv_count, tmp: vec![0f32; w * h] }
     }
 
-    /// Window sums (not normalised) into `out`.
+    /// Window sums (not normalized) into `out`.
     pub fn sum_into(&mut self, src: &[f32], out: &mut [f32]) {
         let (w, h, r) = (self.w, self.h, self.r);
         assert_eq!(src.len(), w * h);
@@ -499,7 +499,7 @@ pub fn focus_measure(y: &[f32], w: usize, h: usize, fm: FocusMeasure) -> Vec<f32
 /// Per-pixel state of the focus profile, updated one slice at a time.
 #[derive(Clone, Copy)]
 struct Px {
-    /// Best local maximum (value, left neighbour, right neighbour; −1 = none).
+    /// Best local maximum (value, left neighbor, right neighbor; −1 = none).
     c1: f32,
     l1: f32,
     r1: f32,
@@ -649,7 +649,7 @@ pub fn median3(src: &[f32], w: usize, h: usize) -> Vec<f32> {
     out
 }
 
-/// Edge weights between horizontal / vertical neighbours: exp(−|ΔI|/σ).
+/// Edge weights between horizontal / vertical neighbors: exp(−|ΔI|/σ).
 fn edge_weights(guide: &[f32], w: usize, h: usize, sigma: f32) -> (Vec<f32>, Vec<f32>) {
     let inv = -1.0 / sigma.max(1e-6);
     let mut ax = vec![0f32; w * h];
@@ -1115,7 +1115,7 @@ pub fn depth_from_focus(src: &mut dyn FrameSource, fused: &Img3, p: &DepthParams
 /// Depth from focus over the `n` frames' focus slices (`focus_slice`, in
 /// frame order), guided by the fused all-in-focus image: each slice is
 /// aggregated with the guided filter and fed to the peak search as it comes,
-/// then the sub-frame depth is regularised and upsampled.
+/// then the sub-frame depth is regularized and upsampled.
 pub fn depth_from_slices(
     slices: &mut dyn Iterator<Item = Result<Vec<f32>, String>>,
     n: usize,
@@ -1157,7 +1157,7 @@ pub fn depth_from_slices(
     }
     let p90 = normalize_conf(&mut conf);
     let mean_conf = conf.iter().map(|&c| c as f64).sum::<f64>() / conf.len() as f64;
-    log(format!("depth: peaks found, confidence p90 {p90:.3}, mean (normalised) {mean_conf:.3}  ({:.1}s)", t.elapsed().as_secs_f64()));
+    log(format!("depth: peaks found, confidence p90 {p90:.3}, mean (normalized) {mean_conf:.3}  ({:.1}s)", t.elapsed().as_secs_f64()));
     let (depth_w, rel, iters) = if p.lambda > 0.0 {
         let mut solver = WlsSolver::new(&guide, dw, dh, p.lambda, p.sigma_c);
         solver.set_weights(&conf);
@@ -1269,7 +1269,7 @@ mod tests {
         let (d, c) = track(&[0.1, 0.5, 1.0, 0.5, 0.1]);
         assert!((d - 2.0).abs() < 1e-5, "{d}");
         assert!(c > 0.5, "{c}");
-        // asymmetric: right neighbour higher -> peak shifts right
+        // asymmetric: right neighbor higher -> peak shifts right
         let (d, _) = track(&[0.1, 0.4, 1.0, 0.8, 0.1]);
         assert!(d > 2.0 && d < 2.5, "{d}");
         // peak at the first / last frame

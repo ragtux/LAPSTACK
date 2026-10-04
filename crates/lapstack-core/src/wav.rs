@@ -41,7 +41,7 @@
 //! region's, not its own — one cell's measure strays over the gate by chance
 //! and picks one noisy frame where a flat area should average them all, and
 //! along a silhouette, where one frame holds the edge and the other the
-//! blurred halo over it, neighbouring cells picked different frames and the
+//! blurred halo over it, neighboring cells picked different frames and the
 //! 2 px bilinear ramp between them showed as jagged speckle along every depth
 //! edge. The weights are box-smoothed by the same radius after the cut and
 //! the power, so a region's border is a cross-fade over the window and not
@@ -82,7 +82,7 @@ pub fn weight(c: f32, f: f32, gate: f32, power: f32) -> f32 {
     (c - (1.0 + gate) * f).max(0.0).powf(power) + (1e-2 * f).powf(power) + 1e-30
 }
 
-/// The frames of `src` (aligned, equalised) averaged by their contrast above
+/// The frames of `src` (aligned, equalized) averaged by their contrast above
 /// the noise floor, the measure and working grid those of `dp`, `floor` the
 /// depth pass's per-cell floor on that grid (`DepthMap::floor`).
 pub fn weighted_average(src: &mut dyn FrameSource, dp: &DepthParams, wp: &WavParams, floor: &[f32], log: &mut dyn FnMut(String)) -> Result<Img3, String> {

@@ -2,7 +2,7 @@
 -- SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
 -- lapstack for Lightroom Classic: the frames of a focus stack go out of the
--- catalogue to the lapstack command-line tool and the stacked image comes back
+-- catalog to the lapstack command-line tool and the stacked image comes back
 -- into it, stacked with the first frame — the usual focus-stacking round
 -- trip. Two doors: an export service ("lapstack" in the Export
 -- dialog's Export To menu, with Lightroom's own file, size and metadata
