@@ -315,8 +315,8 @@ async function handle(m) {
       res.meta = engine.meta_info();   // what the first frame carried, for the Save step
       post({ type: 'done', w: res.w, h: res.h, bits: res.bits, frames: res.frames, meta: res.meta, crop: res.crop,
              rgba: res.rgba.buffer, depth_w: res.depth_w, depth_h: res.depth_h, depth: res.depth.buffer, conf: res.conf.buffer,
-             winner_w: res.winner_w, winner_h: res.winner_h, winner: res.winner.buffer,
-             ms: performance.now() - t0 }, [res.rgba.buffer, res.depth.buffer, res.conf.buffer, res.winner.buffer]);
+             winner_w: res.winner_w, winner_h: res.winner_h, winner: res.winner.buffer, shares: res.shares.buffer,
+             ms: performance.now() - t0 }, [res.rgba.buffer, res.depth.buffer, res.conf.buffer, res.winner.buffer, res.shares.buffer]);
       // optional second pass: render a second image from the depth map (frames are decoded
       // again) — blending the frames nearest each pixel's depth, or, slabbed, the LAP fusions
       // of overlapping slabs of the stack (each slab fused like the retouch slab, then
@@ -346,7 +346,7 @@ async function handle(m) {
             post({ type: 'stage', text: `rendering from depth map: ${m.files[i].name}`, done: i, total: m.files.length });
             const bytes = new Uint8Array(await next);
             next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
-            await engine.render_push(i, bytes, isRaw(m.files[i].name), false, 0, 0, 0);
+            await engine.render_push(i, bytes, isRaw(m.files[i].name), false, 0, 0, 0, false);
           }
         }
         if (cancelled) { engine.render_cancel(); post({ type: 'render-cancelled' }); running = false; return; }
@@ -363,7 +363,7 @@ async function handle(m) {
           post({ type: 'stage', text: `weighted average: ${m.files[i].name}`, done: i, total: m.files.length });
           const bytes = new Uint8Array(await next);
           next = i + 1 < m.files.length ? readAhead(m.files[i + 1]) : null;
-          await engine.render_push(i, bytes, isRaw(m.files[i].name), true, m.params.wav_power ?? 2, m.params.wav_smooth ?? 3, m.params.wav_gate ?? 0.5);
+          await engine.render_push(i, bytes, isRaw(m.files[i].name), true, m.params.wav_power ?? 2, m.params.wav_smooth ?? 3, m.params.wav_gate ?? 0.5, m.params.wav_edge ?? true);
         }
         if (cancelled) { engine.render_cancel(); post({ type: 'render-cancelled' }); running = false; return; }
         const r = await engine.render_finish(true);

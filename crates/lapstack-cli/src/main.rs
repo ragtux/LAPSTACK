@@ -4,7 +4,7 @@
 //! lapstack — Laplacian-pyramid focus stacking CLI.
 
 use lapstack_core::{DepthParams, DustMode, DustParams, FocusMeasure, Layout, MeshParams, Params, Split, Stack, TexFormat, TopRule, Upsample, View, run_with};
-use lapstack_core::align::{AlignModel, Interp};
+use lapstack_core::align::{AlignModel, Backend, Interp};
 use lapstack_core::batch::{self, Names};
 use lapstack_core::mesh;
 use lapstack_core::overlay::{self, Corner, Ink, Overlay, OverlayParams, Style};
@@ -27,7 +27,24 @@ fn main() {
     if std::env::var_os("LAPSTACK_NO_POOL").is_some() {
         lapstack_core::pool::DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // --config FILE: the app's project file, its settings put in front as the flags they
+    // stand for (the command line's own come after and win), its frames the inputs when
+    // the command line gives none (`lapstack_core::project`)
+    let mut project: Option<lapstack_core::project::ProjectArgs> = None;
+    if let Some(k) = args.iter().position(|a| a == "--config") {
+        let file = args.get(k + 1).cloned().unwrap_or_else(|| fail("--config needs a project file (<name>.lapstack.json)"));
+        let pa = lapstack_core::project::read(&file).unwrap_or_else(|e| fail(&e));
+        args.drain(k..k + 2);
+        let mut all = pa.flags.clone();
+        all.extend(args);
+        args = all;
+        eprintln!("[lapstack] settings from {file}: {}", pa.flags.join(" "));
+        for n in &pa.notes {
+            eprintln!("[lapstack] {file}: {n}");
+        }
+        project = Some(pa);
+    }
     let mut inputs = Vec::new();
     let mut output = "stacked.png".to_string();
     let mut save_depth = false;
@@ -51,6 +68,14 @@ fn main() {
     let mut dry_run = false;
     let mut skip: Option<String> = None;
     let mut reverse = false;
+    let mut cull: Option<f32> = None;
+    // --gpu / --gpu-align: the fusion (and depth pass) / the aligner's search on a GPU;
+    // --gpu-backend names which, else the first that answers (CUDA, then wgpu)
+    let mut gpu_fuse = false;
+    let mut gpu_align = false;
+    let mut gpu_backend: Option<Backend> = None;
+    let mut watch = false;
+    let mut watch_quiet: Option<f64> = None;
     let mut dust_map: Option<String> = None;
     let mut dust = DustParams::default();
     let mut save_dust: Option<String> = None;
@@ -110,6 +135,7 @@ fn main() {
             "--wav" => p.wav = Some(p.wav.unwrap_or_default()),
             "--wav-power" => { let v = next(&mut i).parse::<f32>().ok().filter(|v| *v >= 0.0).unwrap_or_else(|| fail("--wav-power: number >= 0")); p.wav = Some(lapstack_core::wav::WavParams { power: v, ..p.wav.unwrap_or_default() }); }
             "--wav-smooth" => { let v = next(&mut i).parse::<usize>().unwrap_or_else(|_| fail("--wav-smooth: integer")); p.wav = Some(lapstack_core::wav::WavParams { smooth: v, ..p.wav.unwrap_or_default() }); }
+            "--wav-box" => p.wav = Some(lapstack_core::wav::WavParams { edge: false, ..p.wav.unwrap_or_default() }),
             "--wav-gate" => { let v = next(&mut i).parse::<f32>().ok().filter(|v| *v >= 0.0).unwrap_or_else(|| fail("--wav-gate: number >= 0")); p.wav = Some(lapstack_core::wav::WavParams { gate: v, ..p.wav.unwrap_or_default() }); }
             "--split" => {
                 let s = next(&mut i);
@@ -118,6 +144,10 @@ fn main() {
             "--dry-run" => dry_run = true,
             "--skip" => skip = Some(next(&mut i)),
             "--reverse" => reverse = true,
+            "--cull" => cull = Some(next(&mut i).parse::<f32>().ok().filter(|v| *v >= 0.0 && *v < 100.0).unwrap_or_else(|| fail("--cull PCT: percent of the detail a frame must win to stay, 0 <= PCT < 100"))),
+            "--restretch" => p.restretch = true,
+            "--watch" => watch = true,
+            "--watch-quiet" => watch_quiet = Some(next(&mut i).parse::<f64>().ok().filter(|v| *v > 0.0).unwrap_or_else(|| fail("--watch-quiet: seconds > 0"))),
             "--dust-map" => dust_map = Some(next(&mut i)),
             "--dust-threshold" => dust.threshold = next(&mut i).parse::<f32>().ok().filter(|v| *v > 0.0 && *v < 90.0).unwrap_or_else(|| fail("--dust-threshold: percent, 0 < PCT < 90")) / 100.0,
             "--dust-margin" => dust.margin = next(&mut i).parse().unwrap_or_else(|_| fail("--dust-margin: integer")),
@@ -208,8 +238,12 @@ fn main() {
                 let s = next(&mut i);
                 dp.upsample = Upsample::parse(&s).unwrap_or_else(|| fail(&format!("--depth-upsample: bad spec '{s}'")));
             }
-            "--gpu" => p.gpu = true,
-            "--gpu-align" => a.gpu = true,
+            "--gpu" => gpu_fuse = true,
+            "--gpu-align" => gpu_align = true,
+            "--gpu-backend" => {
+                let s = next(&mut i);
+                gpu_backend = Some(match s.as_str() { "cuda" => Backend::Cuda, "wgpu" => Backend::Wgpu, "cpu" => Backend::Cpu, _ => fail("--gpu-backend: cuda | wgpu | cpu") });
+            }
             "--scale-bar" => {
                 // CAL[:LENGTH]: the size of a pixel (0.325 = µm; 325nm), auto (the first frame's TIFF) or px (no
                 // calibration: the bar is labeled in pixels), and the bar's length
@@ -254,16 +288,53 @@ fn main() {
         }
         i += 1;
     }
+    // the GPU backend: the one named, or the first that answers; a GPU that is not
+    // there (or not in the build) leaves the work on the CPU and says so
+    if gpu_fuse || gpu_align {
+        let backend = pick_backend(gpu_backend);
+        if gpu_fuse {
+            p.backend = backend;
+        }
+        if gpu_align {
+            a.backend = backend;
+        }
+    }
     p.align = do_align.then_some(a);
     p.depth = (depth_mode == "dff").then_some(dp);
     // -o x.dng: a linear-DNG run (the raws developed to their camera space, dng.rs)
     p.dng = io::is_dng(&output);
 
     if inputs.is_empty() {
+        if let Some(pa) = &project {
+            inputs = pa.frames.clone();
+            eprintln!("[lapstack] {} frames from the project", inputs.len());
+        }
+    }
+    if inputs.is_empty() {
         fail("no input images; use --help");
     }
     if video.is_some() && rocking.is_none() {
         fail("--video joins the rocking views: it needs --rocking");
+    }
+    if watch {
+        if let Some(d) = inputs.iter().find(|d| !std::path::Path::new(d).is_dir()) {
+            fail(&format!("--watch takes folders, and {d} is not one"));
+        }
+        if skip.is_some() {
+            fail("--skip counts positions in a frame list; with --watch the list grows, so leave frames out by moving them instead");
+        }
+        // the outputs must land elsewhere, or they would be taken for frames
+        let probe = batch::expand(&output, &Names { n: 1, count: 2, first: "x", dir: "x" });
+        let out_dir = std::path::Path::new(&probe).parent().map(|d| if d.as_os_str().is_empty() { std::path::Path::new(".") } else { d }).and_then(|d| d.canonicalize().ok());
+        for d in &inputs {
+            if let (Some(o), Ok(w)) = (&out_dir, std::path::Path::new(d).canonicalize()) {
+                if o.starts_with(&w) {
+                    fail(&format!("--watch: the output {probe} would land in the watched folder {d} and be taken for a frame; write it elsewhere (-o)"));
+                }
+            }
+        }
+    } else if watch_quiet.is_some() {
+        fail("--watch-quiet goes with --watch");
     }
     // the dust map: detected once, applied to every frame of every stack
     if let Some(path) = &dust_map {
@@ -284,10 +355,16 @@ fn main() {
         fail("--save-dust-map writes the spots found in the dust map: it needs --dust-map");
     }
     let overlay = (ov_auto || !ov.is_empty()).then_some(ov);
-    let cfg = Cfg { output, save_depth, save_conf, metadata, depth_raw, p, slab_dir, stereo, rocking, video, near_end, mesh_formats, mp, mesh_tex, overlay, overlay_auto: ov_auto };
+    let cfg = Cfg { output, save_depth, save_conf, metadata, depth_raw, p, slab_dir, stereo, rocking, video, near_end, mesh_formats, mp, mesh_tex, overlay, overlay_auto: ov_auto, cull };
 
     // a directory among the inputs stands for the image files in it; --skip counts positions in that list
-    let inputs = batch::expand_dirs(&inputs).unwrap_or_else(|e| fail(&e));
+    let watched = inputs.clone();
+    let inputs = if watch {
+        // a watched folder may well be empty to start with
+        inputs.iter().map(|d| batch::images_in(d)).collect::<Result<Vec<_>, _>>().unwrap_or_else(|e| fail(&e)).concat()
+    } else {
+        batch::expand_dirs(&inputs).unwrap_or_else(|e| fail(&e))
+    };
     let inputs = match &skip {
         Some(spec) => {
             let out = batch::skip_list(spec, inputs.len()).unwrap_or_else(|e| fail(&e));
@@ -303,17 +380,91 @@ fn main() {
         None => inputs,
     };
     let t0 = Instant::now();
+    let stacks = make_stacks(inputs, split, reverse).unwrap_or_else(|e| fail(&e));
+    let count = stacks.len();
+    if count == 0 {
+        eprintln!("[lapstack] no frames in {} yet", watched.join(", "));
+    } else if split.is_some() || watch {
+        eprintln!("[lapstack] {count} stack{} from {} frames{}:", if count == 1 { "" } else { "s" }, stacks.iter().map(|s| s.inputs.len()).sum::<usize>(), match split { Some(rule) => format!(" ({})", describe_split(rule)), None => String::new() });
+        list_stacks(&stacks, 1, count.max(if watch { 2 } else { 1 }), &cfg);
+    }
+    let quiet = watch_quiet.unwrap_or(match split { Some(Split::Gap(g)) => g, _ => 10.0 });
+    if dry_run {
+        if watch {
+            eprintln!("[lapstack] would then watch {} for new frames: a stack closes after {quiet:.0} s without a new frame", watched.join(", "));
+        }
+        return;
+    }
+
+    // in watch mode the outputs are numbered on like a batch's, so count is at least 2
+    let mut failed = run_stacks(&stacks, 1, count.max(if watch { 2 } else { 1 }), watch, &cfg);
+    if count > 1 {
+        let done = count - failed.len();
+        eprintln!("[lapstack] batch: {count} stacks, {done} done, {} failed, total {:.1}s", failed.len(), t0.elapsed().as_secs_f64());
+        for (n, e) in &failed {
+            eprintln!("[lapstack]   stack {n}: {e}");
+        }
+        if !failed.is_empty() && !watch {
+            std::process::exit(1);
+        }
+    }
+    if watch {
+        // tethered: frames land in the folder as they are shot; a stack closes
+        // after `quiet` seconds without a new frame and is split and run like a batch
+        eprintln!("[lapstack] watching {} for new frames: a stack closes after {quiet:.0} s without a new frame{}; Ctrl-C stops", watched.join(", "), match split { Some(rule) => format!(", cut {}", describe_split(rule)), None => String::new() });
+        let mut w = lapstack_core::batch::Watcher::new(&watched, 0.0);
+        let mut pending: Vec<String> = Vec::new();
+        let mut last: f64 = 0.0;
+        let mut next_n = count + 1;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let now = t0.elapsed().as_secs_f64();
+            let fresh = w.poll(now);
+            if !fresh.is_empty() {
+                for f in &fresh {
+                    eprintln!("[lapstack] frame arrived: {}", base(f));
+                }
+                pending.extend(fresh);
+                last = now;
+                continue;
+            }
+            if pending.is_empty() || now - last < quiet {
+                continue;
+            }
+            let inputs = std::mem::take(&mut pending);
+            eprintln!("[lapstack] {quiet:.0} s without a new frame: {} frame{} to stack", inputs.len(), if inputs.len() == 1 { "" } else { "s" });
+            let stacks = match make_stacks(inputs, split, reverse) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[lapstack] {e}");
+                    continue;
+                }
+            };
+            let cnt = (next_n + stacks.len() - 1).max(2);
+            list_stacks(&stacks, next_n, cnt, &cfg);
+            failed.extend(run_stacks(&stacks, next_n, cnt, true, &cfg));
+            next_n += stacks.len();
+            eprintln!("[lapstack] waiting for frames ({} stack{} so far{})", next_n - 1, if next_n == 2 { "" } else { "s" }, if failed.is_empty() { String::new() } else { format!(", {} failed", failed.len()) });
+        }
+    }
+}
+
+/// The frame list cut into stacks by the split rule, each reversed when asked
+/// (a rail run back to front is so in every stack of the batch).
+fn make_stacks(inputs: Vec<String>, split: Option<Split>, reverse: bool) -> Result<Vec<Stack>, String> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut stacks: Vec<Stack> = match split {
         None => vec![Stack { inputs, times: None }],
         Some(Split::Count(n)) => batch::split_count(&inputs, n),
         Some(Split::Dir) => batch::split_dir(&inputs),
         Some(Split::Gap(gap)) => {
             eprintln!("[lapstack] reading the capture times of {} frames ...", inputs.len());
-            let times = batch::capture_times(&inputs, &mut |s| eprintln!("[lapstack] {s}")).unwrap_or_else(|e| fail(&e));
+            let times = batch::capture_times(&inputs, &mut |s| eprintln!("[lapstack] {s}"))?;
             batch::split_gap(&inputs, &times, gap)
         }
     };
-    // each stack is reversed on its own: a rail run back to front is so in every stack of the batch
     if reverse {
         for s in &mut stacks {
             s.inputs.reverse();
@@ -321,51 +472,130 @@ fn main() {
         }
         eprintln!("[lapstack] frames reversed: {} is frame 0", stacks[0].inputs[0]);
     }
-    let count = stacks.len();
-    if let Some(rule) = split {
-        eprintln!("[lapstack] {count} stack{} from {} frames ({}):", if count == 1 { "" } else { "s" }, stacks.iter().map(|s| s.inputs.len()).sum::<usize>(), describe_split(rule));
-        let mut prev_end: Option<f64> = None;
-        for (k, s) in stacks.iter().enumerate() {
-            let names = Names { n: k + 1, count, first: s.first(), dir: &s.dir() };
-            let (a, b) = (s.inputs[0].as_str(), s.inputs[s.inputs.len() - 1].as_str());
-            let when = match s.times {
-                Some((t0, t1)) => format!("  {} .. {}{}", batch::clock(t0), batch::clock(t1), match prev_end { Some(p) => format!(", {:+.0} s after the last", t0 - p), None => String::new() }),
-                None => String::new(),
-            };
-            prev_end = s.times.map(|t| t.1);
-            eprintln!("  {:>3}: {:>4} frames  {} .. {}  -> {}{when}", k + 1, s.inputs.len(), base(a), base(b), batch::expand(&cfg.output, &names));
-        }
-    }
-    if dry_run {
-        return;
-    }
+    Ok(stacks)
+}
 
+/// One line per stack: its frames, capture times and output name. The stacks
+/// are numbered from `n0` of `count`.
+fn list_stacks(stacks: &[Stack], n0: usize, count: usize, cfg: &Cfg) {
+    let mut prev_end: Option<f64> = None;
+    for (k, s) in stacks.iter().enumerate() {
+        let names = Names { n: n0 + k, count, first: s.first(), dir: &s.dir() };
+        let (a, b) = (s.inputs[0].as_str(), s.inputs[s.inputs.len() - 1].as_str());
+        let when = match s.times {
+            Some((t0, t1)) => format!("  {} .. {}{}", batch::clock(t0), batch::clock(t1), match prev_end { Some(p) => format!(", {:+.0} s after the last", t0 - p), None => String::new() }),
+            None => String::new(),
+        };
+        prev_end = s.times.map(|t| t.1);
+        eprintln!("  {:>3}: {:>4} frames  {} .. {}  -> {}{when}", n0 + k, s.inputs.len(), base(a), base(b), batch::expand(&cfg.output, &names));
+    }
+}
+
+/// Run the stacks one after the other, numbered from `n0` of `count`; a stack
+/// that fails is reported and the rest go on (a single stack's failure ends
+/// the program, unless watching). Returns the failures.
+fn run_stacks(stacks: &[Stack], n0: usize, count: usize, watch: bool, cfg: &Cfg) -> Vec<(usize, String)> {
     let mut failed: Vec<(usize, String)> = Vec::new();
     for (k, s) in stacks.iter().enumerate() {
-        let names = Names { n: k + 1, count, first: s.first(), dir: &s.dir() };
-        let tag = if count > 1 { format!(" {}/{count}", k + 1) } else { String::new() };
+        let n = n0 + k;
+        let names = Names { n, count, first: s.first(), dir: &s.dir() };
+        // a watched session's stacks are numbered without a total
+        let tag = if watch { format!(" {n}") } else if count > 1 { format!(" {n}/{count}") } else { String::new() };
         if count > 1 {
             eprintln!("[lapstack{tag}] {} frames, {} .. {}", s.inputs.len(), s.inputs[0], s.inputs[s.inputs.len() - 1]);
         }
-        match run_stack(&s.inputs, &cfg, &names, &tag) {
+        let run = || -> Result<(), String> {
+            let inputs = match cfg.cull {
+                Some(pct) => culled(&s.inputs, cfg, pct, &tag)?,
+                None => s.inputs.clone(),
+            };
+            run_stack(&inputs, cfg, &names, &tag)
+        };
+        match run() {
             Ok(()) => {}
-            Err(e) if count > 1 => {
+            Err(e) if count > 1 || watch => {
                 eprintln!("[lapstack{tag}] failed: {e}");
-                failed.push((k + 1, e));
+                failed.push((n, e));
             }
             Err(e) => fail(&e),
         }
     }
-    if count > 1 {
-        let done = count - failed.len();
-        eprintln!("[lapstack] batch: {count} stacks, {done} done, {} failed, total {:.1}s", failed.len(), t0.elapsed().as_secs_f64());
-        for (n, e) in &failed {
-            eprintln!("[lapstack]   stack {n}: {e}");
+    failed
+}
+
+/// `--cull PCT`: a quick fold of the stack at a draft reduction (`--draft 2`,
+/// or the run's own when it is coarser) — the alignment as configured, no
+/// depth pass, no other output — finds each frame's share of the detail the
+/// pyramid takes from it (`fuse::winner_shares`), and the frames under PCT %
+/// are left out of the run. The frames are listed in order, so the one that
+/// won most always stays.
+fn culled(inputs: &[String], cfg: &Cfg, pct: f32, tag: &str) -> Result<Vec<String>, String> {
+    if inputs.len() < 2 {
+        return Ok(inputs.to_vec());
+    }
+    let t = Instant::now();
+    let mut p = cfg.p.clone();
+    p.reduce = p.reduce.max(2);
+    p.depth = None;
+    p.wav = None;
+    p.slabs = None;
+    p.save_aligned = None;
+    p.crop = false;
+    p.crop_rect = None;
+    p.restretch = false;
+    let mut quiet = |_: String| {};
+    let out = lapstack_core::run(inputs, &p, &mut quiet)?;
+    if out.shares.len() != inputs.len() {
+        return Err("--cull: the fold recorded no winner map (the depth level is coarser than the halo control's guide)".into());
+    }
+    let mut kept = Vec::with_capacity(inputs.len());
+    let mut dropped = Vec::new();
+    for (i, (f, &s)) in inputs.iter().zip(&out.shares).enumerate() {
+        if s * 100.0 < pct {
+            dropped.push(format!("{} ({:.1} %)", base(f), s * 100.0));
+        } else {
+            kept.push(f.clone());
         }
-        if !failed.is_empty() {
-            std::process::exit(1);
+        let _ = i;
+    }
+    if kept.is_empty() {
+        return Err(format!("--cull {pct}: no frame wins that much of the detail"));
+    }
+    eprintln!("[lapstack{tag}] cull at {pct} % of the detail (a fold at 1/{} size, {:.1}s): {} of {} frames kept{}", 1 << p.reduce, t.elapsed().as_secs_f64(), kept.len(), inputs.len(),
+        if dropped.is_empty() { String::new() } else { format!("; left out: {}", dropped.join(", ")) });
+    Ok(kept)
+}
+
+/// The GPU backend for `--gpu` / `--gpu-align`: the one asked for when it
+/// answers, else the first of CUDA and wgpu that does, else the CPU.
+fn pick_backend(wanted: Option<Backend>) -> Backend {
+    let probe = |b: Backend| -> Result<String, String> {
+        match b {
+            Backend::Cpu => Ok("CPU".into()),
+            #[cfg(feature = "gpu")]
+            Backend::Cuda => lapstack_core::gpu::available().map(|()| "CUDA".to_string()),
+            #[cfg(feature = "wgpu")]
+            Backend::Wgpu => lapstack_core::wg::engine::available().map(|d| format!("wgpu: {d}")),
+            #[allow(unreachable_patterns)]
+            other => Err(format!("the {} backend is not in this build", other.name())),
+        }
+    };
+    let candidates: Vec<Backend> = match wanted {
+        Some(b) => vec![b],
+        None => vec![Backend::Cuda, Backend::Wgpu],
+    };
+    let mut why = Vec::new();
+    for b in candidates {
+        match probe(b) {
+            Ok(d) => {
+                eprintln!("[lapstack] GPU: {d}");
+                return b;
+            }
+            Err(e) => why.push(format!("{}: {e}", b.name())),
         }
     }
+    eprintln!("[lapstack] no GPU for --gpu ({}); running on the CPU", why.join("; "));
+    Backend::Cpu
 }
 
 fn describe_split(rule: Split) -> String {
@@ -409,6 +639,8 @@ struct Cfg {
     /// first frame's TIFF (`Meta::pixel_size_um`).
     overlay: Option<OverlayParams>,
     overlay_auto: bool,
+    /// `--cull PCT`: the share of the detail a frame must win to stay in its stack.
+    cull: Option<f32>,
 }
 
 /// Stack one set of frames and write everything asked for. `tag` goes into the
@@ -672,12 +904,17 @@ fn help() {
            --wav-smooth R         box radius the contrast, then the weights, are smoothed by on the depth\n\
                                   pass's grid [3]: a region's pick, a cross-fade along depth edges; 0 = none\n\
            --wav-gate G           a contrast counts above (1+G) x the cell's noise floor [0.5]; 0 = the floor\n\
+           --wav-box              smooth the weights with a plain box mean instead of the guided filter that\n\
+                                  follows the fused image's edges (the cross-fade then crosses silhouettes)\n\
            --split RULE           batch: cut the frames into stacks and run each — count:N (every N frames),\n\
                                   gap:SECONDS (a new stack at every pause in the capture times longer than\n\
                                   that), dir (one stack per folder); then -o, --slab-dir, --save-aligned and\n\
                                   --depth-raw are templates: {{n}} the stack's number, {{first}} its first frame's\n\
                                   stem, {{dir}} its folder; a path with no field gets _NN before its extension\n\
            --dry-run              list the stacks and their output names, then stop\n\
+           --config FILE          the browser app's project file (<name>.lapstack.json): its settings go in\n\
+                                  front as the flags they stand for (the ones given here come after and win),\n\
+                                  and with no frames given its frames are the inputs, looked for beside it\n\
            --rotate DEG           turn every frame by 90, 180 or 270 degrees clockwise as decoded (a camera held\n\
                                   sideways; a raw is already turned by its EXIF orientation)\n\
            --draft N              a draft run: every frame block-averaged by 2^N as decoded, so the whole run\n\
@@ -689,6 +926,16 @@ fn help() {
                                   directories are expanded and before any split (3,7-9,12)\n\
            --reverse              reverse the frame order (a stack shot back to front); each stack of a\n\
                                   batch on its own, so frame 0 is the near end again for --stereo / --mesh\n\
+           --cull PCT             leave out the frames that win under PCT % of the detail: a quick fold at\n\
+                                  --draft 2 (or the run's own draft) finds each frame's share of the winner\n\
+                                  map's detail cells first, and the run goes without the frames under PCT\n\
+                                  (near-duplicates, frames focused on empty space); every run logs the shares\n\
+           --restretch            resample the cropped outputs back to the frame's size (each axis on its own)\n\
+           --watch                keep running: after the frames in the folder(s) given, watch them for new\n\
+                                  ones and stack those as they settle — a stack closes after --watch-quiet\n\
+                                  seconds without a new frame, --split cuts it, the outputs are numbered on\n\
+                                  like a batch's (-o must point outside the folder); Ctrl-C stops\n\
+           --watch-quiet S        seconds without a new frame that close a stack [the gap of --split gap, else 10]\n\
            --dust-map FILE        dust map: a frame of an evenly lit blank surface shot out of focus\n\
                                   at the stack's aperture; the dust spots found in it are taken out of every\n\
                                   frame before alignment (each interpolated from its surroundings)\n\
@@ -747,7 +994,10 @@ fn help() {
            --depth-gate G         noise gate: full confidence needs peak >= (1+G) x noise floor [1]; 0 = off\n\
            --depth-robust T       Huber reweighting of the WLS data term, T frames [1]; 0 = off\n\
            --depth-upsample U     bilinear | guided[:R[:EPS]] [guided:2:1e-2]\n\
-           --gpu                  fuse on the CUDA GPU (needs the 'gpu' build feature)\n\
-           --gpu-align            run the aligner's cost search on the CUDA GPU"
+           --gpu                  fuse (and run the depth pass) on the GPU: CUDA where this build has it and the\n\
+                                  driver answers, else wgpu — Vulkan, Metal or DX12, any GPU, the browser\n\
+                                  app's kernels — else the CPU, with a note\n\
+           --gpu-align            run the aligner's cost search on the GPU too\n\
+           --gpu-backend B        which GPU engine: cuda | wgpu [the first that answers]"
     );
 }

@@ -50,7 +50,7 @@
 //! came out blotched on one and smooth on the other). Then the weights are
 //! taken back to full resolution bilinearly.
 
-use crate::depth::{BoxFilter, DepthParams, block_mean, blocks, focus_measure, luma, upsample_bilinear};
+use crate::depth::{BoxFilter, DepthParams, GuidedFilter, block_mean, blocks, focus_measure, luma, upsample_bilinear};
 use crate::pyramid::Img3;
 use crate::stack::FrameSource;
 use rayon::prelude::*;
@@ -66,11 +66,18 @@ pub struct WavParams {
     /// The margin over the noise floor: a contrast counts above (1 + gate) ×
     /// the cell's floor.
     pub gate: f32,
+    /// The weights' smoothing follows the image's edges: the guided filter
+    /// (He, Sun & Tang 2013) over the `smooth` window with the fused luma as
+    /// guide and the depth pass's regularizer, in place of the box mean, so
+    /// the cross-fade between frames stops at a silhouette instead of
+    /// bleeding a near object's weight over the background behind it (and
+    /// the background's over the object). Needs the fused image.
+    pub edge: bool,
 }
 
 impl Default for WavParams {
     fn default() -> Self {
-        WavParams { power: 2.0, smooth: 3, gate: 0.5 }
+        WavParams { power: 2.0, smooth: 3, gate: 0.5, edge: true }
     }
 }
 
@@ -84,8 +91,10 @@ pub fn weight(c: f32, f: f32, gate: f32, power: f32) -> f32 {
 
 /// The frames of `src` (aligned, equalized) averaged by their contrast above
 /// the noise floor, the measure and working grid those of `dp`, `floor` the
-/// depth pass's per-cell floor on that grid (`DepthMap::floor`).
-pub fn weighted_average(src: &mut dyn FrameSource, dp: &DepthParams, wp: &WavParams, floor: &[f32], log: &mut dyn FnMut(String)) -> Result<Img3, String> {
+/// depth pass's per-cell floor on that grid (`DepthMap::floor`), `guide` the
+/// fused image, whose luma guides the weights' smoothing (`WavParams::edge`;
+/// `None` falls back to the box mean).
+pub fn weighted_average(src: &mut dyn FrameSource, dp: &DepthParams, wp: &WavParams, floor: &[f32], guide: Option<&Img3>, log: &mut dyn FnMut(String)) -> Result<Img3, String> {
     let (w, h) = src.dims();
     let n = src.len();
     let k = 1usize << dp.scale;
@@ -96,14 +105,25 @@ pub fn weighted_average(src: &mut dyn FrameSource, dp: &DepthParams, wp: &WavPar
     let power = wp.power.max(0.0);
     let gate = wp.gate.max(0.0);
     let mut bf = (wp.smooth > 0).then(|| BoxFilter::new(dw, dh, wp.smooth));
+    // the weights' smoothing: the guided filter with the fused luma on the grid as guide
+    let mut gf = match (wp.edge && wp.smooth > 0, guide) {
+        (true, Some(img)) => {
+            let (g, gw, gh) = block_mean(&luma(img), img.w, img.h, k);
+            if (gw, gh) != (dw, dh) {
+                return Err(format!("weighted average: the guide is {gw}x{gh} on the grid, the frames {dw}x{dh}"));
+            }
+            Some(GuidedFilter::new(g, dw, dh, wp.smooth, dp.agg_eps))
+        }
+        _ => None,
+    };
     let median = {
         let mut s: Vec<f32> = floor.iter().step_by(7).copied().collect();
         let mid = s.len() / 2;
         *s.select_nth_unstable_by(mid, |a, b| a.total_cmp(b)).1
     };
     log(format!(
-        "weighted average: {n} frames, contrast {:?} on the {dw}x{dh} grid above the noise floor (median {median:.2e}, gate {gate}), power {power}, smoothing {}",
-        dp.focus, wp.smooth
+        "weighted average: {n} frames, contrast {:?} on the {dw}x{dh} grid above the noise floor (median {median:.2e}, gate {gate}), power {power}, smoothing {}{}",
+        dp.focus, wp.smooth, if gf.is_some() { format!(" (the weights guided by the fused luma, eps {:.0e})", dp.agg_eps) } else { String::new() }
     ));
     let t = Instant::now();
     let mut acc = Img3::zeros(w, h);
@@ -117,9 +137,11 @@ pub fn weighted_average(src: &mut dyn FrameSource, dp: &DepthParams, wp: &WavPar
             None => g,
         };
         let g: Vec<f32> = g.iter().zip(floor).map(|(&c, &f)| weight(c, f, gate, power)).collect();
-        let g = match &mut bf {
-            Some(b) => b.mean(&g),
-            None => g,
+        let g = match (&mut gf, &mut bf) {
+            // the guided filter undershoots at an edge: a weight stays a weight
+            (Some(f), _) => f.filter(&g).into_iter().map(|v| v.max(1e-30)).collect(),
+            (None, Some(b)) => b.mean(&g),
+            (None, None) => g,
         };
         let wf = upsample_bilinear(&g, dw, dh, w, h, k);
         for c in 0..3 {
@@ -166,7 +188,7 @@ mod tests {
         let mut src: &[Img3] = &frames;
         let dp = DepthParams { scale: 1, ..Default::default() };
         let floor = vec![0f32; blocks(w, 2) * blocks(h, 2)];
-        let out = weighted_average(&mut src, &dp, &WavParams { power: 2.0, smooth: 0, gate: 0.5 }, &floor, &mut |_| {}).unwrap();
+        let out = weighted_average(&mut src, &dp, &WavParams { power: 2.0, smooth: 0, gate: 0.5, edge: false }, &floor, None, &mut |_| {}).unwrap();
         // well inside each half, the average is the sharp frame's checkerboard
         let i = 16 * w + 8;
         assert!((out.p[0][i] - a.p[0][i]).abs() < 0.05, "left: {} vs {}", out.p[0][i], a.p[0][i]);
@@ -212,8 +234,8 @@ mod tests {
         let mut slices = frames.iter().map(|f| Ok(crate::depth::focus_slice(f, &dp)));
         let dm = crate::depth::depth_from_slices(&mut slices, n, &fused, &dp, &mut |_| {}).unwrap();
         let mut src: &[Img3] = &frames;
-        let wp = WavParams { power: 2.0, smooth: 2, gate: 0.5 };
-        let out = weighted_average(&mut src, &dp, &wp, &dm.floor, &mut |_| {}).unwrap();
+        let wp = WavParams { power: 2.0, smooth: 2, gate: 0.5, edge: true };
+        let out = weighted_average(&mut src, &dp, &wp, &dm.floor, Some(&fused), &mut |_| {}).unwrap();
         // the texture: correlation of the output with frame 5's checkerboard, well inside the left half
         let corr = |img: &Img3| {
             let mut s = 0.0;
@@ -237,7 +259,7 @@ mod tests {
         assert!(ratio < 0.5, "flat-area noise vs one frame: {ratio}");
         // the contrast itself as the weight (no floor): the texture drowns among the noisy frames
         let none = vec![0f32; dm.floor.len()];
-        let plain = weighted_average(&mut src, &dp, &wp, &none, &mut |_| {}).unwrap();
+        let plain = weighted_average(&mut src, &dp, &wp, &none, Some(&fused), &mut |_| {}).unwrap();
         let drowned = corr(&plain) / corr(&frames[5]);
         assert!(drowned < 0.5, "without the floor: {drowned}");
     }

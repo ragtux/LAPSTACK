@@ -3,7 +3,10 @@
 
 //! wgpu layer: device setup, one bind-group layout shared by every kernel, a
 //! dynamic-offset uniform ring, a command recorder that auto-flushes, and
-//! async buffer readbacks.
+//! async buffer readbacks. The same code serves the browser app (WebGPU: the
+//! browser drives the device and callbacks arrive from its event loop) and
+//! the native engine (Vulkan, Metal or DX12: `Gpu::wait` blocks on the
+//! queue so the map callbacks run, and `block_on` drives the futures).
 
 use futures_channel::oneshot;
 use std::cell::RefCell;
@@ -63,6 +66,7 @@ pub struct Gpu {
 /// Yield to the event loop: a task, not a microtask, since the browser flushes
 /// queued GPU commands and runs other work only between tasks. A message port
 /// rather than setTimeout(0), which is clamped to 4 ms once timers nest.
+#[cfg(target_arch = "wasm32")]
 pub async fn yield_now() {
     thread_local! { static CHAN: web_sys::MessageChannel = web_sys::MessageChannel::new().unwrap(); }
     let p = js_sys::Promise::new(&mut |resolve, _| {
@@ -72,6 +76,31 @@ pub async fn yield_now() {
         });
     });
     let _ = wasm_bindgen_futures::JsFuture::from(p).await;
+}
+/// Natively there is no event loop to yield to.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn yield_now() {}
+
+/// Drive a future to completion on the current thread (native): the futures
+/// here only wait on map callbacks, which `Gpu::wait` has the device run
+/// before they are awaited, so a bare poll loop is all it takes.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+    fn noop(_: *const ()) {}
+    fn clone(p: *const ()) -> RawWaker {
+        RawWaker::new(p, &VT)
+    }
+    static VT: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+    let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VT)) };
+    let mut cx = Context::from_waker(&waker);
+    let mut f = std::pin::pin!(f);
+    loop {
+        if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+            return v;
+        }
+        std::thread::yield_now();
+    }
 }
 
 pub fn ceil_div(a: u32, b: u32) -> u32 {
@@ -91,7 +120,7 @@ pub fn grid2(w: usize, h: usize) -> (u32, u32) {
 impl Gpu {
     pub async fn new() -> Result<Gpu, String> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        desc.backends = wgpu::Backends::BROWSER_WEBGPU;
+        desc.backends = if cfg!(target_arch = "wasm32") { wgpu::Backends::BROWSER_WEBGPU } else { wgpu::Backends::PRIMARY };
         let instance = wgpu::Instance::new(desc);
         // Chrome can answer the very first requestAdapter() of a process with
         // null while its GPU process is still coming up; retry a few times.
@@ -100,7 +129,7 @@ impl Gpu {
         for _ in 0..4 {
             match instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::None,
+                    power_preference: wgpu::PowerPreference::HighPerformance,
                     force_fallback_adapter: false,
                     compatible_surface: None,
                     apply_limit_buckets: false,
@@ -113,11 +142,14 @@ impl Gpu {
                 }
                 Err(e) => {
                     last = format!("{e:?}");
+                    #[cfg(target_arch = "wasm32")]
                     wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&wasm_bindgen::JsValue::NULL)).await.ok();
+                    #[cfg(not(target_arch = "wasm32"))]
+                    break;
                 }
             }
         }
-        let adapter = adapter.ok_or_else(|| format!("no WebGPU adapter: {last}"))?;
+        let adapter = adapter.ok_or_else(|| format!("no {} adapter: {last}", if cfg!(target_arch = "wasm32") { "WebGPU" } else { "GPU (Vulkan, Metal or DX12)" }))?;
         let info = adapter.get_info();
         let limits = adapter.limits();
         let (device, queue) = adapter
@@ -245,6 +277,15 @@ impl Gpu {
         })
     }
 
+    /// Natively, block until the queue is done so the pending map callbacks
+    /// run (the browser's event loop does that on its own).
+    pub fn wait(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        }
+    }
+
     pub fn rec(&self) -> Rec<'_> {
         Rec { gpu: self, enc: Some(self.device.create_command_encoder(&Default::default())), n: 0, keep: Vec::new() }
     }
@@ -263,6 +304,7 @@ impl Gpu {
         for (i, chunk) in data.chunks(XFER_SLICE).enumerate() {
             let slot = i % ring.len();
             if let Some(rx) = maps[slot].take() {
+                self.wait();
                 rx.await.map_err(|_| "map callback dropped".to_string())?.map_err(|e| format!("map: {e:?}"))?;
             }
             let len = chunk.len();
@@ -316,6 +358,7 @@ impl Gpu {
                 let _ = tx.send(r);
             });
             let _ = self.device.poll(wgpu::PollType::Poll);
+            self.wait();
             rx.await.map_err(|_| "map callback dropped".to_string())?.map_err(|e| format!("map: {e:?}"))?;
             out.extend_from_slice(&st.slice(..len.div_ceil(4) * 4).get_mapped_range().map_err(|e| format!("{e:?}"))?[..len as usize]);
             st.unmap();

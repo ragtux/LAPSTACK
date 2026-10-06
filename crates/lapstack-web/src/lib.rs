@@ -8,18 +8,16 @@
 //! CPU side in WASM via lapstack-core. The depth-from-focus pass (`depth.rs`)
 //! also runs on WebGPU, after fusion.
 
-mod align;
 mod decode;
-mod depth;
 mod gif;
-mod gpu;
 mod raw_bridge;
 
-use align::{Aligner, LumaPyr, Sim};
-use gpu::{Gpu, P, Rec, grid1, grid2};
-use depth::DepthGpu;
+use lapstack_core::wg::align::{Aligner, LumaPyr, Sim};
+use lapstack_core::wg::depth::DepthGpu;
+use lapstack_core::wg::fold::{FoldBufs, record_collapse_in, record_fold_in, record_reset};
+use lapstack_core::wg::gpu::{Gpu, P, Rec, grid1, grid2};
 use lapstack_core::depth::{DepthParams, FocusMeasure, Upsample};
-use lapstack_core::fuse::{FuseParams, HALO_FLOOR, HALO_REF, TopRule, binomial, fuse_residuals, halo_guide, upsample_index};
+use lapstack_core::fuse::{FuseParams, TopRule, binomial, halo_guide, upsample_index, winner_shares};
 use lapstack_core::align::{AlignModel, Interp, Rect, common_area, free_mask, inverse, shifted};
 use lapstack_core::dng::DngInfo;
 use lapstack_core::dust::{self, DustMap, DustMode, DustParams};
@@ -637,42 +635,12 @@ fn record_rewarp(g: &Gpu, run: &Run, rec: &mut Rec<'_>, index: usize, dx: f32) -
     Ok(())
 }
 
-/// The buffers a fold works in — a frame's Laplacian pyramid `cur`
-/// (levels + 1 buffers), the accumulator `acc` and its best-energy planes,
-/// the REDUCE/EXPAND scratch and the energy plane — at the sizes in `dims`:
-/// the run's own, or a refold's at the view size.
-struct FoldBufs<'a> {
-    dims: &'a [(usize, usize)],
-    levels: usize,
-    /// Halo control: (guide level, hardness).
-    halo: Option<(usize, f32)>,
-    cur: &'a [wgpu::Buffer],
-    acc: &'a [wgpu::Buffer],
-    best: &'a [wgpu::Buffer],
-    tmp_half: &'a wgpu::Buffer,
-    en: &'a wgpu::Buffer,
-}
-
 impl Run {
     fn fold_bufs(&self) -> FoldBufs<'_> {
         FoldBufs { dims: &self.dims, levels: self.levels, halo: halo_guide(&self.fp, self.levels), cur: &self.cur, acc: &self.acc, best: &self.best, tmp_half: &self.tmp_half, en: &self.en }
     }
 }
 
-/// Record the reset of a fold's accumulators for a new fold: the best
-/// energies to -1 (any energy wins, so the first frame fills the
-/// accumulator); with halo control the coarser levels' weight sums and
-/// accumulators to 0.
-fn record_reset(fb: &FoldBufs<'_>, rec: &mut Rec<'_>) {
-    for l in 0..=fb.levels {
-        let (lw, lh) = fb.dims[l];
-        let sel = fb.halo.is_none_or(|(g, _)| l <= g);
-        rec.dispatch("fill", [None, None, Some(&fb.best[l]), None, None, None], P { w: (lw * lh) as u32, f0: if sel { -1.0 } else { 0.0 }, ..Default::default() }, grid1(lw * lh));
-        if !sel {
-            rec.dispatch("fill", [None, None, Some(&fb.acc[l]), None, None, None], P { w: (3 * lw * lh) as u32, ..Default::default() }, grid1(3 * lw * lh));
-        }
-    }
-}
 
 /// Record the fold of the frame in `cur[0]`: its Laplacian pyramid (band-pass
 /// levels in `cur[l]`, the residual left in `cur[levels]`), the region energy
@@ -685,113 +653,12 @@ fn record_fold(run: &Run, rec: &mut Rec<'_>, scratch: &wgpu::Buffer, winner: Opt
     record_fold_in(&run.fold_bufs(), run.klen, &run.wt, run.fp.use_chroma, rec, scratch, winner.map(|i| (i, run.depth_level)), peak.then_some(&run.peak));
 }
 
-fn record_fold_in(
-    fb: &FoldBufs<'_>,
-    klen: u32,
-    wt: &wgpu::Buffer,
-    use_chroma: bool,
-    rec: &mut Rec<'_>,
-    scratch: &wgpu::Buffer,
-    winner: Option<(usize, usize)>,
-    peak: Option<&(wgpu::Buffer, usize, usize, usize, usize)>,
-) {
-    // build: L_l = G_l - EXPAND(REDUCE(G_l)), per plane
-    for l in 0..fb.levels {
-        let (fw, fh) = fb.dims[l];
-        let (cw, ch) = fb.dims[l + 1];
-        for c in 0..3 {
-            let pr = P { w: fw as u32, h: fh as u32, ow: cw as u32, oh: ch as u32, off_in: (c * fw * fh) as u32, off_out: (c * cw * ch) as u32, ..Default::default() };
-            rec.dispatch("red_h", [Some(&fb.cur[l]), Some(fb.tmp_half), None, None, None, None], pr, grid2(cw, fh));
-            rec.dispatch("red_v", [None, Some(fb.tmp_half), Some(&fb.cur[l + 1]), None, None, None], pr, grid2(cw, ch));
-            let pe = P { w: fw as u32, h: fh as u32, ow: cw as u32, oh: ch as u32, off_in: (c * cw * ch) as u32, off_out: (c * fw * fh) as u32, flag: 1, ..Default::default() };
-            rec.dispatch("exp_h", [Some(&fb.cur[l + 1]), Some(fb.tmp_half), None, None, None, None], pe, grid2(fw, ch));
-            rec.dispatch("exp_v", [None, Some(fb.tmp_half), Some(&fb.cur[l]), None, None, None], pe, grid2(fw, fh));
-        }
-    }
-    // the region energy of level `l` into `en` (and the peaking map from it)
-    let energy = |rec: &mut Rec<'_>, l: usize| {
-        let (lw, lh) = fb.dims[l];
-        let pl = P { w: lw as u32, h: lh as u32, klen, flag: use_chroma as u32, ..Default::default() };
-        rec.dispatch("energy", [Some(&fb.cur[l]), None, None, Some(fb.en), None, None], pl, grid1(lw * lh));
-        if klen > 1 {
-            rec.dispatch("win_h", [None, Some(scratch), None, Some(fb.en), Some(wt), None], pl, grid2(lw, lh));
-            rec.dispatch("win_v", [None, Some(scratch), None, Some(fb.en), Some(wt), None], pl, grid2(lw, lh));
-        }
-        if let Some(pk) = peak.filter(|pk| l == pk.4) {
-            let (kw, kh, kf) = (pk.1, pk.2, pk.3);
-            rec.dispatch(
-                "down1",
-                [Some(fb.en), None, Some(&pk.0), None, None, None],
-                P { w: lw as u32, h: lh as u32, ow: kw as u32, oh: kh as u32, klen: kf as u32, ..Default::default() },
-                grid2(kw, kh),
-            );
-        }
-    };
-    // region energy + winner-take-all per band-pass level (up to the guide with halo control)
-    let nsel = fb.halo.map_or(fb.levels, |(g, _)| g + 1);
-    if let Some(pk) = peak.filter(|pk| pk.4 >= nsel) {
-        energy(rec, pk.4); // the peaking level beyond the guide: its energy alone
-    }
-    for l in 0..nsel {
-        let (lw, lh) = fb.dims[l];
-        energy(rec, l);
-        let ps = P { w: lw as u32, h: lh as u32, flag: winner.is_some_and(|(_, dl)| l == dl) as u32, f0: winner.map_or(0.0, |(i, _)| i as f32), ..Default::default() };
-        rec.dispatch("sel", [Some(&fb.cur[l]), Some(&fb.best[l]), Some(&fb.acc[l]), Some(fb.en), None, None], ps, grid1(lw * lh));
-    }
-    if let Some((g, p)) = fb.halo {
-        // halo control: the guide's weights in place of its energy, REDUCEd level
-        // by level, fold the coarser levels and the residual as Σ w·L and Σ w
-        let (mut lw, mut lh) = fb.dims[g];
-        rec.dispatch("wgt", [None, None, None, Some(fb.en), None, None], P { w: lw as u32, h: lh as u32, f0: p, f1: HALO_FLOOR, f2: HALO_REF, ..Default::default() }, grid1(lw * lh));
-        for l in g + 1..=fb.levels {
-            let (cw, ch) = fb.dims[l];
-            let pr = P { w: lw as u32, h: lh as u32, ow: cw as u32, oh: ch as u32, ..Default::default() };
-            rec.dispatch("red_h", [Some(fb.en), Some(fb.tmp_half), None, None, None, None], pr, grid2(cw, lh));
-            rec.dispatch("red_v", [None, Some(fb.tmp_half), Some(fb.en), None, None, None], pr, grid2(cw, ch));
-            rec.dispatch("wacc", [Some(&fb.cur[l]), Some(&fb.best[l]), Some(&fb.acc[l]), Some(fb.en), None, None], P { w: cw as u32, h: ch as u32, ..Default::default() }, grid1(cw * ch));
-            (lw, lh) = (cw, ch);
-        }
-    }
-}
-
 /// Record the collapse: fuse the residuals `tops` (on the CPU) into
 /// `acc[levels]` — or, with halo control, turn the coarse levels' sums into
 /// their weighted means — expand-and-add down the accumulator pyramid, and
 /// clamp the image left in `acc[0]` to [0, 1].
 fn record_collapse(g: &Gpu, run: &Run, rec: &mut Rec<'_>, tops: &[Img3]) {
     record_collapse_in(g, &run.fold_bufs(), &run.fp, rec, tops);
-}
-
-fn record_collapse_in(g: &Gpu, fb: &FoldBufs<'_>, fp: &FuseParams, rec: &mut Rec<'_>, tops: &[Img3]) {
-    let (w, h) = fb.dims[0];
-    let n = w * h;
-    match fb.halo {
-        Some((guide, _)) => {
-            for l in guide + 1..=fb.levels {
-                let (lw, lh) = fb.dims[l];
-                rec.dispatch("wnorm", [None, Some(&fb.best[l]), Some(&fb.acc[l]), None, None, None], P { w: lw as u32, h: lh as u32, ..Default::default() }, grid1(lw * lh));
-            }
-        }
-        None => {
-            let top = fuse_residuals(tops, fp);
-            let (tw, th) = fb.dims[fb.levels];
-            let mut flat = Vec::with_capacity(3 * tw * th);
-            for c in 0..3 {
-                flat.extend_from_slice(&top.p[c]);
-            }
-            g.queue.write_buffer(&fb.acc[fb.levels], 0, bytemuck::cast_slice(&flat));
-        }
-    }
-    for l in (0..fb.levels).rev() {
-        let (fw, fh) = fb.dims[l];
-        let (cw, ch) = fb.dims[l + 1];
-        for c in 0..3 {
-            let pe = P { w: fw as u32, h: fh as u32, ow: cw as u32, oh: ch as u32, off_in: (c * cw * ch) as u32, off_out: (c * fw * fh) as u32, flag: 2, ..Default::default() };
-            rec.dispatch("exp_h", [Some(&fb.acc[l + 1]), Some(fb.tmp_half), None, None, None, None], pe, grid2(fw, ch));
-            rec.dispatch("exp_v", [None, Some(fb.tmp_half), Some(&fb.acc[l]), None, None, None], pe, grid2(fw, fh));
-        }
-    }
-    rec.dispatch("clamp01", [None, None, Some(&fb.acc[0]), None, None, None], P { w: w as u32, h: h as u32, ..Default::default() }, grid1(3 * n));
 }
 
 /// Read a float image (3 planes in `img`, w×h) back as RGB u16.
@@ -1255,6 +1122,15 @@ impl Engine {
         let (ww, wh) = run.dims[run.depth_level];
         let wn = ww * wh;
         let winner = g.read_f32(&run.acc[run.depth_level], 4 * wn).await.map_err(|e| JsValue::from_str(&e))?[3 * wn..].to_vec();
+        // each frame's share of the detail the pyramid took from it (`winner_shares`): the winner
+        // map against its best-energy plane, which only the levels that select carry
+        let nsel = halo_guide(&run.fp, run.levels).map_or(run.levels, |(gd, _)| gd + 1);
+        let shares = if run.depth_level < nsel {
+            let best = g.read_f32(&run.best[run.depth_level], wn).await.map_err(|e| JsValue::from_str(&e))?;
+            winner_shares(&winner, &best, run.count)
+        } else {
+            Vec::new()
+        };
         let (depth, conf, dw, dh) = if let Some(dff) = &mut run.dff {
             // depth from focus, guided by the fused luma
             let mut rec = g.rec();
@@ -1300,6 +1176,7 @@ impl Engine {
         set(&o, "winner_w", ww as u32);
         set(&o, "winner_h", wh as u32);
         set(&o, "winner", js_sys::Float32Array::from(&winner[..]));
+        set(&o, "shares", js_sys::Float32Array::from(&shares[..]));
         set(&o, "ms", t1 - t0);
         Ok(o.into())
     }
@@ -1315,7 +1192,8 @@ impl Engine {
     /// `power`, the weights smoothed again; where nothing is above the floor every
     /// frame weighs the same — into the same accumulator; `render_finish(true)`
     /// normalizes it into `wav_rgb16`.
-    pub async fn render_push(&mut self, index: usize, bytes: &[u8], raw: bool, wav: bool, power: f32, smooth: u32, gate: f32) -> Result<JsValue, JsValue> {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn render_push(&mut self, index: usize, bytes: &[u8], raw: bool, wav: bool, power: f32, smooth: u32, gate: f32, edge: bool) -> Result<JsValue, JsValue> {
         let t0 = now();
         let frame = self.decode_for_run(bytes, raw).map_err(|e| JsValue::from_str(&e))?;
         let g = &self.gpu;
@@ -1340,7 +1218,7 @@ impl Engine {
         if wav {
             let dff = run.dff.as_ref().ok_or_else(|| JsValue::from_str("the weighted average needs the depth-from-focus pass"))?;
             rec.dispatch("luma_f32", [Some(&run.cur[0]), None, Some(&run.en), None, None, None], P { w: w as u32, h: h as u32, ..Default::default() }, grid1(n));
-            let weight = dff.record_weight(&mut rec, &run.en, &run.tmp_full, w, h, power, smooth, gate).map_err(|e| JsValue::from_str(&e))?;
+            let weight = dff.record_weight(&mut rec, &run.en, &run.tmp_full, w, h, power, smooth, gate, edge).map_err(|e| JsValue::from_str(&e))?;
             rec.dispatch(
                 "wav_acc",
                 [Some(&run.cur[0]), Some(&run.acc[0]), Some(&run.best[0]), None, Some(weight), None],

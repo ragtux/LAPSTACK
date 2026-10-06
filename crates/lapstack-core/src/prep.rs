@@ -51,14 +51,23 @@ pub fn resize(img: &Img3, w: usize, h: usize, interp: Interp) -> Img3 {
     // between the middle pixels) onto the reference grid: scale it so the source spans the
     // output, and shift it so that pixel centers correspond — output pixel o reads source
     // (o + ½)/k − ½, which the transform gives when its offset is (k − 1)(w + 1)/2
-    let (sw, sh) = (img.w as f64, img.h as f64);
-    let (kx, ky) = (w as f64 / sw, h as f64 / sh);
-    let sim = Sim { xoff: (kx - 1.0) * (sw + 1.0) / (2.0 * sw), yoff: (ky - 1.0) * (sh + 1.0) / (2.0 * sh), scale: kx, aspect: ky / kx, ..Sim::id() };
     let mut out = Img3::zeros(w, h);
     for c in 0..3 {
-        out.p[c] = warp_plane(&img.p[c], img.w, img.h, &sim, w, h, interp).0;
+        out.p[c] = resize_plane(&img.p[c], img.w, img.h, w, h, interp);
     }
     out
+}
+
+/// One plane resampled to `w × h` like `resize` (a depth or confidence map
+/// brought back with the image it belongs to).
+pub fn resize_plane(p: &[f32], pw: usize, ph: usize, w: usize, h: usize, interp: Interp) -> Vec<f32> {
+    if pw == w && ph == h {
+        return p.to_vec();
+    }
+    let (sw, sh) = (pw as f64, ph as f64);
+    let (kx, ky) = (w as f64 / sw, h as f64 / sh);
+    let sim = Sim { xoff: (kx - 1.0) * (sw + 1.0) / (2.0 * sw), yoff: (ky - 1.0) * (sh + 1.0) / (2.0 * sh), scale: kx, aspect: ky / kx, ..Sim::id() };
+    warp_plane(p, pw, ph, &sim, w, h, interp).0
 }
 
 /// `img` block-averaged by `2^levels` (a draft run's frames): every block of

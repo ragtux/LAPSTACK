@@ -15,9 +15,9 @@ default:
 build:
     cargo build --release
 
-# Release build with the CUDA path (--gpu / --gpu-align at run time)
+# Release build with the GPU paths (--gpu / --gpu-align at run time): CUDA, and wgpu for any other GPU
 build-gpu:
-    cargo build --release --features gpu -p lapstack-cli
+    cargo build --release --features gpu,wgpu -p lapstack-cli
 
 # Type-check everything native, with and without the gpu feature
 check:

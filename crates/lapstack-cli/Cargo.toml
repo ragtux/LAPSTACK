@@ -16,3 +16,5 @@ lapstack-core = { path = "../lapstack-core" }
 
 [features]
 gpu = ["lapstack-core/gpu"]
+# the wgpu engine: --gpu on Vulkan, Metal or DX12 (the browser app's kernels)
+wgpu = ["lapstack-core/wgpu"]

@@ -109,20 +109,26 @@ pub fn expand_dirs(inputs: &[String]) -> Result<Vec<String>, String> {
             out.push(p.clone());
             continue;
         }
-        let rd = std::fs::read_dir(p).map_err(|e| format!("cannot read {p}: {e}"))?;
-        let mut files: Vec<String> = rd
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|t| !t.is_dir()).unwrap_or(false))
-            .map(|e| e.path().to_string_lossy().into_owned())
-            .filter(|f| is_image(f))
-            .collect();
+        let files = images_in(p)?;
         if files.is_empty() {
             return Err(format!("{p}: no PNG, JPEG or TIFF files in this directory"));
         }
-        files.sort_by(|a, b| natural_cmp(a, b));
         out.extend(files);
     }
     Ok(out)
+}
+
+/// The image files directly in a directory, in natural order (possibly none).
+pub fn images_in(dir: &str) -> Result<Vec<String>, String> {
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("cannot read {dir}: {e}"))?;
+    let mut files: Vec<String> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| !t.is_dir()).unwrap_or(false))
+        .map(|e| e.path().to_string_lossy().into_owned())
+        .filter(|f| is_image(f))
+        .collect();
+    files.sort_by(|a, b| natural_cmp(a, b));
+    Ok(files)
 }
 
 /// The frames a `--skip` list leaves out of a list of `n`: 1-based positions
@@ -224,6 +230,95 @@ pub fn clock(t: f64) -> String {
     format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
 }
 
+/// A folder watched for frames as they land (`--watch`, a tethered capture):
+/// `poll` scans the folders and returns the image files that are new since
+/// the watcher was made and have settled — size and modification time
+/// unchanged over `SETTLE` seconds, since a camera or a tether writes a file
+/// in pieces. The caller decides when a stack is complete (a quiet period
+/// after the last arrival) and splits what has settled like any batch. The
+/// folders' direct subfolders are scanned too, so `--split dir` works.
+pub struct Watcher {
+    dirs: Vec<String>,
+    /// Every image file seen, by path: its size and modification time
+    /// (seconds), and when that was first observed.
+    seen: std::collections::HashMap<String, (u64, f64, f64)>,
+    /// What has been handed out already.
+    done: std::collections::HashSet<String>,
+}
+
+/// Seconds a new file's size and time must hold before it counts as written.
+pub const SETTLE: f64 = 2.0;
+
+impl Watcher {
+    /// A watcher over `dirs` that takes everything in them now as already
+    /// handled (the caller stacks those on its own first).
+    pub fn new(dirs: &[String], now: f64) -> Watcher {
+        let mut w = Watcher { dirs: dirs.to_vec(), seen: Default::default(), done: Default::default() };
+        for (path, size, mtime) in w.scan() {
+            w.seen.insert(path.clone(), (size, mtime, now));
+            w.done.insert(path);
+        }
+        w
+    }
+
+    /// The image files in the folders and their direct subfolders.
+    fn scan(&self) -> Vec<(String, u64, f64)> {
+        let mut out = Vec::new();
+        let visit = |dir: &Path, deeper: bool, out: &mut Vec<(String, u64, f64)>| {
+            let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+            let mut subs = Vec::new();
+            for e in rd.filter_map(|e| e.ok()) {
+                let path = e.path();
+                let Ok(md) = e.metadata() else { continue };
+                if md.is_dir() {
+                    if deeper {
+                        subs.push(path);
+                    }
+                    continue;
+                }
+                let name = path.to_string_lossy().into_owned();
+                if !is_image(&name) {
+                    continue;
+                }
+                let mtime = md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0.0, |d| d.as_secs_f64());
+                out.push((name, md.len(), mtime));
+            }
+            subs
+        };
+        for d in &self.dirs {
+            for sub in visit(Path::new(d), true, &mut out) {
+                visit(&sub, false, &mut out);
+            }
+        }
+        out
+    }
+
+    /// Scan once at time `now` (seconds): the files that are new and have
+    /// settled, in natural order, each returned once.
+    pub fn poll(&mut self, now: f64) -> Vec<String> {
+        let mut ready = Vec::new();
+        for (path, size, mtime) in self.scan() {
+            if self.done.contains(&path) {
+                continue;
+            }
+            match self.seen.get_mut(&path) {
+                Some(e) if e.0 == size && e.1 == mtime => {
+                    if now - e.2 >= SETTLE {
+                        ready.push(path.clone());
+                        self.done.insert(path);
+                    }
+                }
+                Some(e) => *e = (size, mtime, now),
+                None => {
+                    self.seen.insert(path, (size, mtime, now));
+                }
+            }
+        }
+        ready.sort_by(|a, b| natural_cmp(a, b));
+        ready
+    }
+}
+
 /// What a stack's output names are made of.
 pub struct Names<'a> {
     /// 1-based index of the stack and how many there are.
@@ -261,6 +356,34 @@ mod tests {
 
     fn v(s: &[&str]) -> Vec<String> {
         s.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn watcher_hands_out_settled_files_once() {
+        let dir = std::env::temp_dir().join(format!("lapstack-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("old.tif"), b"x").unwrap();
+        let d = vec![dir.to_string_lossy().into_owned()];
+        let mut w = Watcher::new(&d, 0.0);
+        assert!(w.poll(10.0).is_empty(), "what was there at the start is not new");
+        std::fs::write(dir.join("f2.tif"), b"ab").unwrap();
+        std::fs::write(dir.join("f10.tif"), b"ab").unwrap();
+        std::fs::write(dir.join("sub").join("s.jpg"), b"ab").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"ab").unwrap();
+        assert!(w.poll(11.0).is_empty(), "first sight");
+        assert!(w.poll(12.0).is_empty(), "not settled yet");
+        let got = w.poll(13.5);
+        assert_eq!(got.len(), 3);
+        assert!(got[0].ends_with("f2.tif") && got[1].ends_with("f10.tif") && got[2].ends_with("s.jpg"), "{got:?}");
+        assert!(w.poll(20.0).is_empty(), "each file once");
+        // a file still growing is not handed out
+        std::fs::write(dir.join("g.tif"), b"a").unwrap();
+        w.poll(21.0);
+        std::fs::write(dir.join("g.tif"), b"abc").unwrap();
+        assert!(w.poll(23.5).is_empty());
+        assert_eq!(w.poll(26.0).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

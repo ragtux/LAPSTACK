@@ -256,6 +256,8 @@ body.log-collapsed #toasts { bottom: 46px; }
 .toast { background: #3a2a2a; border: 1px solid #a05050; border-radius: 6px; padding: 10px 32px 10px 12px; position: relative; line-height: 1.4; }
 .toast button { position: absolute; top: 4px; right: 4px; padding: 0 6px; }
 .thumb .pct { color: #e88; }
+.thumb .sim.low { color: #e88; }
+.fs-tools input.cull { width: 3.2em; padding: 0 2px; font-size: var(--fs-xs); }
 /* viewer header: segmented controls + compact toggles */
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .seg button { border: 0; border-radius: 0; border-right: 1px solid var(--border); padding: 3px 12px; }

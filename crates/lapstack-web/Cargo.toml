@@ -11,7 +11,7 @@ description = "lapstack in the browser: WebGPU fusion + WASM decode/align, drive
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-lapstack-core = { path = "../lapstack-core" }
+lapstack-core = { path = "../lapstack-core", features = ["wgpu"] }
 image.workspace = true
 wgpu = { version = "30", default-features = false, features = ["webgpu", "wgsl"] }
 wasm-bindgen = "0.2.128"

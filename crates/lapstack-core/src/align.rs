@@ -24,6 +24,30 @@
 use crate::pyramid::{Img3, for_rows};
 use rayon::prelude::*;
 
+/// Where the fusion, the aligner's cost search and the depth pass run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Backend {
+    #[default]
+    Cpu,
+    /// `gpu.rs`: CUDA (the `gpu` build feature).
+    Cuda,
+    /// `wg::engine`: the browser app's kernels on Vulkan, Metal or DX12 (the `wgpu` build feature).
+    Wgpu,
+}
+
+impl Backend {
+    pub fn name(self) -> &'static str {
+        match self {
+            Backend::Cpu => "CPU",
+            Backend::Cuda => "CUDA",
+            Backend::Wgpu => "wgpu",
+        }
+    }
+    pub fn is_gpu(self) -> bool {
+        self != Backend::Cpu
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct AlignParams {
     pub shift: bool,
@@ -33,15 +57,15 @@ pub struct AlignParams {
     pub model: AlignModel,
     /// Skip the N finest pyramid levels during the fit (0 = full res).
     pub coarsen: usize,
-    /// Run the cost search on the CUDA GPU (needs the `gpu` build feature).
-    pub gpu: bool,
+    /// Where the cost search's evaluations run.
+    pub backend: Backend,
     /// The kernel the aligned frames are resampled with.
     pub interp: Interp,
 }
 
 impl Default for AlignParams {
     fn default() -> AlignParams {
-        AlignParams { shift: true, scale: true, rotation: true, model: AlignModel::default(), coarsen: 0, gpu: false, interp: Interp::default() }
+        AlignParams { shift: true, scale: true, rotation: true, model: AlignModel::default(), coarsen: 0, backend: Backend::Cpu, interp: Interp::default() }
     }
 }
 

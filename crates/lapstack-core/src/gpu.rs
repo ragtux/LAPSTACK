@@ -304,6 +304,11 @@ impl G {
 }
 
 /// Init a CUDA context, compile `SRC` with NVRTC and load `names`.
+/// Whether CUDA is there: the context made once (and dropped).
+pub fn available() -> Result<(), String> {
+    CudaContext::new(0).map(|_| ()).map_err(|e| format!("CUDA init failed (is nvidia_uvm loaded?): {e:?}"))
+}
+
 fn init_gpu(src: &str, names: &[&'static str]) -> Result<(Arc<CudaContext>, G), String> {
     let ctx = CudaContext::new(0).map_err(|e| format!("CUDA init failed (is nvidia_uvm loaded?): {e:?}"))?;
     let s = ctx.default_stream();
@@ -494,6 +499,19 @@ impl GpuFuser {
         }
         self.count += 1;
         Ok(())
+    }
+
+    /// `fuse::winner_shares` of the frames folded so far (the winner map and
+    /// the best-energy plane of `depth_level` read back); empty when that
+    /// level does not select.
+    pub fn shares(&self) -> Result<Vec<f32>, String> {
+        let nsel = self.halo.map_or(self.levels, |(g, _)| g + 1);
+        if self.count == 0 || self.depth_level >= nsel {
+            return Ok(Vec::new());
+        }
+        let win = self.g.s.memcpy_dtov(&self.win).map_err(|e| format!("{e:?}"))?;
+        let best = self.g.s.memcpy_dtov(&self.best[self.depth_level]).map_err(|e| format!("{e:?}"))?;
+        Ok(crate::fuse::winner_shares(&win, &best, self.count))
     }
 
     pub fn finish(mut self) -> Result<(Img3, Vec<f32>), String> {

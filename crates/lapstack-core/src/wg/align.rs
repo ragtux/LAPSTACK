@@ -4,16 +4,16 @@
 //! Streaming alignment on the GPU: the Nelder-Mead control loop runs here
 //! (async), every cost evaluation is one `cost` dispatch (Spline4x4 warp +
 //! DC-removed RMS partial sums) and a small readback. Same model, search and
-//! per-level schedule (`lapstack_core::align::level_steps`) as lapstack-core's
+//! per-level schedule (`crate::align::level_steps`) as lapstack-core's
 //! aligner; FP32 like its CUDA path. A readback is the expensive part in the
 //! browser (a round trip through Chrome's GPU process), so the points an
 //! iteration may need — the reflection, and the expansion or the contraction
 //! that follows it — are evaluated in one submit and read back together, and
 //! the decisions are made from the values as the sequential search makes them.
 
-use crate::gpu::{Gpu, P, grid2};
-pub use lapstack_core::align::{Sim, inverse};
-use lapstack_core::align::{converged, level_steps};
+use super::gpu::{Gpu, P, grid2};
+pub use crate::align::{Sim, inverse};
+use crate::align::{converged, level_steps};
 use std::future::Future;
 
 /// Bounded Nelder-Mead with an async batch cost (the sequential search of
@@ -151,7 +151,7 @@ impl LumaPyr {
         LumaPyr { lv }
     }
     /// Reduce level 0 (already filled) down the chain. `tmp` ≥ half(w)*h floats.
-    pub fn reduce_chain(&self, rec: &mut crate::gpu::Rec<'_>, tmp: &wgpu::Buffer) {
+    pub fn reduce_chain(&self, rec: &mut super::gpu::Rec<'_>, tmp: &wgpu::Buffer) {
         for l in 0..self.lv.len() - 1 {
             let (fw, fh) = (self.lv[l].1, self.lv[l].2);
             let (cw, ch) = (self.lv[l + 1].1, self.lv[l + 1].2);

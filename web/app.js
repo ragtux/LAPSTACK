@@ -98,6 +98,7 @@ const st = {
   sliceBmps: new Map(),   // 'slice:i' -> magenta band over pixels whose depth is frame i; 'focus:i' -> the In focus preview of frame i (proxy res)
   focusPending: new Set(), // frame indices whose In focus mask is being built
   peak: { on: false, strip: false, thr: 0.5, max: 0, pixmax: null, floor: 0 },   // focus peaking, see peakMask(); `on` is the canvas overlay, `strip` the filmstrip thumbs
+  cullPct: (() => { try { const v = Number(localStorage.getItem('lapstack.cull')); return v > 0 ? v : 1; } catch { return 1; } })(),   // the filmstrip's cull threshold, percent of the detail a frame must have won
   zoom: 1, ox: 0, oy: 0, fitted: true,
   pick: false,          // ctrl+G: the next canvas click jumps to the frame that won that pixel
   running: false,
@@ -136,7 +137,7 @@ function readParams() {
     rotate: Number($('p-rotate').value) || 0, draft: n('p-draft'), dng: $('p-dng').checked,
     top_radius: n('p-topr'), use_chroma: $('p-chroma').checked, halo: n('p-halo'), proxy_edge: n('p-proxy'),
     depth_scale: n('p-depthscale'), depth_level: n('p-depthlevel'), render_dmap: $('p-dmap').checked,
-    render_wav: $('p-wav').checked, wav_power: n('p-wav-pow'), wav_smooth: n('p-wav-smooth'), wav_gate: n('p-wav-gate') / 100,
+    render_wav: $('p-wav').checked, wav_power: n('p-wav-pow'), wav_smooth: n('p-wav-smooth'), wav_gate: n('p-wav-gate') / 100, wav_edge: $('p-wav-edge').checked,
     render_slabs: $('p-dslabs').checked, slab_size: n('p-dslab-size'), slab_overlap: n('p-dslab-ov'),
     turbo: st.turbo, slice: st.slice, peak_on: st.peak.on, peak_strip: st.peak.strip, peak_thr: st.peak.thr, cmp_mode: st.retouch.on && st.retouch.prev ? st.retouch.prev.cmpMode : st.cmpMode,
     brush_size: st.retouch.size, brush_hard: st.retouch.hard, brush_from: st.retouch.from, brush_slab: n('p-slab'),
@@ -170,7 +171,7 @@ function applyParams(p) {
   setStep('p-proxy', p.proxy_edge ?? 1400); st.turbo = p.turbo ?? false;
   setStep('p-depthscale', p.depth_scale ?? 2); setStep('p-depthlevel', p.depth_level ?? 2); $('p-dmap').checked = p.render_dmap ?? false; st.cmpMode = p.cmp_mode ?? 'swipe';
   $('p-dslabs').checked = p.render_slabs ?? false; setStep('p-dslab-size', p.slab_size ?? 10); setStep('p-dslab-ov', p.slab_overlap ?? 2);
-  $('p-wav').checked = p.render_wav ?? false; setStep('p-wav-pow', p.wav_power ?? 2); setStep('p-wav-smooth', p.wav_smooth ?? 3); setStep('p-wav-gate', Math.round((p.wav_gate ?? 0.5) * 100));
+  $('p-wav').checked = p.render_wav ?? false; setStep('p-wav-pow', p.wav_power ?? 2); setStep('p-wav-smooth', p.wav_smooth ?? 3); setStep('p-wav-gate', Math.round((p.wav_gate ?? 0.5) * 100)); $('p-wav-edge').checked = p.wav_edge ?? true;
   st.peak.on = p.peak_on ?? false; st.peak.strip = p.peak_strip ?? false; st.peak.thr = p.peak_thr ?? 0.5; st.slice = p.slice ?? true;
   st.retouch.size = p.brush_size ?? 100; st.retouch.hard = p.brush_hard ?? 0.5; st.retouch.from = ['stack', 'kept', 'result'].includes(p.brush_from) ? 'result' : p.brush_from === 'slab' ? 'slab' : 'source';
   setStep('p-slab', p.brush_slab ?? 5);
@@ -413,7 +414,7 @@ function addFiles(list) {
   st.files.push(...files);
   ensureTimes();
   renderFilmstrip(); runLabel();
-  $('run').disabled = st.running || !st.files.length; $('pj-save').disabled = false;
+  $('run').disabled = st.running || !st.files.length; $('pj-save').disabled = false; $('pj-cmd').disabled = !st.files.length;
   $('tab-source').disabled = false;
   if (st.view === 'source') draw();
   log(`[lapstack] ${files.length} frame(s) added (${st.files.length} total)`);
@@ -578,6 +579,9 @@ function thumbEl(i, o = null) {
   // the brightness gain on its own line (the registration line fills the column), only when there is one
   if (fr && gainText(fr.gain)) { const s = document.createElement('div'); s.className = 'sim'; s.textContent = `brightness ${gainText(fr.gain)}`; s.title = 'gain that brings this frame to frame 0\'s brightness'; d.appendChild(s); }
   if (st.peak.strip && fr && fr.peak) { const s = document.createElement('div'); s.className = 'sim pct'; s.textContent = `${peakPercent(fr).toFixed(1)} % in focus`; d.appendChild(s); }
+  // the share of the detail the run took from this frame (the thumb's indices are the run's while a result is on hand)
+  const sh = !o && frameShare(i);
+  if (sh !== false && sh !== null) { const s = document.createElement('div'); s.className = 'sim' + (sh * 100 < st.cullPct ? ' low' : ''); s.textContent = `won ${(sh * 100).toFixed(1)} % of the detail`; s.title = 'the share of the winner map\'s detail cells this frame won in the run: next to nothing means the frame is redundant to the pyramid (a near-duplicate, or focused on empty space)'; d.appendChild(s); }
   if (o) { const s = document.createElement('div'); s.className = 'sim'; s.textContent = 'excluded from the run'; d.appendChild(s); }
   if (!o) d.addEventListener('click', () => { st.selected = i; if (!scrubbable()) st.view = 'source'; updateTabs(); renderFilmstrip(); draw(); });
   // the frame's tools, on hover: exclude / include, move up / down, remove; shift on exclude or remove
@@ -602,7 +606,7 @@ $('dir').addEventListener('change', (e) => { addFiles(e.target.files); e.target.
 function clearAll() {
   if (st.running || SV.exporting) return false;
   setPick(false); worker.postMessage({ type: 'clear' }); st.files = []; st.frames = []; st.off = []; st.result = null; dropAllKept(); st.depthBmp.clear(); st.sliceBmps.clear(); st.peak.pixmax = null; resetRetouch(); B.all = null; B.frames = null; B.stacks = []; B.done = false;
-  PJ.name = null; PJ.run = null; PJ.strokes = []; PJ.missing = 0; PJ.dirs = []; PJ.dust = null; $('pj-reuse-row').hidden = true; $('pj-save').disabled = true;
+  PJ.name = null; PJ.run = null; PJ.strokes = []; PJ.missing = 0; PJ.dirs = []; PJ.dust = null; $('pj-reuse-row').hidden = true; $('pj-save').disabled = true; $('pj-cmd').disabled = true;
   st.step = 'stack'; gotoStep('stack'); renderFilmstrip(); runLabel(); updateTabs(); setView('source');
   return true;
 }
@@ -667,7 +671,7 @@ function keptTip(k) {
   const p = k.params || {};
   const fus = `levels ${p.levels || 'auto'}, energy radius ${p.energy_radius}, top ${p.top} r${p.top_radius}${p.use_chroma ? ', chroma' : ''}${p.halo ? `, halo control ${p.halo}` : ''}`;
   const al = p.align ? `aligned (${p.model && p.model !== 'similarity' ? `${p.model}, ` : ''}coarsen ${p.coarsen}${p.interp && p.interp !== 'spline4x4' ? `, ${p.interp}` : ''}${!p.shift ? ', no shift' : ''}${!p.scale ? ', no scale' : ''}${!p.rotation ? ', no rotation' : ''})` : 'not aligned';
-  return `run ${k.run}: ${k.frames} frames, ${k.first} .. ${k.last}\n${al}${p.brightness ? ', brightness equalized' : ''}${k.dust ? `, dust map ${k.dust}` : ''}\n${fus}\ndepth scale ${p.depth_scale}${p.render_dmap ? `, DFR${p.render_slabs ? ` from slabs of ${p.slab_size} (overlap ${p.slab_overlap})` : ''}` : ''}${p.render_wav ? `, WAV (power ${p.wav_power}, smoothing ${p.wav_smooth}, gate ${p.wav_gate ?? 0.5})` : ''}\n${k.w}×${k.h}, ${k.bits}-bit, ${k.secs} s, ${k.when.toLocaleTimeString()}`;
+  return `run ${k.run}: ${k.frames} frames, ${k.first} .. ${k.last}\n${al}${p.brightness ? ', brightness equalized' : ''}${k.dust ? `, dust map ${k.dust}` : ''}\n${fus}\ndepth scale ${p.depth_scale}${p.render_dmap ? `, DFR${p.render_slabs ? ` from slabs of ${p.slab_size} (overlap ${p.slab_overlap})` : ''}` : ''}${p.render_wav ? `, WAV (power ${p.wav_power}, smoothing ${p.wav_smooth}${p.wav_edge === false ? ' box' : ' guided'}, gate ${p.wav_gate ?? 0.5})` : ''}\n${k.w}×${k.h}, ${k.bits}-bit, ${k.secs} s, ${k.when.toLocaleTimeString()}`;
 }
 function keepResult(why) {
   const r = st.result; if (!r || inBatch()) return [];
@@ -954,6 +958,18 @@ function dropFrame(uid, mark) {   // the dragged frame lands before or after the
 function reverseFrames() {
   editFrames('frames reversed', (list) => { if (list.length < 2) return false; list.reverse(); }) && log(`[lapstack] frames reversed${st.files[0] ? `: ${st.files[0].name} is now frame 1` : ''}`);
 }
+// the share of the run's detail frame i (of st.files) won, or null without a result for this list
+function frameShare(i) { const r = st.result; return r && r.shares && r.shares.length === st.files.length && !B.stacks.length ? r.shares[i] : null; }
+// cull: exclude every frame that won under st.cullPct % of the detail in the last run (the CLI's --cull)
+function cullFrames() {
+  const sh = st.result && st.result.shares; if (!sh || sh.length !== st.files.length) { toast('Run first: the shares come from the run\'s winner map.', 3000); return; }
+  const uids = new Set(st.files.filter((f, i) => sh[i] * 100 < st.cullPct).map((f) => f.uid));
+  if (!uids.size) { toast(`Every frame won at least ${st.cullPct} % of the detail: nothing to cull.`, 3000); return; }
+  if (uids.size === st.files.length) { toast('That would leave no frame.', 3000); return; }
+  const n = uids.size;
+  editFrames(`${n} frame${n > 1 ? 's' : ''} culled`, (list) => { for (const e of list) if (uids.has(e.f.uid)) e.on = false; }) &&
+    log(`[lapstack] culled ${n} frame${n > 1 ? 's' : ''} that won under ${st.cullPct} % of the detail (${st.files.length} in the run, ${st.off.length} excluded)`);
+}
 function includeAll() {
   const n = st.off.length;
   editFrames(`${n} frame${n > 1 ? 's' : ''} included`, (list) => { if (!n) return false; for (const e of list) e.on = true; }) && log(`[lapstack] included ${n} frame${n > 1 ? 's' : ''} (${st.files.length} in the run)`);
@@ -966,6 +982,15 @@ function frameTools() {
   const b = document.createElement('button'); b.textContent = 'reverse'; b.title = 'reverse the order of the frames (the stack was shot back to front; excluded frames keep their places)'; b.disabled = n + m < 2; b.addEventListener('click', reverseFrames);
   d.append(s, b);
   if (m) { const a = document.createElement('button'); a.textContent = 'include all'; a.title = 'bring every excluded frame back into the run'; a.addEventListener('click', includeAll); d.appendChild(a); }
+  // cull: after a run, the frames that won under a share of the detail are excluded (the CLI's --cull)
+  if (frameShare(0) !== null) {
+    const c = document.createElement('button'); c.textContent = 'cull'; c.title = 'exclude every frame that won under the share of the detail beside this button in the last run (a near-duplicate of its neighbors, or a frame focused on empty space); the result is dropped, as after any edit, and the next run goes without them'; c.addEventListener('click', cullFrames);
+    const v = document.createElement('input'); v.type = 'number'; v.min = '0'; v.max = '99'; v.step = '0.5'; v.value = String(st.cullPct); v.title = 'the share of the detail a frame must have won to stay, in percent'; v.className = 'cull';
+    v.addEventListener('change', () => { st.cullPct = Math.max(0, Math.min(99, Number(v.value) || 0)); v.value = String(st.cullPct); try { localStorage.setItem('lapstack.cull', String(st.cullPct)); } catch {} renderFilmstrip(); });
+    v.addEventListener('click', (e) => e.stopPropagation());
+    const u = document.createElement('span'); u.textContent = '%'; u.style.width = 'auto';
+    d.append(c, v, u);
+  }
   return d;
 }
 function clearDropMark() { if (dropMark) { const t = $('filmstrip').querySelector(`.thumb[data-uid="${dropMark.uid}"]`); if (t) t.classList.remove('drop-before', 'drop-after'); dropMark = null; } }
@@ -1024,6 +1049,47 @@ function projectData() {
   const data = { lapstack_project: 1, saved: new Date().toISOString(), name: PJ.name, frames, dirs: dirs.map((d) => ({ id: d.id, name: d.name })), params: readParams(), save: saveSettingsData(), run, strokes: r ? R.strokes : PJ.strokes, dust };
   return { data, dirs };
 }
+// The lapstack command for this session's frames and settings: the panel's keys mapped to
+// the CLI's flags, the same table `lapstack --config` applies to a project file
+// (`lapstack-core/src/project.rs`: keep the two in step). What the CLI has no flag for
+// (the depth-map rendering, the animations, the content credentials) is left out.
+function cliCommand() {
+  const p = readParams(), sv = saveSettingsData(), a = ['lapstack'];
+  const q = (t) => (/[^A-Za-z0-9_./:,%=+-]/.test(t) ? `'${String(t).replace(/'/g, "'\\''")}'` : String(t));
+  const f = (flag, v) => { a.push(flag); if (v !== undefined) a.push(q(v)); };
+  const ext = { jpeg: 'jpg', dng: 'dng' }[sv['sv-format']] || 'png';
+  const stem = PJ.name || clean(stemOf((st.files[0] || st.off[0].f).name)) || 'stack';
+  f('-o', `${stem}_stacked.${ext}`);
+  if (!p.align) f('--no-align'); if (!p.shift) f('--no-shift'); if (!p.scale) f('--no-scale'); if (!p.rotation) f('--no-rotation'); if (!p.brightness) f('--no-brightness');
+  f('--align-coarsen', p.coarsen); f('--interpolation', p.interp); f('--align-model', p.model);
+  if (p.rotate) f('--rotate', p.rotate); if (p.draft) f('--draft', p.draft);
+  if (p.levels) f('--levels', p.levels);
+  f('--energy-radius', p.energy_radius); f('--top', p.top); f('--top-radius', p.top_radius); if (p.use_chroma) f('--use-chroma'); if (p.halo > 0) f('--halo-control', p.halo);
+  f('--depth-scale', p.depth_scale); f('--depth-level', p.depth_level);
+  if (p.render_wav) { f('--wav'); f('--wav-power', p.wav_power); f('--wav-smooth', p.wav_smooth); f('--wav-gate', p.wav_gate); if (!p.wav_edge) f('--wav-box'); }
+  if (p.split === 'count') f('--split', `count:${p.split_n}`); else if (p.split === 'gap') f('--split', `gap:${p.split_gap}`); else if (p.split === 'dir') f('--split', 'dir');
+  if (DUST.file) { f('--dust-map', DUST.file.name); f('--dust-threshold', p.dust_thr); f('--dust-margin', p.dust_margin); f('--dust-mode', p.dust_mode); }
+  if (p.ov_bar) f('--scale-bar', (p.ov_um > 0 ? p.ov_um : 'px') + (p.ov_len.trim() ? `:${p.ov_len.trim()}` : ''));
+  if (p.ov_text) f('--text', p.ov_text);
+  if (p.ov_bar || p.ov_text) { f('--overlay-pos', `${p.ov_bar_pos},${p.ov_text_pos}`); f('--overlay-size', p.ov_size); f('--overlay-color', p.ov_color); f('--overlay-style', p.ov_style); }
+  const c = st.result && st.result.userCrop; if (c) f('--crop', `${Math.round(c.x)},${Math.round(c.y)},${Math.round(c.w)},${Math.round(c.h)}`);
+  if (!sv['sv-meta']) f('--no-metadata'); if (!sv['sv-crop']) f('--no-crop');
+  if (sv['v3-near'] === 'first' || sv['v3-near'] === 'last') f('--near-end', sv['v3-near']);
+  const sel = new Set(sv.sel);
+  if (sel.has('depth') || sel.has('depth16')) f('--save-depth'); if (sel.has('conf')) f('--save-conf');
+  if (sel.has('stereo')) f('--stereo', `${sv['v3-shift']}:${sv['v3-layout']}`);
+  if (sel.has('anim-rock')) f('--rocking', `${sv['v3-rock']}:${sv['v3-views']}`);
+  if (sel.has('mesh')) { f('--mesh', sv['m3-format']); f('--mesh-relief', sv['m3-relief']); f('--mesh-grid', sv['m3-grid']); if (Number(sv['m3-tex']) > 0) f('--mesh-texture', sv['m3-tex']); }
+  for (const fr of st.files) a.push(q(fr.relPath || fr.webkitRelativePath || fr.name));
+  return a.join(' ');
+}
+$('pj-cmd').addEventListener('click', async () => {
+  if (!st.files.length) return;
+  const cmd = cliCommand();
+  try { await navigator.clipboard.writeText(cmd); toast('Command copied: run it in the folder the frames are in (a dust map or a project file beside them).', 6000); }
+  catch { toast('The clipboard is not available here; the command is in the log.', 6000); }
+  log(`[lapstack] ${cmd}`);
+});
 async function saveProject() {
   if (!st.files.length && !st.off.length) return;
   const { data, dirs } = projectData();
@@ -1261,6 +1327,7 @@ async function onDone(m) {
   fused.getContext('2d').putImageData(img, 0, 0);
   st.result = { w: m.w, h: m.h, bits: m.bits, fused, dmap: null, depth: new Float32Array(m.depth), conf: new Float32Array(m.conf || 0), dw: m.depth_w, dh: m.depth_h,
                 winner: new Float32Array(m.winner), ww: m.winner_w, wh: m.winner_h, meta: m.meta || null,   // meta: what the first frame carried (EXIF / ICC / XMP sizes)
+                shares: new Float32Array(m.shares || 0),   // each frame's share of the detail the pyramid took from it (fuse::winner_shares); empty when the winner map was not recorded
                 crop: m.crop ? { x: m.crop[0], y: m.crop[1], w: m.crop[2], h: m.crop[3] } : null,             // crop: the window the files are cut to (the automatic one, then inside the user's), null = all of it
                 autoCrop: m.crop ? { x: m.crop[0], y: m.crop[1], w: m.crop[2], h: m.crop[3] } : null, userCrop: null };
   st.nearAuto = null; nearCue();
@@ -1347,7 +1414,7 @@ const MESH_DESC = { glb: 'glTF binary: the stacked image as a textured relief of
 const MESH_MIME = { glb: 'model/gltf-binary', obj: 'model/obj', mtl: 'model/mtl', stl: 'model/stl', jpg: 'image/jpeg', png: 'image/png' };
 const SV = { sel: new Set(['lap']), exif: null, exifFor: null, exporting: false, cancel: false, dir: null, lastSaved: [] };   // dir: the folder saved files go to (File System Access), null = downloads
 const SK = 'lapstack.save';
-window.__SV = SV; window.__updateSaveButtons = () => updateSaveButtons();   // harness hooks
+window.__SV = SV; window.__updateSaveButtons = () => updateSaveButtons(); window.__cliCommand = () => cliCommand();   // harness hooks
 const svIds = ['fn-app', 'fn-exif', 'fn-fname', 'fn-now', 'fn-first', 'fn-stack', 'fn-layer', 'sv-name', 'sv-format', 'sv-quality', 'sv-meta', 'sv-crop', 'sv-overlay', 'an-edge', 'an-fps', 'an-loop', 'an-format', 'an-vq', 'v3-method', 'v3-src', 'v3-shift', 'v3-layout', 'v3-rock', 'v3-near', 'm3-format', 'm3-relief', 'm3-grid', 'm3-tex', 'cc-on', 'cc-name'];
 const svSteps = ['an-step', 'v3-views'];   // the card's steppers (a number in a span between − and +)
 const svLive = ['sv-quality', 'sv-name', 'cc-name', 'v3-shift', 'v3-rock', 'm3-relief'];   // re-render on every input, not on change

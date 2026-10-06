@@ -8,9 +8,9 @@
 //! decoded (`AlignedFrames`), and only the transforms are kept. The depth
 //! pass, the weighted average and each slab stream the frames again.
 
-use crate::depth::{self, DepthParams};
+use crate::depth::{self, DepthMap, DepthParams};
 use crate::fuse::{FuseParams, Fuser};
-use crate::align::{self, AlignParams, Rect, Sim, common_area};
+use crate::align::{self, AlignParams, Backend, Interp, Rect, Sim, common_area};
 use crate::brightness;
 use crate::dng::DngInfo;
 use crate::dust::DustMap;
@@ -29,8 +29,9 @@ pub struct Params {
     /// `None` = frames are already registered.
     pub align: Option<AlignParams>,
     pub save_aligned: Option<String>,
-    /// Fuse on the CUDA GPU (needs the `gpu` build feature; falls back to CPU).
-    pub gpu: bool,
+    /// Where the fusion and the depth pass run (`align::Backend`); a backend
+    /// the build lacks falls back to the CPU with a note.
+    pub backend: Backend,
     /// Depth-from-focus pass after fusion (`depth.rs`); `None` = report the
     /// pyramid winner map of `fuse.depth_level` instead (no extra pass).
     pub depth: Option<DepthParams>,
@@ -64,6 +65,9 @@ pub struct Params {
     /// A window of the frame (after `rotate`, in full-resolution pixels) the
     /// outputs are cut to (`--crop`), on top of the automatic crop.
     pub crop_rect: Option<Rect>,
+    /// Resample the cropped outputs back to the frame's size (`--restretch`),
+    /// each axis on its own, so every stack of a session comes out one size.
+    pub restretch: bool,
 }
 
 /// The slab ranges of a `count`-frame stack: `size` frames each, consecutive
@@ -105,12 +109,12 @@ impl Default for Params {
             fuse: FuseParams::default(),
             align: Some(AlignParams::default()),
             save_aligned: None,
-            gpu: false,
+            backend: Backend::Cpu,
             depth: Some(DepthParams::default()),
             crop: true,
             brightness: true,
             slabs: None, wav: None, dust: None,
-            rotate: 0, reduce: 0, dng: false, crop_rect: None,
+            rotate: 0, reduce: 0, dng: false, crop_rect: None, restretch: false,
         }
     }
 }
@@ -120,6 +124,8 @@ enum AnyFuser {
     Cpu(Fuser),
     #[cfg(feature = "gpu")]
     Gpu(crate::gpu::GpuFuser),
+    #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+    Wg(crate::wg::engine::WgFuser),
 }
 
 impl AnyFuser {
@@ -128,6 +134,25 @@ impl AnyFuser {
             AnyFuser::Cpu(f) => f.levels,
             #[cfg(feature = "gpu")]
             AnyFuser::Gpu(f) => f.levels,
+            #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+            AnyFuser::Wg(f) => f.levels,
+        }
+    }
+    fn name(&self) -> &'static str {
+        match self {
+            AnyFuser::Cpu(_) => "CPU",
+            #[cfg(feature = "gpu")]
+            AnyFuser::Gpu(_) => "GPU (CUDA)",
+            #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+            AnyFuser::Wg(_) => "GPU (wgpu)",
+        }
+    }
+    /// The fuser takes the frames' focus slices itself (the wgpu engine).
+    fn measures(&self) -> bool {
+        match self {
+            #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+            AnyFuser::Wg(f) => f.measures(),
+            _ => false,
         }
     }
     fn push(&mut self, frame: &Img3) -> Result<(), String> {
@@ -138,13 +163,39 @@ impl AnyFuser {
             }
             #[cfg(feature = "gpu")]
             AnyFuser::Gpu(f) => f.push(frame),
+            #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+            AnyFuser::Wg(f) => f.push(frame),
         }
     }
-    fn finish(self) -> Result<(Img3, Vec<f32>), String> {
+    fn shares(&self) -> Result<Vec<f32>, String> {
         match self {
-            AnyFuser::Cpu(f) => Ok(f.finish()),
+            AnyFuser::Cpu(f) => Ok(f.shares()),
             #[cfg(feature = "gpu")]
-            AnyFuser::Gpu(f) => f.finish(),
+            AnyFuser::Gpu(f) => f.shares(),
+            #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+            AnyFuser::Wg(f) => f.shares(),
+        }
+    }
+    /// The fused image, the winner map, and the depth map when the fuser
+    /// took the slices itself (`measures`).
+    fn finish(self, log: &mut dyn FnMut(String)) -> Result<(Img3, Vec<f32>, Option<DepthMap>), String> {
+        let _ = &log;
+        match self {
+            AnyFuser::Cpu(f) => {
+                let (i, d) = f.finish();
+                Ok((i, d, None))
+            }
+            #[cfg(feature = "gpu")]
+            AnyFuser::Gpu(f) => {
+                let (i, d) = f.finish()?;
+                Ok((i, d, None))
+            }
+            #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+            AnyFuser::Wg(mut f) => {
+                let (i, d) = f.finish()?;
+                let dm = if f.measures() { Some(f.depth(log)?) } else { None };
+                Ok((i, d, dm))
+            }
         }
     }
 }
@@ -162,6 +213,13 @@ pub trait FrameSource {
     /// `--gpu-align`); `None` from one that does not, and `get` serves it.
     #[cfg(feature = "gpu")]
     fn get_gpu(&mut self, _i: usize, _measure: Option<&DepthParams>) -> Result<Option<crate::gpu::DeviceFrame<'_>>, String> {
+        Ok(None)
+    }
+    /// Frame `i` on the wgpu device (3 f32 planes), for a source that keeps
+    /// its frames there (`AlignedFrames` with the wgpu aligner); `None` from
+    /// one that does not.
+    #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+    fn get_wg(&mut self, _i: usize) -> Result<Option<&wgpu::Buffer>, String> {
         Ok(None)
     }
     /// Log lines the source made while serving frames (a frame's
@@ -206,6 +264,9 @@ pub struct Output {
     /// Which end of the stack is near, as far as the run can tell
     /// (`near_end`): `Some((near_first, why))` when a cue decided it.
     pub near: Option<(bool, String)>,
+    /// Each frame's share of the detail the pyramid took from it
+    /// (`fuse::winner_shares`); empty when the winner map was not recorded.
+    pub shares: Vec<f32>,
 }
 
 /// Decoder threads kept in flight ahead of the fuser (each holds one decoded
@@ -396,6 +457,11 @@ struct AlignedFrames {
     /// The frame the device holds, once processed.
     #[cfg(feature = "gpu")]
     on_device: Option<usize>,
+    /// The same on the wgpu device (`wg::engine::WgFrames`).
+    #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+    wg: Option<crate::wg::engine::WgFrames>,
+    #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+    on_wg: Option<usize>,
     /// The transforms found so far (frame 0's is the identity).
     sims: Vec<Sim>,
     /// The previous aligned frame's luma, while the transforms are being found.
@@ -415,7 +481,9 @@ impl AlignedFrames {
     fn open(paths: Vec<String>, a: AlignParams, params: &Params) -> Result<AlignedFrames, String> {
         let src = LazyFrames::open(paths, false, params)?;
         #[cfg(feature = "gpu")]
-        let gpu = if a.gpu { Some(crate::gpu::GpuFrames::new(src.w, src.h, a.interp)?) } else { None };
+        let gpu = if a.backend == Backend::Cuda { Some(crate::gpu::GpuFrames::new(src.w, src.h, a.interp)?) } else { None };
+        #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+        let wg = if a.backend == Backend::Wgpu { Some(crate::wg::engine::WgFrames::new(src.w, src.h, a.interp)?) } else { None };
         let n = src.len();
         Ok(AlignedFrames {
             src,
@@ -425,6 +493,10 @@ impl AlignedFrames {
             gpu,
             #[cfg(feature = "gpu")]
             on_device: None,
+            #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+            wg,
+            #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+            on_wg: None,
             sims: Vec::with_capacity(n),
             prev_ref: None,
             reference: None,
@@ -503,6 +575,43 @@ impl AlignedFrames {
     }
 }
 
+impl AlignedFrames {
+    /// Frame `i` through the wgpu device (`process_gpu`'s twin): the fuser
+    /// takes its focus slice itself there.
+    #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+    fn process_wg(&mut self, i: usize) -> Result<(), String> {
+        let img = self.src.take(i)?;
+        self.src.prefetch(i + 1);
+        let (w, h) = (img.w, img.h);
+        let first = self.sims.len() <= i;
+        if first && i != self.sims.len() {
+            return Err(format!("frame {i} asked for before frame {} was aligned", self.sims.len()));
+        }
+        let known = (!first).then(|| (self.sims[i], self.gains[i].unwrap_or([1.0; 3])));
+        let guess = self.sims.last().copied().unwrap_or(Sim::id());
+        let wg = self.wg.as_mut().unwrap();
+        let (sim, gain) = wg.process(&img, guess, self.free, self.a.coarsen, known, self.brightness)?;
+        drop(img);
+        self.on_wg = Some(i);
+        if first {
+            self.sims.push(sim);
+            self.gains[i] = Some(gain);
+            if i > 0 {
+                self.lines.push(format!(
+                    "  frame {i:>3}: {}{}",
+                    align::report(&sim, w, h),
+                    if self.brightness { format!("  brightness {}", brightness::describe(gain)) } else { String::new() }
+                ));
+            }
+            if let Some(dir) = &self.save_dir {
+                let img = self.wg.as_ref().unwrap().download()?;
+                io::save_rgb(&img, &format!("{dir}/aligned_{i:03}.png"), self.src.depth, None)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl FrameSource for AlignedFrames {
     fn len(&self) -> usize {
         self.src.len()
@@ -518,7 +627,26 @@ impl FrameSource for AlignedFrames {
         let focus = self.process_gpu(i, measure)?;
         Ok(Some(crate::gpu::DeviceFrame { planes: self.gpu.as_mut().unwrap().planes(), focus }))
     }
+    #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+    fn get_wg(&mut self, i: usize) -> Result<Option<&wgpu::Buffer>, String> {
+        if self.wg.is_none() {
+            return Ok(None);
+        }
+        self.process_wg(i)?;
+        Ok(Some(self.wg.as_ref().unwrap().frame()))
+    }
     fn get(&mut self, i: usize) -> Result<Cow<'_, Img3>, String> {
+        #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+        if self.wg.is_some() {
+            if self.cur.as_ref().is_none_or(|(ci, _)| *ci != i) {
+                if self.on_wg != Some(i) {
+                    self.process_wg(i)?;
+                }
+                let img = self.wg.as_ref().unwrap().download()?;
+                self.cur = Some((i, img));
+            }
+            return Ok(Cow::Borrowed(&self.cur.as_ref().unwrap().1));
+        }
         #[cfg(feature = "gpu")]
         if self.gpu.is_some() {
             if self.cur.as_ref().is_none_or(|(ci, _)| *ci != i) {
@@ -584,12 +712,25 @@ impl FrameSource for AlignedFrames {
 fn fuse_all(
     src: &mut dyn FrameSource,
     params: &FuseParams,
-    gpu: bool,
+    backend: Backend,
     measure: Option<&DepthParams>,
     log: &mut dyn FnMut(String),
-) -> Result<(Img3, Vec<f32>, usize, Vec<Vec<f32>>), String> {
+) -> Result<Fused, String> {
     let last = src.len() - 1;
-    fuse_range(src, 0, last, params, gpu, measure, log)
+    fuse_range(src, 0, last, params, backend, measure, log)
+}
+
+/// What a fold leaves: the image, the winner map, the level count, the
+/// frames' focus slices (when the pass is on and the fuser did not run it
+/// itself), each frame's share of the detail, and the depth map when the
+/// fuser ran the pass (the wgpu engine).
+struct Fused {
+    image: Img3,
+    winner: Vec<f32>,
+    levels: usize,
+    slices: Vec<Vec<f32>>,
+    shares: Vec<f32>,
+    depth: Option<DepthMap>,
 }
 
 /// Fuse frames `lo..=hi` of the source. With `measure`, each frame's focus
@@ -601,30 +742,29 @@ fn fuse_range(
     lo: usize,
     hi: usize,
     params: &FuseParams,
-    gpu: bool,
+    backend: Backend,
     measure: Option<&DepthParams>,
     log: &mut dyn FnMut(String),
-) -> Result<(Img3, Vec<f32>, usize, Vec<Vec<f32>>), String> {
+) -> Result<Fused, String> {
     let (w, h) = src.dims();
-    #[cfg(feature = "gpu")]
-    let mut fuser = if gpu {
-        AnyFuser::Gpu(crate::gpu::GpuFuser::new(w, h, params.clone())?)
-    } else {
-        AnyFuser::Cpu(Fuser::new(w, h, params.clone()))
-    };
-    #[cfg(not(feature = "gpu"))]
-    let mut fuser = {
-        if gpu {
-            log("--gpu requested but built without the 'gpu' feature; fusing on the CPU".into());
+    let mut fuser = match backend {
+        Backend::Cpu => AnyFuser::Cpu(Fuser::new(w, h, params.clone())),
+        #[cfg(feature = "gpu")]
+        Backend::Cuda => AnyFuser::Gpu(crate::gpu::GpuFuser::new(w, h, params.clone())?),
+        #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+        Backend::Wgpu => AnyFuser::Wg(crate::wg::engine::WgFuser::new(w, h, params.clone(), measure)?),
+        #[allow(unreachable_patterns)]
+        other => {
+            log(format!("the {} backend is not in this build; fusing on the CPU", other.name()));
+            AnyFuser::Cpu(Fuser::new(w, h, params.clone()))
         }
-        AnyFuser::Cpu(Fuser::new(w, h, params.clone()))
     };
     let levels = fuser.levels();
     log(format!(
         "fusing {} frames{} on the {}: {} band-pass levels + residual ({}x{}), energy window {}x{}, top rule {:?}",
         hi + 1 - lo,
         if lo == 0 && hi + 1 == src.len() { String::new() } else { format!(" ({lo}..{hi})") },
-        match fuser { AnyFuser::Cpu(_) => "CPU", #[cfg(feature = "gpu")] AnyFuser::Gpu(_) => "GPU" },
+        fuser.name(),
         levels,
         {
             let mut x = w;
@@ -653,10 +793,18 @@ fn fuse_range(
                 done = true;
             }
         }
+        #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+        if let AnyFuser::Wg(f) = &mut fuser {
+            if let Some(buf) = src.get_wg(i)? {
+                f.push_buf(buf)?;
+                done = true;
+            }
+        }
         if !done {
             let f = src.get(i)?;
+            let own = fuser.measures();
             fuser.push(&f)?;
-            if let Some(dp) = measure {
+            if let Some(dp) = measure.filter(|_| !own) {
                 slices.push(depth::focus_slice(&f, dp));
             }
         }
@@ -671,9 +819,10 @@ fn fuse_range(
             t.elapsed().as_secs_f64()
         ));
     }
-    let (img, depth) = fuser.finish()?;
+    let shares = fuser.shares()?;
+    let (image, winner, depth) = fuser.finish(log)?;
     log(format!("collapsed  ({:.1}s)", t.elapsed().as_secs_f64()));
-    Ok((img, depth, levels, slices))
+    Ok(Fused { image, winner, levels, slices, shares, depth })
 }
 
 /// Fusion, with the optional depth from focus: the frames' focus slices are
@@ -685,28 +834,30 @@ fn fuse_and_depth(
     src: &mut dyn FrameSource,
     params: &Params,
     log: &mut dyn FnMut(String),
-) -> Result<(Img3, Vec<f32>, Option<Vec<f32>>, usize, Option<Vec<f32>>), String> {
-    let (image, winner, levels, slices) = fuse_all(src, &params.fuse, params.gpu, params.depth.as_ref(), log)?;
-    match &params.depth {
-        Some(dp) => {
+) -> Result<(Img3, Vec<f32>, Option<Vec<f32>>, usize, Option<Vec<f32>>, Vec<f32>), String> {
+    let Fused { image, winner, levels, slices, shares, depth } = fuse_all(src, &params.fuse, params.backend, params.depth.as_ref(), log)?;
+    share_note(&shares, log);
+    match (&params.depth, depth) {
+        (Some(_), Some(dm)) => Ok((image, dm.depth, Some(dm.conf), levels, Some(dm.floor), shares)),
+        (Some(dp), None) => {
             let n = slices.len();
             let mut it = slices.into_iter().map(Ok);
             #[cfg(feature = "gpu")]
-            let dm = if params.gpu { crate::gpu::depth_from_slices(&mut it, n, &image, dp, log)? } else { depth::depth_from_slices(&mut it, n, &image, dp, log)? };
+            let dm = if params.backend == Backend::Cuda { crate::gpu::depth_from_slices(&mut it, n, &image, dp, log)? } else { depth::depth_from_slices(&mut it, n, &image, dp, log)? };
             #[cfg(not(feature = "gpu"))]
             let dm = depth::depth_from_slices(&mut it, n, &image, dp, log)?;
-            Ok((image, dm.depth, Some(dm.conf), levels, Some(dm.floor)))
+            Ok((image, dm.depth, Some(dm.conf), levels, Some(dm.floor), shares))
         }
-        None => Ok((image, winner, None, levels, None)),
+        (None, _) => Ok((image, winner, None, levels, None, shares)),
     }
 }
 
 /// The weighted average of `Params::wav`, another pass over the frames; it
 /// borrows the depth pass's focus measure and noise floor, so it needs
 /// `Params::depth`.
-fn weighted(src: &mut dyn FrameSource, params: &Params, floor: Option<&[f32]>, log: &mut dyn FnMut(String)) -> Result<Option<Img3>, String> {
+fn weighted(src: &mut dyn FrameSource, params: &Params, floor: Option<&[f32]>, guide: &Img3, log: &mut dyn FnMut(String)) -> Result<Option<Img3>, String> {
     match (&params.wav, &params.depth, floor) {
-        (Some(wp), Some(dp), Some(floor)) => Ok(Some(crate::wav::weighted_average(src, dp, wp, floor, log)?)),
+        (Some(wp), Some(dp), Some(floor)) => Ok(Some(crate::wav::weighted_average(src, dp, wp, floor, Some(guide), log)?)),
         (Some(_), _, _) => {
             log("the weighted average needs the depth-from-focus pass (not the winner map): skipped".into());
             Ok(None)
@@ -723,6 +874,7 @@ fn fuse_slabs(
     params: &Params,
     bit_depth: Depth,
     crop: Option<&Rect>,
+    restretch: Option<(usize, usize)>,
     dng: Option<&DngInfo>,
     log: &mut dyn FnMut(String),
     on_slab: &mut dyn FnMut(Slab<'_>) -> Result<(), String>,
@@ -732,8 +884,9 @@ fn fuse_slabs(
     log(format!("{} slabs of {size} frames, overlap {overlap}", ranges.len()));
     for (k, &(lo, hi)) in ranges.iter().enumerate() {
         log(format!("slab {}/{}: frames {lo}..{hi}", k + 1, ranges.len()));
-        let (image, _, _, _) = fuse_range(src, lo, hi, &params.fuse, params.gpu, None, log)?;
+        let image = fuse_range(src, lo, hi, &params.fuse, params.backend, None, log)?.image;
         let image = match crop { Some(r) => image.crop(r), None => image };
+        let image = match restretch { Some((w, h)) => prep::resize(&image, w, h, Interp::Spline4x4), None => image };
         on_slab(Slab { index: k, count: ranges.len(), lo, hi, image: &image, bit_depth, dng: dng.cloned() })?;
     }
     Ok(())
@@ -772,6 +925,52 @@ fn near_end(inputs: &[String], sims: &[Sim], w: usize, h: usize, log: &mut dyn F
         }
     }
     None
+}
+
+/// What the winner shares say, in a line or two: the least share and its
+/// frame, and the frames that won under `REDUNDANT_PCT` % of the detail —
+/// what `--cull` would leave out.
+fn share_note(shares: &[f32], log: &mut dyn FnMut(String)) {
+    if shares.len() < 2 {
+        return;
+    }
+    let (imin, &min) = shares.iter().enumerate().min_by(|a, b| a.1.total_cmp(b.1)).unwrap();
+    let (imax, &max) = shares.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap();
+    let low: Vec<String> = shares.iter().enumerate().filter(|(_, s)| **s * 100.0 < REDUNDANT_PCT).map(|(i, s)| format!("{i} ({:.1} %)", s * 100.0)).collect();
+    log(format!("detail won per frame: least {:.1} % (frame {imin}), most {:.1} % (frame {imax}){}", min * 100.0, max * 100.0,
+        if low.is_empty() { String::new() } else { format!("; under {REDUNDANT_PCT} %, redundant to the pyramid: {} — --cull {REDUNDANT_PCT} leaves such frames out", low.join(", ")) }));
+}
+
+/// Below this share of the detail a frame is reported as redundant.
+pub const REDUNDANT_PCT: f32 = 1.0;
+
+/// `Params::restretch`: the cropped outputs brought back to the frame's size
+/// `w × h`, each axis on its own — a slight stretch, since the crop's aspect
+/// differs a little from the frame's. Returns the size the slabs are to be
+/// brought to as well (`None` when nothing was cropped).
+#[allow(clippy::too_many_arguments)]
+fn restretched(
+    params: &Params,
+    crop: Option<&Rect>,
+    w: usize,
+    h: usize,
+    interp: Interp,
+    image: Img3,
+    depth: Vec<f32>,
+    conf: Option<Vec<f32>>,
+    wav: Option<Img3>,
+    log: &mut dyn FnMut(String),
+) -> (Img3, Vec<f32>, Option<Vec<f32>>, Option<Img3>, Option<(usize, usize)>) {
+    let Some(r) = crop.filter(|_| params.restretch) else { return (image, depth, conf, wav, None) };
+    if r.w == w && r.h == h {
+        return (image, depth, conf, wav, None);
+    }
+    log(format!("restretched from {}x{} to the frame's {w}x{h} ({}; x by {:.3}, y by {:.3})", r.w, r.h, interp.name(), w as f64 / r.w as f64, h as f64 / r.h as f64));
+    let image = prep::resize(&image, w, h, interp);
+    let depth = prep::resize_plane(&depth, r.w, r.h, w, h, interp);
+    let conf = conf.map(|c| prep::resize_plane(&c, r.w, r.h, w, h, interp).into_iter().map(|v| v.clamp(0.0, 1.0)).collect());
+    let wav = wav.map(|i| prep::resize(&i, w, h, interp));
+    (image, depth, conf, wav, Some((w, h)))
 }
 
 /// `Params::crop_rect` on the run's grid: given in full-resolution pixels of
@@ -821,9 +1020,14 @@ pub fn run_with(
     let inputs: Vec<String> = inputs.to_vec();
     match params.align {
         Some(a) if inputs.len() > 1 => {
-            if a.gpu && !cfg!(feature = "gpu") {
-                log("--gpu-align requested but built without the 'gpu' feature; aligning on the CPU".into());
-            }
+            let a = {
+                let mut a = a;
+                if (a.backend == Backend::Cuda && !cfg!(feature = "gpu")) || (a.backend == Backend::Wgpu && !cfg!(all(feature = "wgpu", not(target_arch = "wasm32")))) {
+                    log(format!("the {} aligner is not in this build; aligning on the CPU", a.backend.name()));
+                    a.backend = Backend::Cpu;
+                }
+                a
+            };
             if let Some(dir) = &params.save_aligned {
                 std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
             }
@@ -835,10 +1039,10 @@ pub fn run_with(
             log(format!(
                 "{} frames @ {w}x{h}, {}-bit ({} threads); streaming from disk, each frame aligned as it is folded ({} shift={} scale={} rot={} coarsen={} {}{})",
                 src.len(), bit_depth.bits(), rayon::current_num_threads(), a.model.name(), a.shift, a.scale, a.rotation, a.coarsen, a.interp.name(),
-                if a.gpu && cfg!(feature = "gpu") { ", GPU" } else { "" }
+                if a.backend.is_gpu() { format!(", {} GPU", a.backend.name()) } else { String::new() }
             ));
-            let (image, depth, conf, levels, floor) = fuse_and_depth(&mut src, params, log)?;
-            let wav = weighted(&mut src, params, floor.as_deref(), log)?;
+            let (image, depth, conf, levels, floor, shares) = fuse_and_depth(&mut src, params, log)?;
+            let wav = weighted(&mut src, params, floor.as_deref(), &image, log)?;
             // the borders some frames only reach with smeared edge pixels go
             let area = common_area(&src.sims, w, h, a.interp);
             let mut window = if params.crop && !area.is_full(w, h) {
@@ -854,8 +1058,9 @@ pub fn run_with(
                 Some(r) => (image.crop(&r), crop_plane(&depth, w, &r), conf.map(|c| crop_plane(&c, w, &r)), wav.map(|i| i.crop(&r)), Some(r)),
                 None => (image, depth, conf, wav, None),
             };
+            let (image, depth, conf, wav, restretch) = restretched(params, crop.as_ref(), w, h, a.interp, image, depth, conf, wav, log);
             let look = src.src.look.clone();
-            fuse_slabs(&mut src, params, bit_depth, crop.as_ref(), look.as_ref(), log, on_slab)?;
+            fuse_slabs(&mut src, params, bit_depth, crop.as_ref(), restretch, look.as_ref(), log, on_slab)?;
             for n in &src.src.notes {
                 log(format!("note: {n}"));
             }
@@ -867,7 +1072,7 @@ pub fn run_with(
             }
             let near = near_end(&inputs, &src.sims, w, h, log);
             let dng = src.src.look.take();
-            Ok(Output { image, depth, conf, bit_depth, align: src.sims, levels, crop, wav, dng, reduce: params.reduce, near })
+            Ok(Output { image, depth, conf, bit_depth, align: src.sims, levels, crop, wav, dng, reduce: params.reduce, near, shares })
         }
         _ => {
             let mut src = LazyFrames::open(inputs.clone(), params.brightness, params)?;
@@ -880,15 +1085,16 @@ pub fn run_with(
             ));
             let bit_depth = src.depth;
             let (w, h) = (src.w, src.h);
-            let (image, depth, conf, levels, floor) = fuse_and_depth(&mut src, params, log)?;
-            let wav = weighted(&mut src, params, floor.as_deref(), log)?;
+            let (image, depth, conf, levels, floor, shares) = fuse_and_depth(&mut src, params, log)?;
+            let wav = weighted(&mut src, params, floor.as_deref(), &image, log)?;
             let crop = user_crop(params, w, h, log)?;
             let (image, depth, conf, wav) = match &crop {
                 Some(r) => (image.crop(r), crop_plane(&depth, w, r), conf.map(|c| crop_plane(&c, w, r)), wav.map(|i| i.crop(r))),
                 None => (image, depth, conf, wav),
             };
+            let (image, depth, conf, wav, restretch) = restretched(params, crop.as_ref(), w, h, Interp::Spline4x4, image, depth, conf, wav, log);
             let look = src.look.clone();
-            fuse_slabs(&mut src, params, bit_depth, crop.as_ref(), look.as_ref(), log, on_slab)?;
+            fuse_slabs(&mut src, params, bit_depth, crop.as_ref(), restretch, look.as_ref(), log, on_slab)?;
             for n in &src.notes {
                 log(format!("note: {n}"));
             }
@@ -897,7 +1103,7 @@ pub fn run_with(
             }
             let near = near_end(&inputs, &[], w, h, log);
             let dng = src.look.take();
-            Ok(Output { image, depth, conf, bit_depth, align: vec![Sim::id(); inputs.len()], levels, crop, wav, dng, reduce: params.reduce, near })
+            Ok(Output { image, depth, conf, bit_depth, align: vec![Sim::id(); inputs.len()], levels, crop, wav, dng, reduce: params.reduce, near, shares })
         }
     }
 }

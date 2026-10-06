@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
 // SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
 
-//! Depth from focus on WebGPU — the pipeline of `lapstack_core::depth`
+//! Depth from focus on WebGPU — the pipeline of `crate::depth`
 //! (ring difference filter, guided-filter aggregation, streamed sub-frame peak
 //! search, confidence-weighted WLS with a Huber reweight — the conjugate
 //! gradient preconditioned by a multigrid V-cycle — guided upsampling)
@@ -14,8 +14,8 @@
 //! *fused* luma, which does not exist before the end of the run — into the
 //! peak tracker, and the rest of the pass runs entirely on the device.
 
-use crate::gpu::{Gpu, P, Rec, grid1, grid2};
-use lapstack_core::depth::{DepthParams, FocusMeasure, MG_COARSE, MG_MIN, MG_OMEGA, MG_POST, MG_PRE, Upsample, rdf_taps};
+use super::gpu::{Gpu, P, Rec, grid1, grid2};
+use crate::depth::{DepthParams, FocusMeasure, MG_COARSE, MG_MIN, MG_OMEGA, MG_POST, MG_PRE, Upsample, rdf_taps};
 
 const EPS_DATA: f32 = 1e-4;
 
@@ -29,15 +29,23 @@ pub struct DepthGpu {
     slice: wgpu::Buffer,
     /// Per frame: the block-averaged focus measure, quantized (values, scale).
     pub slices: Vec<(Vec<u16>, f32)>,
-    /// Two working-grid planes for the weighted average's smoothed weight map.
+    /// Working-grid planes for the weighted average's smoothed weight map
+    /// (four: the guided filter needs its coefficients beside the input).
     wtmp: wgpu::Buffer,
     wgrid: wgpu::Buffer,
+    wa: wgpu::Buffer,
+    wb: wgpu::Buffer,
+    /// The fused luma on the working grid, set by `finish`: the guide of
+    /// the weighted average's edge-aware smoothing, with its box statistics
+    /// `[mean | variance]` (two planes) made at the smoothing radius.
+    guide: wgpu::Buffer,
+    gstats: wgpu::Buffer,
     /// After `finish`: the noise floor of every working-grid cell, the least
     /// aggregated contrast any frame showed there (`DepthMap::floor` in core).
     floor: Option<wgpu::Buffer>,
 }
 
-/// One grid of the WLS multigrid hierarchy (`lapstack_core::depth::MgLevel`):
+/// One grid of the WLS multigrid hierarchy (`crate::depth::MgLevel`):
 /// `[wd | dinv]` and `[ax | ay]` (two planes each, λ in the edges), and the
 /// V-cycle's solution, right-hand side and residual planes.
 struct Lv {
@@ -88,6 +96,10 @@ impl DepthGpu {
             slices: Vec::new(),
             wtmp: g.buffer_f32("wav tmp", dw * dh),
             wgrid: g.buffer_f32("wav grid", dw * dh),
+            wa: g.buffer_f32("wav a", dw * dh),
+            wb: g.buffer_f32("wav b", dw * dh),
+            guide: g.buffer_f32("wav guide", dw * dh),
+            gstats: g.buffer_f32("wav guide stats", 2 * dw * dh),
             floor: None,
         })
     }
@@ -112,24 +124,54 @@ impl DepthGpu {
     /// The weighted average's weight map for the frame in `luma` (w×h f32): its
     /// contrast on the working grid, box-smoothed by `smooth` grid pixels, above
     /// (1 + `gate`) × the cell's noise floor and raised to `power` (`wav_weight`; the
-    /// twin of core `wav.rs`), the weights smoothed by the same window, in the buffer
-    /// returned, for `wav_acc`. `tmp` is a
-    /// w×h f32 scratch. Needs the pass finished (the floor).
-    pub fn record_weight<'a>(&'a self, rec: &mut Rec<'_>, luma: &wgpu::Buffer, tmp: &wgpu::Buffer, w: usize, h: usize, power: f32, smooth: u32, gate: f32) -> Result<&'a wgpu::Buffer, String> {
+    /// twin of core `wav.rs`), the weights smoothed by the same window — with
+    /// `edge`, by the guided filter with the fused luma as guide (`WavParams::edge`:
+    /// the cross-fade stops at a silhouette), else by the box mean — in the
+    /// buffer returned, for `wav_acc`. `tmp` is a w×h f32 scratch. Needs the
+    /// pass finished (the floor and the guide).
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_weight<'a>(&'a self, rec: &mut Rec<'_>, luma: &wgpu::Buffer, tmp: &wgpu::Buffer, w: usize, h: usize, power: f32, smooth: u32, gate: f32, edge: bool) -> Result<&'a wgpu::Buffer, String> {
         let floor = self.floor.as_ref().ok_or("the weighted average needs the depth pass finished")?;
         self.record_measure(rec, luma, tmp, w, h);
+        let n = self.dw * self.dh;
         let pg = P { w: self.dw as u32, h: self.dh as u32, klen: smooth, ..Default::default() };
         if smooth == 0 {
-            rec.dispatch("wav_weight", [Some(&self.slice), None, Some(&self.wgrid), None, Some(floor), None], P { f0: power.max(0.0), f1: gate.max(0.0), ..pg }, grid1(self.dw * self.dh));
+            rec.dispatch("wav_weight", [Some(&self.slice), None, Some(&self.wgrid), None, Some(floor), None], P { f0: power.max(0.0), f1: gate.max(0.0), ..pg }, grid1(n));
             return Ok(&self.wgrid);
         }
-        // the contrast smoothed, weighed, and the weights smoothed by the same window
-        rec.dispatch("box_h", [Some(&self.slice), Some(&self.wtmp), None, None, None, None], pg, grid2(self.dw, self.dh));
-        rec.dispatch("box_v", [None, Some(&self.wtmp), Some(&self.wgrid), None, None, None], pg, grid2(self.dw, self.dh));
-        rec.dispatch("wav_weight", [Some(&self.wgrid), None, Some(&self.wtmp), None, Some(floor), None], P { f0: power.max(0.0), f1: gate.max(0.0), ..pg }, grid1(self.dw * self.dh));
-        rec.dispatch("box_h", [Some(&self.wtmp), Some(&self.wgrid), None, None, None, None], pg, grid2(self.dw, self.dh));
-        rec.dispatch("box_v", [None, Some(&self.wgrid), Some(&self.wtmp), None, None, None], pg, grid2(self.dw, self.dh));
-        Ok(&self.wtmp)
+        let boxf = |rec: &mut Rec<'_>, src: &wgpu::Buffer, via: &wgpu::Buffer, dst: &wgpu::Buffer| {
+            rec.dispatch("box_h", [Some(src), Some(via), None, None, None, None], pg, grid2(self.dw, self.dh));
+            rec.dispatch("box_v", [None, Some(via), Some(dst), None, None, None], pg, grid2(self.dw, self.dh));
+        };
+        // the contrast smoothed, weighed: the weight p in wtmp
+        boxf(rec, &self.slice, &self.wtmp, &self.wgrid);
+        rec.dispatch("wav_weight", [Some(&self.wgrid), None, Some(&self.wtmp), None, Some(floor), None], P { f0: power.max(0.0), f1: gate.max(0.0), ..pg }, grid1(n));
+        if !edge {
+            boxf(rec, &self.wtmp, &self.wgrid, &self.wa);
+            return Ok(&self.wa);
+        }
+        // the guide's statistics at this radius: [mean_I | var_I] (cheap on the grid, so per frame)
+        boxf(rec, &self.guide, &self.wb, &self.wa);
+        rec.dispatch("mul", [Some(&self.guide), None, Some(&self.wgrid), None, Some(&self.guide), None], pg, grid1(n));
+        boxf(rec, &self.wgrid, &self.wb, &self.wgrid);
+        rec.dispatch("gf_var", [Some(&self.wa), None, None, Some(&self.gstats), Some(&self.wgrid), None], pg, grid1(n));
+        // the guided filter of p (twin of core `GuidedFilter`): corr_Ip, mean_p, the coefficients a, b, their means, q = ā·I + b̄
+        rec.dispatch("mul", [Some(&self.guide), None, Some(&self.wgrid), None, Some(&self.wtmp), None], pg, grid1(n));
+        boxf(rec, &self.wgrid, &self.wb, &self.wgrid);
+        boxf(rec, &self.wtmp, &self.wb, &self.wa);
+        rec.dispatch("gf_ab", [Some(&self.wa), Some(&self.wtmp), Some(&self.wb), Some(&self.gstats), Some(&self.wgrid), None], P { f0: self.params.agg_eps, ..pg }, grid1(n));
+        boxf(rec, &self.wtmp, &self.wgrid, &self.wa);
+        boxf(rec, &self.wb, &self.wgrid, &self.wtmp);
+        // an undershoot at an edge is clamped: a weight stays a weight (flag 1)
+        rec.dispatch("gf_apply", [Some(&self.wa), None, Some(&self.wgrid), Some(&self.guide), Some(&self.wtmp), None], P { flag: 1, ..pg }, grid1(n));
+        Ok(&self.wgrid)
+    }
+
+    /// The noise floor of every working-grid cell, after `finish`
+    /// (`DepthMap::floor` in core).
+    pub async fn floor_values(&self, g: &Gpu) -> Result<Vec<f32>, String> {
+        let floor = self.floor.as_ref().ok_or("the floor comes with the pass finished")?;
+        g.read_f32(floor, self.dw * self.dh).await
     }
 
     /// Read the recorded slice back and keep it (quantized).
@@ -210,6 +252,13 @@ impl DepthGpu {
         rec.dispatch(
             "down1",
             [Some(luma_full), None, Some(&wk.guide), None, None, None],
+            P { w: w as u32, h: h as u32, ow: dw as u32, oh: dh as u32, klen: self.k as u32, ..Default::default() },
+            grid2(dw, dh),
+        );
+        // the same guide kept for the weighted average's edge-aware weights
+        rec.dispatch(
+            "down1",
+            [Some(luma_full), None, Some(&self.guide), None, None, None],
             P { w: w as u32, h: h as u32, ow: dw as u32, oh: dh as u32, klen: self.k as u32, ..Default::default() },
             grid2(dw, dh),
         );
@@ -425,7 +474,7 @@ impl DepthGpu {
     }
 
     /// WLS solve of (W + λL) u = W d, the data weights in `levels[0]`
-    /// (`lapstack_core::depth::WlsSolver`): the FGS guess (3 alternating
+    /// (`crate::depth::WlsSolver`): the FGS guess (3 alternating
     /// row/column sweeps), then CG preconditioned by one multigrid V-cycle,
     /// the residual read back every few iterations. Result in `wk.u`; the
     /// final relative residual and the iterations taken.

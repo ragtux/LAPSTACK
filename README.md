@@ -18,9 +18,9 @@ stacking on the Laplacian pyramid, written from the papers cited in
 ## Layout
 
 ```
-crates/lapstack-core   library: pyramid, fusion, depth from focus, aligner, dust map, stereo views, 3D model, batch splitting, I/O, linear DNG, frame preparation, CUDA path, pooling allocator
+crates/lapstack-core   library: pyramid, fusion, depth from focus, aligner, dust map, stereo views, 3D model, batch splitting, I/O, linear DNG, frame preparation, CUDA path, the wgpu engine (`wg/`: the WGSL kernels the browser app and the native `--gpu` share), pooling allocator
 crates/lapstack-cli    `lapstack` command-line tool
-crates/lapstack-web    wasm32 + WebGPU engine for the browser app
+crates/lapstack-web    the browser app's engine: wasm32 decode + the core's wgpu kernels on WebGPU
 crates/lapstack-raw    the camera raw decoder (rawler, LGPL) as a module of its own: a shared library the CLI loads at run time, a wasm module the browser app loads beside its engine
 web/                   the browser app (static files) and its headless test
 docs/                  the papers the algorithm is written from, cited
@@ -37,7 +37,7 @@ desktop/               the browser app as an Electron desktop application
 cargo build --release
 target/release/lapstack --align-coarsen 2 --save-depth -o out.png frames/*.tif
 target/release/lapstack --no-align -o out.png aligned/*.png    # streams from disk
-cargo build --release --features gpu -p lapstack-cli               # CUDA fusion + aligner
+cargo build --release --features gpu,wgpu -p lapstack-cli          # GPU fusion + aligner: CUDA, and wgpu for any other GPU
 target/release/lapstack --gpu --gpu-align --align-coarsen 2 -o out.png frames/*.tif
 ```
 
@@ -190,7 +190,12 @@ repeats its edge, so the output (image, depth and confidence maps) is
 (`align::common_area`: each frame's sound area is a convex quad, cut per pixel
 row into an interval, intersected over frames, and the best rectangle over
 consecutive rows is taken; the interpolation kernel's support — 2 px for
-spline4x4 — is kept out); `--no-crop` keeps the full frame.
+spline4x4 — is kept out); `--no-crop` keeps the full frame, and `--restretch`
+resamples the cropped outputs (the image, the depth and confidence maps, the
+weighted average, the slabs) back to the frame's size with the alignment's
+kernel, each axis on its own — a stretch of a percent or so, since the crop's
+aspect is not quite the frame's — for a session whose stacks must all come out
+one size.
 
 **Batch runs and stack splitting** (`batch.rs`; `--split RULE`, `--dry-run`):
 a directory among the inputs stands for the image files in it (PNG, JPEG,
@@ -217,6 +222,44 @@ the pause before each — and stops: worth a look before hours of stacking,
 and the way to see whether the split is what you meant. Reading the times
 costs little: only the head of each file is read, or, for a TIFF whose IFD
 follows the pixels, a window around that IFD (100 frames of 274 MB in 0.2 s).
+
+**A project's settings on the command line** (`--config FILE`; `project.rs`):
+the browser app's project file (`<name>.lapstack.json`, below) carries every
+setting of its panel and Save step, and `--config` reads it: the settings go
+in front of the command line as the flags they stand for — alignment, fusion,
+depth, the weighted average, the batch split, the dust map (its file looked
+for beside the project file), the scale bar and caption, the crop window,
+the Save step's metadata and crop switches, the near end, and the outputs
+ticked there (depth, confidence, stereo, rocking, 3D model) — so the flags
+given after them override, `-o` is `<name>_stacked.<ext>` in the Save step's
+format unless given, and with no frames on the command line the project's
+frames are the inputs (the excluded ones left out), each looked for beside
+the project file by its path and then its name. The run logs the flags it
+took and notes what has no command-line form (the depth-map rendering, the
+animations, the content credentials) or was not found. So a stack is dialed
+in by eye in the app, saved as a project, and run — or rerun on a bigger
+machine, or scripted over a session's folders with `--split dir` — from the
+shell; the app's **Copy command** button (below) writes the same command
+without the file.
+
+**Tethered capture** (`--watch`, `--watch-quiet S`; `batch::Watcher`): with
+`--watch` the inputs are folders, and after the frames already in them are
+stacked as above the program stays up and watches them (and their direct
+subfolders, for `--split dir`) for new image files. A file counts as arrived
+once its size and modification time have held for 2 s — a camera or a tether
+writes it in pieces — and a stack closes after `--watch-quiet` seconds without
+a new frame (the gap of `--split gap:S` when there is one, else 10 s): the
+frames that arrived are then split by the rule, numbered on from the last
+stack and run, and the watch goes on, every stack's outputs named like a
+batch's (`out_03.tif`, or the template's fields), so `-o` must point outside
+the watched folder — an output landing there would be taken for a frame, and
+the program refuses to start. A stack that fails is reported and the watch
+goes on. `--skip` has no meaning for a list that grows and is refused;
+`--cull` and every other setting apply to each stack as it closes. `--dry-run`
+lists the stacks already there and says what would be watched. Ctrl-C ends
+it; a stack being fused at that moment is lost. On the tether's side nothing
+is needed beyond a folder the frames land in — Lightroom's tethered capture
+and the camera makers' own tools all write one.
 
 **Camera raw input** (`raw.rs`): NEF, CR2 and CR3, ARW, DNG, RAF, ORF, RW2,
 PEF, IIQ, 3FR and the rest of what [rawler](https://github.com/dnglab/dnglab)
@@ -342,8 +385,18 @@ the sharpest frame), so what the noise could explain weighs nothing (a fade
 in place of the cut let dozens of frames of noise back in); where no frame
 rises above the floor a tiny even weight makes the frames a plain average.
 The weights are smoothed by the same window after the cut, so a region's
-border is a cross-fade and not a step wherever a cell sits at the gate, and
-taken back to full resolution bilinearly. One more pass over the frames.
+border is a cross-fade and not a step wherever a cell sits at the gate — by
+the *guided filter* (He, Sun & Tang 2013, the depth pass's aggregation
+filter) with the fused luma on the grid as guide and `--depth-agg`'s
+regularizer, so the cross-fade follows the image's edges: along a silhouette
+the near object's weight stops at its outline instead of bleeding over the
+background behind it, and the background's stops at the object, where a box
+mean carried each a window's width across and left a halo band of the
+blurred frames along every depth edge (`--wav-box` keeps the box mean; on
+the fruit stack the guided weights leave the banana's edge clean where the
+box's scalloped it, thin the tomato's halo, sharpen the grapes a little, and
+change a flat area by nothing measurable) — and taken back to full
+resolution bilinearly. One more pass over the frames.
 
 **Frame list** (`--skip LIST`, `--reverse`): `--skip` leaves frames out of the
 list — 1-based positions and ranges, comma-separated (`--skip 3,7-9,12`),
@@ -356,6 +409,29 @@ fusion alone and tells only those two); with `--split` each stack is reversed
 on its own, which is what a rail run backward means for every stack of the
 batch. Reordering beyond that is the shell's: the frames are stacked in the
 order they are given.
+
+**Redundant frames** (`--cull PCT`; `fuse::winner_shares`): a stack shot with
+a small focus step holds frames the pyramid takes nothing from — the near
+duplicate of a neighbor, or a frame focused in front of or behind the subject
+where nothing is sharp. The fold knows: its winner map (the level-2 map
+`--depth winner` reports) says which frame won each cell, and every run logs
+each frame's *share of the detail* — the fraction of the cells with detail
+(a winning region energy above 1 % of the plane's largest, so a flat area's
+noise winners do not hand every frame its 1/N) it won — as a line naming the
+least and the most and the frames under 1 %, redundant to the pyramid.
+`--cull PCT` leaves such frames out before the run: a quick fold at `--draft
+2` (the run's own draft when coarser) with the alignment as set and no other
+output finds the shares, the frames under PCT % are dropped and listed, and
+the run goes without them; with `--split` every stack is culled on its own.
+On z-stackr's 28-frame 8 MP sample `--cull 2` keeps 17 frames — the first
+four and a run of six in the middle each won under 2 % — and the fold at
+quarter size costs 0.7 s with CUDA.
+The browser app shows each frame's share under its thumbnail after a run and
+has a *cull* button in the filmstrip's head (below). The threshold is a
+judgment: 1 % names the frames that contribute nothing, 2 to 5 % trims a
+deep stack to the frames that carry it, and a frame culled still sits in the
+pyramid's loss column — what it won, however little, is now taken from its
+neighbors, slightly less sharp there.
 
 **Brightness** (`brightness.rs`): flash recycling, mains-powered lights and
 a shutter that is not quite repeatable make frames differ in exposure by a
@@ -585,6 +661,7 @@ included:
 |---|--:|--:|--:|
 | 25 frames, `lapstack --align-coarsen 2` (CPU) | 26 s | 19 s (0.75 s per frame) / 6.0 s | 8.7 GB |
 | 25 frames, `lapstack --gpu --gpu-align --align-coarsen 2` | 9.6 s | 5.1 s (0.20 s per frame) / 1.0 s | 6.2 GB |
+| 25 frames, the same through wgpu (`--gpu-backend wgpu`, Vulkan on the same card) | 11.3 s | 8.3 s (0.33 s per frame) / 1.5 s | 6.2 GB |
 | 100 frames, CPU | 85 s | 74 s (0.74 s per frame) / 8.0 s | 12.0 GB |
 | 100 frames, `--gpu --gpu-align` | 26 s | 21 s (0.21 s per frame) / 1.9 s | 9.4 GB |
 | 25 frames, `lapstack --no-align` on the aligned 16-bit PNGs, CPU or GPU | 26 s | 24 s / – (no depth pass then) | 4.4 GB |
@@ -944,10 +1021,17 @@ two back in order (`frameList` / `setFrameList` in `app.js`, every edit going
 through `editFrames`). An edit after a run drops the result — the result's
 frame indices are the list's — and the status bar and log say so; the
 aligned proxies stay as the thumbs. A batch's stack in hand cannot be edited
-(*all frames* first), nor can the list while a run or save is going.
+(*all frames* first), nor can the list while a run or save is going. After a
+run each thumb says what share of the detail the frame won (the CLI's line,
+from the same winner map, read back with its best-energy plane at the end of
+the fold), in red under the threshold beside the head's **cull** button,
+which excludes every frame under it — the CLI's `--cull`, done by hand: the
+result is dropped as after any edit, and the next run goes without them. The
+threshold is kept in the browser.
 
 **WAV** (the same ▾ menu, *WAV (weighted average)*, with *contrast power*,
-*weight smoothing* and *noise gate %*): the CLI's `--wav` in the browser — a third stacked
+*weight smoothing*, *noise gate %* and *edge-aware weights*, the box mean
+in place of the guided filter when it is off): the CLI's `--wav` in the browser — a third stacked
 image, made in one more pass over the frames after LAP (and DFR): each frame
 is decoded again, warped with the run's registration, its contrast taken on
 the GPU with the depth pass's focus measure on the working grid
@@ -1099,7 +1183,12 @@ through the worker's `replay`, so the retouched image comes back pixel for
 pixel (`web/test/headless.mjs` with a project script checks it). A stroke
 whose source is not on hand is left out and the log says why. Saving again
 after the run writes this session's run and strokes; saving before it keeps
-the project's own.
+the project's own. **Copy command** beside it puts on the clipboard (and in
+the log) the `lapstack` command that stacks the frames in hand with the
+panel's and the Save step's settings — the same table of keys to flags that
+`lapstack --config` applies to a project file (`cliCommand` in `app.js` and
+`project.rs` are kept in step) — with the frames by their names, to run in
+their folder.
 
 **Scale bar and text** (the panel's *Scale bar and text* section; the CLI's
 `--scale-bar` and `--text`, above): the *scale bar* tick, the calibration in
@@ -1272,21 +1361,60 @@ Electron binary and electron-builder's tools (`desktop/README.md`). The
 pickers, the Save As dialog and the Windows and macOS builds have not been
 exercised here.
 
-## GPU acceleration (CUDA, optional)
+## GPU acceleration (optional)
+
+Two engines, two build features, one switch: `--gpu` fuses (and runs the
+depth pass) on the GPU, `--gpu-align` puts the aligner's cost search there
+too, and `--gpu-backend cuda | wgpu` names the engine — without it the first
+that answers is taken, CUDA before wgpu, and a run with neither says so and
+goes on on the CPU.
 
 ```
-cargo build --release --features gpu -p lapstack-cli
-# Linux: needs libcuda (driver) + libnvrtc (toolkit) on the path, and nvidia_uvm loaded.
-# NixOS: LD_LIBRARY_PATH=/run/opengl-driver/lib:<cudaPackages.cuda_nvrtc's lib output>/lib
-# Windows: nvcuda.dll ships with the display driver; drop the two DLLs from
-# NVIDIA's cuda_nvrtc redist zip (bin/nvrtc64_120_0.dll + nvrtc-builtins) next
-# to lapstack.exe. Match the nvrtc major.minor to the driver's CUDA version
-# (nvidia-smi) or the PTX JIT will reject the kernels.
+cargo build --release --features gpu,wgpu -p lapstack-cli
+# CUDA (`gpu`; `gpu.rs`): NVIDIA. Linux: libcuda (driver) + libnvrtc (toolkit) on the path,
+#   and nvidia_uvm loaded. NixOS: LD_LIBRARY_PATH=/run/opengl-driver/lib:<cudaPackages.cuda_nvrtc's lib output>/lib
+#   Windows: nvcuda.dll ships with the display driver; drop the two DLLs from NVIDIA's cuda_nvrtc
+#   redist zip (bin/nvrtc64_120_0.dll + nvrtc-builtins) next to lapstack.exe, their major.minor
+#   matching the driver's CUDA version (nvidia-smi), or the PTX JIT rejects the kernels.
+# wgpu (`wgpu`; `wg/`): any GPU — Vulkan on Linux and Windows, Metal on macOS, DX12 on Windows.
+#   Linux needs the Vulkan loader (libvulkan.so.1) and the driver's ICD; NixOS:
+#   LD_LIBRARY_PATH=<vulkan-loader's lib>:/run/opengl-driver/lib and, with several ICDs installed,
+#   VK_ICD_FILENAMES=/run/opengl-driver/share/vulkan/icd.d/nvidia_icd.json (or the one for the card).
 ```
 
-`cudarc` is built with `dynamic-loading`, so a binary built with the feature
-still runs on a machine without CUDA; `--gpu` / `--gpu-align` fail at run
-time with a message, everything else works.
+`cudarc` is built with `dynamic-loading` and wgpu finds its backends at run
+time, so a binary built with both features runs on a machine with neither:
+`--gpu` reports what it looked for and the CPU does the work.
+
+**The wgpu engine** (`crates/lapstack-core/src/wg/`, the `wgpu` feature) is
+the browser app's: the WGSL kernels (`shaders.wgsl`), the fold (`fold.rs`),
+the aligner (`align.rs`, the cost search's evaluations on the device and the
+simplex on the host) and the depth pass (`depth.rs`) moved from
+`lapstack-web` into the core so the two have one copy, with a layer
+(`gpu.rs`) that is WebGPU in the browser and Vulkan, Metal or DX12 natively
+— the differences are the backend asked for, how the device is waited on
+(the browser's event loop runs the map callbacks; natively `Gpu::wait`
+blocks on the queue and `block_on` drives the futures) and nothing in the
+kernels. `engine.rs` is the native driver: `WgFrames` keeps the frames on
+the device (upload as 16-bit, registration, warp, brightness gains — the
+twin of `gpu::GpuFrames`) and `WgFuser` folds them, takes each frame's focus
+slice as it passes and runs the depth pass after the collapse (the twin of
+`gpu::GpuFuser` and `gpu::depth_from_slices`), one device per thread shared
+by the two. The fusion is the browser's to the bit: on the 8-frame test
+stack the native wgpu result matches the CPU's to one 8-bit count on three
+pixels in a million (70.8 dB), the depth map to 59 dB (the slices are
+quantized to 16 bits on the way, as in the browser). The registration is the
+browser's too: on the 25-frame fruit stack the wgpu aligner's transforms
+differ from the CPU's by up to 0.8 px at the far end of the chain (frame 24:
+dx −2.87 against −2.24 px, dy −0.79 against 0.00, the scale 1.06481 against
+1.06452), within the search's own stopping tolerance at `--align-coarsen 2`
+(a tenth of a level-2 pixel, 0.4 px of the frame), where the CUDA aligner, a
+transcription of the CPU's kernel for kernel on the same pyramid, lands on
+the CPU's numbers to the last digit printed (the images agree to 82 dB; the
+wgpu image to 40 dB, the sub-pixel difference on 45 MP of texture). What the CUDA
+engine has that the wgpu one has not: nothing the CLI exposes; what the
+browser has that the native wgpu run has not: the proxies, the peaking map,
+the renders and the retouch, which are the page's.
 
 ## License
 

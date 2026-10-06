@@ -33,6 +33,9 @@ pub mod fuse;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod pool;
+pub mod project;
+#[cfg(feature = "wgpu")]
+pub mod wg;
 pub mod prep;
 pub mod io;
 pub mod mesh;

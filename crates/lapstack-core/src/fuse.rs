@@ -305,6 +305,33 @@ pub fn fuse_residuals(tops: &[Img3], params: &FuseParams) -> Img3 {
     out
 }
 
+/// What share of the detail each frame won: per frame, the fraction of the
+/// winner map's cells it won among those with detail — a winning region
+/// energy above `DETAIL_FLOOR` of the plane's largest (a flat area's winner is
+/// noise, and would hand every frame its 1/N whatever it holds). A frame that
+/// won next to nothing is redundant to the pyramid: a near-duplicate of its
+/// neighbors, or focused on empty space. Sums to 1 over the frames when any
+/// cell has detail; all zeros when none has.
+pub fn winner_shares<T: Copy + Into<f32>>(win: &[T], best: &[f32], frames: usize) -> Vec<f32> {
+    let floor = DETAIL_FLOOR * best.iter().cloned().fold(0f32, f32::max);
+    let mut counts = vec![0usize; frames];
+    let mut total = 0usize;
+    for (w, &b) in win.iter().zip(best) {
+        if b > floor && floor > 0.0 {
+            let i = (*w).into().round() as usize;
+            if i < frames {
+                counts[i] += 1;
+                total += 1;
+            }
+        }
+    }
+    counts.into_iter().map(|c| if total > 0 { c as f32 / total as f32 } else { 0.0 }).collect()
+}
+
+/// `winner_shares`: a cell has detail when its winning energy is above this
+/// share of the plane's largest.
+pub const DETAIL_FLOOR: f32 = 0.01;
+
 /// Nearest-neighbor upsample of a level-`level` index map to `w×h`, as f32.
 pub fn upsample_index<T: Copy + Into<f32> + Sync>(win: &[T], dw: usize, dh: usize, w: usize, h: usize, level: usize) -> Vec<f32> {
     let scale = 1usize << level;
@@ -456,6 +483,16 @@ impl Fuser {
         self.count += 1;
     }
 
+    /// `winner_shares` of the frames folded so far, from the winner map of
+    /// `depth_level`; empty when that level does not select (halo control
+    /// with a guide finer than it).
+    pub fn shares(&self) -> Vec<f32> {
+        if self.count == 0 || self.depth_level >= self.select_levels() {
+            return Vec::new();
+        }
+        winner_shares(&self.winner, &self.best[self.depth_level], self.count)
+    }
+
     /// Finish: fuse the residuals, collapse the pyramid. Returns the fused
     /// RGB image (clamped to [0,1]) and the depth map: the winning frame index
     /// at `depth_level`, nearest-upsampled to full resolution, as f32.
@@ -486,6 +523,26 @@ impl Fuser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn winner_shares_count_detail_cells_only() {
+        // frame 0 wins the flat cells (noise-level energy), frame 1 the detail
+        let win: Vec<u16> = vec![0, 0, 0, 1, 1, 2];
+        let best = vec![0.001, 0.002, 0.001, 1.0, 0.5, 0.2];
+        let s = winner_shares(&win, &best, 3);
+        assert_eq!(s, vec![0.0, 2.0 / 3.0, 1.0 / 3.0]);
+        assert!(winner_shares(&win, &[0.0; 6], 3).iter().all(|&v| v == 0.0), "no detail at all");
+        // a three-frame stack of near-duplicates: the first frame wins ties, the others nothing
+        let (w, h) = (64, 64);
+        let img = checker(w, h, 8);
+        let mut f = Fuser::new(w, h, FuseParams::default());
+        for _ in 0..3 {
+            f.push(&img);
+        }
+        let s = f.shares();
+        assert_eq!(s.len(), 3);
+        assert!((s[0] - 1.0).abs() < 1e-6 && s[1] == 0.0 && s[2] == 0.0, "{s:?}");
+    }
 
     fn checker(w: usize, h: usize, cell: usize) -> Img3 {
         let mut im = Img3::zeros(w, h);
