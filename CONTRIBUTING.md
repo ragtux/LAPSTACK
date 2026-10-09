@@ -47,8 +47,11 @@ Changes to the decoder go in that crate, under that license; changes to the
 rest of lapstack must not pull rawler into the engine. `vendor/rawler/
 LAPSTACK-PATCH.md` explains the arrangement and how to move to a newer rawler.
 
-A new dependency means regenerating `THIRD-PARTY.md` (`just third-party`),
-which also fails if a crate's license is not one lapstack can carry.
+A new dependency means regenerating `THIRD-PARTY.md` (`just third-party`)
+and checking that the crate lands under a license lapstack can carry — the
+script takes the first license it knows from the crate's SPDX expression and
+otherwise the first one named, so an unfamiliar license shows up as its own
+heading rather than as an error.
 
 ## Security
 

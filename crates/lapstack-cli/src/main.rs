@@ -824,7 +824,7 @@ fn run_stack(inputs: &[String], cfg: &Cfg, names: &Names<'_>, tag: &str) -> Resu
                     eprintln!("[lapstack{tag}] glTF binary -> {path}");
                 }
                 "obj" => {
-                    let base = stem.rsplit('/').next().unwrap_or(stem);
+                    let base = stem.rsplit(['/', '\\']).next().unwrap_or(stem);
                     let (mtl_name, tex_name) = (format!("{base}.mtl"), format!("{base}_texture.{}", tex_fmt.ext()));
                     write(&format!("{stem}.obj"), &mesh::obj(&m, &mtl_name))?;
                     write(&format!("{stem}.mtl"), &mesh::mtl(&tex_name))?;

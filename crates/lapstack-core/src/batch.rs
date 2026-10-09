@@ -486,7 +486,7 @@ mod tests {
         std::fs::create_dir_all(tmp.join("empty")).unwrap();
         let ds = d.to_string_lossy().into_owned();
         let out = expand_dirs(&[ds.clone(), "other.tif".into()]).unwrap();
-        let names: Vec<&str> = out.iter().map(|p| p.rsplit('/').next().unwrap()).collect();
+        let names: Vec<&str> = out.iter().map(|p| p.rsplit(['/', '\\']).next().unwrap()).collect();
         assert_eq!(names, ["f1.JPG", "f2.tif", "f10.png", "other.tif"]);
         assert!(expand_dirs(&[tmp.join("empty").to_string_lossy().into_owned()]).is_err());
         std::fs::remove_dir_all(&tmp).unwrap();

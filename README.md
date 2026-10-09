@@ -313,13 +313,15 @@ raw's capture time for the batch split is read from its TIFF structure
 where it has one (NEF, CR2, ARW, DNG, …) and else by rawler's own reader
 (CR3, RAF, …), the whole file in either case. In the browser the filmstrip
 shows the JPEG preview the camera wrote into the file, and the run develops
-the frame. The linear DNG output (below) develops the raws another way. The core crate's `raw` feature (on by default) carries rawler,
-which is vendored in `vendor/rawler` (the workspace's `[patch.crates-io]`)
-with one change, so that it runs in the browser: `std::time::Instant`, which
-the demosaic and the CR3 decoder use for a timing log line, has no
-implementation on wasm32 and panics there, so a shim reads zero on wasm
-(`vendor/rawler/LAPSTACK-PATCH.md` says how to move to a newer rawler);
-without the feature a raw file is refused.
+the frame. The linear DNG output (below) develops the raws another way. The core crate's `raw` feature (on by default) is only the
+loader — `libloading` and the interface in `raw.rs`; without it a raw file
+is refused. rawler itself is built into `lapstack-raw` alone, from the copy
+vendored in `vendor/rawler` (which `crates/lapstack-raw` names by path; the
+workspace excludes it as a member) with one change, so that it runs in the
+browser: `std::time::Instant`, which the demosaic and the CR3 decoder use
+for a timing log line, has no implementation on wasm32 and panics there, so
+a shim reads zero on wasm (`vendor/rawler/LAPSTACK-PATCH.md` says how to
+move to a newer rawler).
 
 **Linear DNG output** (`dng.rs`; `-o stacked.dng`): raw in, DNG out. With a
 `.dng` output the raws are not developed to sRGB: each is

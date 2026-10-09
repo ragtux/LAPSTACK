@@ -13,7 +13,9 @@ runs in the browser (wasm32-unknown-unknown) where `std::time::Instant::now()` p
 - `data/testdata` (39 MB of the crate's test fixtures), `tests`, `benches` and `Cargo.lock` are
   left out.
 
-The workspace's `[patch.crates-io]` points `rawler` here. To move to a newer rawler:
+`crates/lapstack-raw` depends on this directory by path (`rawler = { path =
+"../../vendor/rawler" }`); the workspace excludes it as a member, so nothing
+else in the tree can reach it. To move to a newer rawler:
 copy the new crate over this directory, drop `data/testdata`, `tests`, `benches` and
 `Cargo.lock`, and apply the `wasm_time` change again (`grep -rn 'time::Instant' src`).
 
@@ -57,9 +59,9 @@ this directory was replaced by a fresh copy of the crates.io tarball with the
 `wasm_time` change applied again. No election is made for this copy: it is
 LGPL-2.1, as published.
 
-`lapstack-core`'s `raw` feature is what pulls rawler in, and building the
-library without it (`cargo build -p lapstack-core --no-default-features`) drops
-rawler and this whole question with it. Note that this is a library-only escape
-hatch today: `lapstack-cli` depends on `lapstack-core` with default features and
-has no `raw` passthrough, so `-p lapstack-cli --no-default-features` still
-builds rawler in.
+No lapstack build contains rawler: `lapstack-core`'s `raw` feature (on by
+default) is only the loader, `libloading` and the interface in `raw.rs`, and
+rawler is compiled into `lapstack-raw` alone — the shared library and the
+wasm module that lapstack loads at run time. Building without the feature
+(`cargo build -p lapstack-core --no-default-features`) drops the loader too,
+and a raw file is then refused.
