@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "description": "lapstack \u2014 focus stacking in the browser app, packaged as a desktop application",
   "author": {
-    "name": "RAGTUX LLC"
+    "name": "RAGTUX LLC",
+    "email": "support@ragtux.com"
   },
   "homepage": "https://lapstack.ragtux.com",
   "main": "main.js",

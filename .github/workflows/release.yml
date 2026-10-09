@@ -11,7 +11,8 @@
 #     Windows, disk images for both macOS architectures. These are not code
 #     signed or notarized: Windows SmartScreen and macOS Gatekeeper warn before
 #     a first launch.
-# The release is a draft so the assets can be looked over before it is published.
+# The assets go on the release for the tag: the one made in the GitHub UI, as it
+# is, or a new published one when none exists yet.
 #   git tag v0.1.0 && git push origin v0.1.0
 name: Release
 
@@ -183,6 +184,5 @@ jobs:
       - run: ls -l assets
       - uses: softprops/action-gh-release@v2
         with:
-          draft: true
-          generate_release_notes: true
+          fail_on_unmatched_files: true
           files: assets/*
