@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: 2026 RAGTUX LLC
+# SPDX-License-Identifier: MIT
+
+# Every push and pull request: the native build and the core's tests, a type
+# check of the GPU features (CUDA is loaded at run time, so no toolkit is needed
+# to compile it), and the browser app's wasm build. Nothing here needs a GPU;
+# the browser end-to-end test (web/test/headless.mjs) does, and stays local.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  native:
+    name: native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the command-line tool and the raw decoder module
+        run: cargo build --release
+      - name: Test lapstack-core
+        run: cargo test --release -p lapstack-core
+      - name: Check the GPU features
+        run: cargo check --release --features gpu,wgpu -p lapstack-cli
+
+  web:
+    name: browser app (wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-bindgen-cli (the version of the wasm-bindgen crate)
+        run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
+      - name: Build the three wasm modules
+        run: ./web/build.sh
+      - name: Assemble the deployable app
+        run: ./web/dist.sh

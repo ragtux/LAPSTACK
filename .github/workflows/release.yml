@@ -1,0 +1,188 @@
+# SPDX-FileCopyrightText: 2026 RAGTUX LLC
+# SPDX-License-Identifier: MIT
+
+# A tag v* makes a draft GitHub release with every build a user can download:
+#   - the command-line tool for Linux x86-64, Windows x86-64, macOS Intel and
+#     Apple silicon, each archive with the raw decoder module beside the binary,
+#     LICENSE, THIRD-PARTY.md and the module's source (lapstack-raw-src.tar.gz,
+#     as the LGPL asks);
+#   - the Lightroom Classic plugin as a zip;
+#   - the desktop application: AppImage and .deb for Linux, NSIS installer for
+#     Windows, disk images for both macOS architectures. These are not code
+#     signed or notarized: Windows SmartScreen and macOS Gatekeeper warn before
+#     a first launch.
+# The release is a draft so the assets can be looked over before it is published.
+#   git tag v0.1.0 && git push origin v0.1.0
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cli:
+    name: cli (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-22.04: the oldest glibc the runners offer, so the binary runs on more distributions
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            features: gpu,wgpu
+            rawlib: liblapstack_raw.so
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            features: gpu,wgpu
+            rawlib: lapstack_raw.dll
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            features: wgpu
+            rawlib: liblapstack_raw.dylib
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            features: wgpu
+            rawlib: liblapstack_raw.dylib
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build the raw decoder module
+        run: cargo build --release --target ${{ matrix.target }} -p lapstack-raw
+      - name: Build the command-line tool
+        run: cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }} -p lapstack-cli
+      - name: Assemble the archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=${GITHUB_REF_NAME#v}
+          T='${{ matrix.target }}'
+          RAWLIB='${{ matrix.rawlib }}'
+          NAME="lapstack-$V-$T"
+          mkdir -p "out/$NAME"
+          BIN=lapstack; case "$T" in *windows*) BIN=lapstack.exe ;; esac
+          cp "target/$T/release/$BIN" "target/$T/release/$RAWLIB" "out/$NAME/"
+          cp LICENSE THIRD-PARTY.md "out/$NAME/"
+          tools/raw-src.sh "out/$NAME/lapstack-raw-src.tar.gz"
+          cat > "out/$NAME/README.txt" <<TXT
+          lapstack $V — the command-line tool, $T
+
+          lapstack        the program; put it on your PATH, or run it from here
+          $RAWLIB
+                          the camera raw decoder, loaded when a raw file is given:
+                          keep it next to the program (or point LAPSTACK_RAW_LIB at it)
+          LICENSE         MIT, for lapstack
+          THIRD-PARTY.md  the components it is built from, with their licenses
+          lapstack-raw-src.tar.gz
+                          the raw decoder's source (LGPL-2.1): rebuild it, drop it
+                          in the old one's place, and lapstack uses yours
+
+          lapstack --help lists every option. The manual: https://lapstack.ragtux.com/docs/cli/
+          TXT
+          cd out
+          case "$T" in
+            *windows*) 7z a -tzip "../$NAME.zip" "$NAME" >/dev/null ;;
+            *)         tar czf "../$NAME.tar.gz" "$NAME" ;;
+          esac
+          ls -l ..
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: |
+            lapstack-*.tar.gz
+            lapstack-*.zip
+          if-no-files-found: error
+
+  lightroom:
+    name: Lightroom plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Zip the plugin
+        run: |
+          set -euo pipefail
+          V=${GITHUB_REF_NAME#v}
+          cp LICENSE lightroom/lapstack.lrplugin/LICENSE.txt
+          cp lightroom/README.md lightroom/lapstack.lrplugin/README.md
+          (cd lightroom && zip -r "../lapstack-lightroom-$V.zip" lapstack.lrplugin)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lightroom
+          path: lapstack-lightroom-*.zip
+          if-no-files-found: error
+
+  desktop:
+    name: desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            args: --linux
+          - os: windows-latest
+            args: --win
+          - os: macos-latest
+            args: --mac --x64 --arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install wasm-bindgen-cli (the version of the wasm-bindgen crate)
+        run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
+      - name: Build the three wasm modules
+        shell: bash
+        run: ./web/build.sh
+      - name: Package
+        shell: bash
+        working-directory: desktop
+        env:
+          # no signing identity on the runner: build unsigned rather than fail looking for one
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          npm install
+          npx electron-builder ${{ matrix.args }} --publish never
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: |
+            desktop/dist/*.AppImage
+            desktop/dist/*.deb
+            desktop/dist/*.dmg
+            desktop/dist/*.exe
+          if-no-files-found: error
+
+  release:
+    name: draft release
+    needs: [cli, lightroom, desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - run: ls -l assets
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: assets/*

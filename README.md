@@ -15,6 +15,31 @@ stacking on the Laplacian pyramid, written from the papers cited in
   **maximum region energy** selection for the band-pass levels, and a local
   deviation + entropy rule for the residual.
 
+## Getting it
+
+lapstack is free software under the MIT license (`LICENSE`), the whole of it:
+the engine, the command-line tool, the browser app, the desktop application
+and the Lightroom plugin. The manual is at
+[lapstack.ragtux.com](https://lapstack.ragtux.com/docs/).
+
+- **In the browser**, nothing to install: [lapstack.app.ragtux.com](https://lapstack.app.ragtux.com)
+  runs the engine on WebGPU on your own machine, and no image leaves it.
+- **The command-line tool and the desktop application**: builds for Linux,
+  Windows and macOS are on the
+  [releases page](https://github.com/ragtux/LAPSTACK/releases), each
+  command-line archive with the raw decoder module beside the binary. The
+  desktop builds are not code signed, so Windows and macOS warn before the
+  first launch.
+- **From source**: `cargo build --release` makes the command-line tool and the
+  raw decoder module in `target/release`; the sections below say the rest,
+  `just` lists the developer commands, and `CONTRIBUTING.md` is the short
+  version.
+
+Bugs and questions go to the issue tracker, a security problem to
+security@ragtux.com (`SECURITY.md`). lapstack is made by RAGTUX LLC; a
+[contribution](https://buy.stripe.com/5kQ8wQditbElbCugAp6wE00) helps keep it
+going and buys nothing, because nothing is for sale.
+
 ## Layout
 
 ```
