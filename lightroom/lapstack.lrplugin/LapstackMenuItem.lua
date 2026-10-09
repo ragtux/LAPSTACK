@@ -1,5 +1,5 @@
 -- SPDX-FileCopyrightText: 2026 RAGTUX LLC
--- SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+-- SPDX-License-Identifier: MIT
 
 -- Library > Plug-in Extras > Stack with lapstack: the selected frames are
 -- rendered with the plug-in's preferences (a 16-bit TIFF in the chosen color

@@ -1418,12 +1418,15 @@ the renders and the retouch, which are the page's.
 
 ## License
 
-lapstack is proprietary software: Copyright (C) 2026 RAGTUX LLC, all rights
-reserved. `LICENSE` (SPDX `LicenseRef-RAGTUX-Proprietary`) is the whole of
-it — no license to the source, and an end-user license for the programs built
-from it. The revisions from 2026-09-24 to 2026-09-30 were published under the
-AGPL-3.0-only; that license stays with the copies distributed under it and
-does not extend to later revisions.
+lapstack is free software under the MIT license: Copyright (c) 2026 RAGTUX
+LLC, `LICENSE` is the whole of it (SPDX `MIT`), and it covers the source in
+this repository and everything built from it — the command-line tool, the
+browser application, the desktop application and the Lightroom Classic
+plug-in. Earlier revisions were published under other terms (AGPL-3.0-only
+from 2026-09-24 to 2026-09-30, then a proprietary license); those terms stay
+with the copies distributed under them and do not extend to this revision.
+Paying for lapstack, where it is offered, buys support and services, not the
+software: the software is yours.
 
 Third-party components keep their own licenses and are listed with their
 notices in `THIRD-PARTY.md`, which `just third-party` regenerates from the
@@ -1432,10 +1435,11 @@ it. Two need more than a listing:
 
 - The camera raw decoder is LGPL-2.1: `vendor/rawler` (MIT and LGPL-2.1 per
   file, copyright Daniel Vogelbacher) inside `crates/lapstack-raw`, RAGTUX's
-  own LGPL-2.1 shim around it. The LGPL lets a proprietary program use the
-  library on the condition that the user can replace it, so lapstack never
-  links it: `lapstack-raw` is built as a shared library the CLI loads at run
-  time and as a wasm module the browser app loads beside its engine, and its
+  own LGPL-2.1 shim around it. It is kept a component of its own so that
+  the MIT-licensed parts and the LGPL work stay separate and the user can
+  replace it, as the LGPL asks, so lapstack never links it: `lapstack-raw`
+  is built as a shared library the CLI loads at run time and as a wasm
+  module the browser app loads beside its engine, and its
   source — the crate and the patched rawler, with a workspace file so it
   builds as it is — travels with every build (`web/dist.sh` puts
   `legal/lapstack-raw-src.tar.gz` in the app; the CLI's downloads carry the

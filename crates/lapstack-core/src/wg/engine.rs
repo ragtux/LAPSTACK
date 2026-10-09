@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 //! The native wgpu engine: the browser app's kernels (`fold.rs`, `align.rs`,
 //! `depth.rs`) driving a desktop GPU through Vulkan, Metal or DX12 for the

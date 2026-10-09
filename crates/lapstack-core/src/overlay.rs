@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 // Scale bar and text overlay, for the microscope.
 //

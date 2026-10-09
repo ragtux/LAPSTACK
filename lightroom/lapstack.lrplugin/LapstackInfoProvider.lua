@@ -1,5 +1,5 @@
 -- SPDX-FileCopyrightText: 2026 RAGTUX LLC
--- SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+-- SPDX-License-Identifier: MIT
 
 -- The plug-in's section in the Plug-in Manager: the settings bound to the
 -- preferences, which the Plug-in Extras menu item uses and an Export dialog

@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 //! Streaming alignment on the GPU: the Nelder-Mead control loop runs here
 //! (async), every cost evaluation is one `cost` dispatch (Spline4x4 warp +

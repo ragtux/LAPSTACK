@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 //! The wgpu engine: lapstack's fusion, alignment and depth pass as WGSL
 //! compute kernels (`shaders.wgsl`) over one small wgpu layer (`gpu.rs`).

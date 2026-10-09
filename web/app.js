@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 import { muxMp4, muxWebm } from './mux.js';
 // lapstack browser UI. A focus-stacking workbench: filmstrip, parameter

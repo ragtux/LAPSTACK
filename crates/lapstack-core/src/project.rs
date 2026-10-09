@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 //! The browser app's project file (`<name>.lapstack.json`, written by
 //! `web/app.js`'s `projectData`) read for the command line: its settings

@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 //! Content credentials (C2PA, https://contentcredentials.org) for the browser
 //! app: a self-signed ES256 certificate made in the browser, and a signed

@@ -8,7 +8,7 @@
   "homepage": "https://lapstack.ragtux.com",
   "main": "main.js",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "MIT",
   "scripts": {
     "start": "electron .",
     "smoke": "electron . --smoke",

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-FileCopyrightText: 2026 RAGTUX LLC
-# SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+# SPDX-License-Identifier: MIT
 
 # Build the browser app: wasm32 + wasm-bindgen glue into web/pkg.
 #   ./web/build.sh            # release build

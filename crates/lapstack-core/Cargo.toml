@@ -2,7 +2,7 @@
 name = "lapstack-core"
 version.workspace = true
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 publish.workspace = true
 authors.workspace = true
 description = "Laplacian-pyramid focus stacking (Burt & Adelson 1983/84; Wang & Chang 2011)"

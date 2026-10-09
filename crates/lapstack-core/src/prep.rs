@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 //! Frame preparation: what a decoded frame goes through before it is aligned
 //! and folded, beyond the dust map — turned by quarter turns (`--rotate`),

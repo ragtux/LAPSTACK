@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 RAGTUX LLC
-# SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+# SPDX-License-Identifier: MIT
 
 # NixOS only: an FHS environment in which the Electron binary npm installs, and the
 # AppImage / deb tools electron-builder downloads, can run (they are dynamically

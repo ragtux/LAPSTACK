@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 //! wgpu layer: device setup, one bind-group layout shared by every kernel, a
 //! dynamic-offset uniform ring, a command recorder that auto-flushes, and

@@ -1,5 +1,5 @@
 -- SPDX-FileCopyrightText: 2026 RAGTUX LLC
--- SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+-- SPDX-License-Identifier: MIT
 
 -- The settings as dialog rows, built once for the Export dialog's section and
 -- once for the Plug-in Manager's: `f` is the view factory, `bindTo` the

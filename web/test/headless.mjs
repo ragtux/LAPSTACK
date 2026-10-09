@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 // Headless Chrome runner for web/test.html: serves ./web, launches Chrome with
 // WebGPU, attaches over CDP, streams console output, and exits with the JSON

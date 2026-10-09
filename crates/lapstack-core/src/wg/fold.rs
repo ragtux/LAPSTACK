@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 //! The fold on the GPU: a frame's Laplacian pyramid, the region energy of
 //! every band-pass level and the winner-take-all select into the accumulator

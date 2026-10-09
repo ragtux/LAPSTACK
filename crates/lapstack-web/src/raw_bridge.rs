@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 //! The engine's way to the raw decoder, which is a wasm module of its own
 //! (`web/pkg-raw`, `crates/lapstack-raw`, LGPL) that the worker loads: three

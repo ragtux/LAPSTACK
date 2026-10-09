@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-FileCopyrightText: 2026 RAGTUX LLC
-# SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+# SPDX-License-Identifier: MIT
 
 # Static server for the app (WebGPU needs a secure context: localhost is fine).
 # Sends Cache-Control: no-store so a rebuilt app.js / worker.js / pkg/*.wasm is

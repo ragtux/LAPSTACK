@@ -1,5 +1,5 @@
 -- SPDX-FileCopyrightText: 2026 RAGTUX LLC
--- SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+-- SPDX-License-Identifier: MIT
 
 -- lapstack for Lightroom Classic: the frames of a focus stack go out of the
 -- catalog to the lapstack command-line tool and the stacked image comes back

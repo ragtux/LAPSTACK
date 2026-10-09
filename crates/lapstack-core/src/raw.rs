@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 //! Camera raw files as input frames: decoded, black and white levels applied,
 //! demosaicked, white-balanced as shot, taken through the camera's color

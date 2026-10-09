@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 // Brightness (flicker) normalization: every frame is brought to the brightness
 // of frame 0 by one gain per channel before it is fused.

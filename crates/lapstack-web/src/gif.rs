@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 //! Animated GIF export. Frames arrive from the page as RGBA8 at the output
 //! size; each is quantized to its own 256-color palette (median cut on a pixel

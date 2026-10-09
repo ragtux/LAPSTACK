@@ -23,9 +23,10 @@ rawler's `Cargo.toml` declares `LGPL-2.1`, and its sources carry per-file SPDX
 headers: 50 files `MIT`, 44 files `LGPL-2.1`, copyright Daniel Vogelbacher. No
 file says "or any later version", so the LGPL files are LGPL-2.1 **only**.
 
-lapstack is proprietary (`/LICENSE`). The LGPL allows that combination — a
-"work that uses the Library" may be under any terms — on conditions, two of
-which bind here, and this is how lapstack meets them:
+lapstack is under the MIT license (`/LICENSE`), which is not the LGPL. The
+LGPL allows that combination — a "work that uses the Library" may be under any
+terms — on conditions, two of which bind here, and this is how lapstack meets
+them:
 
 - **The library's own changes stay LGPL.** `wasm_time.rs` and the five import
   lines are a modification of rawler and are under the LGPL-2.1 like the files
@@ -42,12 +43,12 @@ which bind here, and this is how lapstack meets them:
   mechanism"), in the browser a wasm module of its own that the worker imports
   and the engine reaches through the global object. Rebuild the module from
   its source, put it where the old one was, and lapstack uses it;
-  `crates/lapstack-raw/README.md` says how. lapstack's own parts stay
-  proprietary and are not part of the LGPL work.
+  `crates/lapstack-raw/README.md` says how. lapstack's own parts stay under
+  the MIT license and are not part of the LGPL work.
 
 Until 2026-09-30 rawler was linked into the engine itself, which the LGPL does
-not allow a proprietary program to distribute without relinkable object code;
-no build with it was distributed.
+not allow a program under other terms to distribute without relinkable object
+code; no build with it was distributed.
 
 While lapstack was AGPL-3.0-only (2026-09-24 to 2026-09-30) an earlier revision
 of this note elected, under LGPL-2.1 §3, to take the LGPL files as GPL-3.0.

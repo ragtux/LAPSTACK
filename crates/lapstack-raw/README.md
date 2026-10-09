@@ -8,7 +8,7 @@ its engine.
 
 This crate is free software under the **GNU Lesser General Public License,
 version 2.1** (`LICENSE`), because it is a work based on rawler, which is
-LGPL-2.1. lapstack itself is proprietary and does not link this crate or
+LGPL-2.1. lapstack itself is under the MIT license and does not link this crate or
 rawler; it loads the built module at run time through the interface described
 in `src/lib.rs`. That is the arrangement the LGPL's section 6 asks for: you may
 modify this library, or rawler inside it, rebuild it, and lapstack will use

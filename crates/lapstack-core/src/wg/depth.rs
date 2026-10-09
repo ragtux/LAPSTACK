@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 //! Depth from focus on WebGPU — the pipeline of `crate::depth`
 //! (ring difference filter, guided-filter aggregation, streamed sub-frame peak

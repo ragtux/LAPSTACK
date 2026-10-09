@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 // lapstack as a desktop application: the browser app in web/ inside an
 // Electron window. Electron carries its own Chromium, so WebGPU is there on

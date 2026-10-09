@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 RAGTUX LLC
-// SPDX-License-Identifier: LicenseRef-RAGTUX-Proprietary
+// SPDX-License-Identifier: MIT
 
 //! Alignment — similarity, affine or projective registration
 //! (`AlignModel`: 4, 6 or 8 parameters). Direct intensity-based,
