@@ -1160,7 +1160,7 @@ preview lives on the display canvas alone — no pixel is committed until a
 stroke is painted — and it stands aside for one pointer move after an undo or
 redo, so a stroke reverted under the cursor is seen going. Drag on either
 pane to paint, shift+drag pans, ctrl+wheel zooms, the panel's sliders (or `[`
-/ `]`) set the brush size and hardness, and ctrl+z / ctrl+shift+z undo and
+/ `]` and alt+wheel for the size, alt+shift+wheel for the hardness) set the brush size and hardness, and ctrl+z / ctrl+shift+z undo and
 redo whole strokes.
 With a frame as the source, the wheel, frame slider, filmstrip or ←/→ choose
 it (the wheel goes on zooming while a stroke is being dragged, so the frame
@@ -1174,6 +1174,16 @@ the compare that was open before it. While dragging, the stroke is previewed
 on the display copy; on release the worker applies it to the 16-bit master,
 sends back the exact patch, and Save writes the retouched image. Undo
 history is capped at ~600 MB of patches.
+
+<p align="center">
+  <img src="docs/media/retouch.gif" width="960" alt="The retouch mode: the stacked image on the left with a dark registration ghost on a chip's edge, a slab of the frames around the sharpest one on the right, the brush circle on both panes, and the ghost painted over from the slab">
+</p>
+
+A retouch in the browser app, reduced for this page: ctrl+G and a click
+on a spot beside the flaw jump to the frame that won it, `R` opens
+retouch, `S` makes the source a slab around that frame, alt+wheel sets
+the brush size and alt+shift+wheel its hardness, the brush previews under
+the cursor, and a click or drag paints the slab over the flaw.
 
 **Results** (the panel's *Results* section): a result stays on past its run,
 kept in a list with the other runs' output. When the next run
