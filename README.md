@@ -15,6 +15,21 @@ stacking on the Laplacian pyramid, written from the papers cited in
   **maximum region energy** selection for the band-pass levels, and a local
   deviation + entropy rule for the residual.
 
+<p align="center">
+  <img src="docs/media/rocking.gif" width="800" alt="The stacked image of a focus-bracketed fruit still life, rocking from side to side">
+</p>
+<p align="center">
+  <img src="docs/media/focus-depth.gif" width="32%" alt="The depth map in the Turbo palette, a slice sweeping through the stack">
+  <img src="docs/media/in-focus.gif" width="32%" alt="The in-focus sweep: the part of the image each frame contributes, lit up frame by frame">
+  <img src="docs/media/source-peaking.gif" width="32%" alt="The aligned source frames, each under its focus peaking band">
+</p>
+
+The animations the browser app saves of one stack, reduced for this page:
+the stacked image **rocking** from side to side, the **focus depth** map in
+Turbo with the slice sweeping through the frames, the **in focus** sweep
+(what each frame contributes), and the aligned **source** frames under their
+peaking band. The browser section below says how they are made.
+
 ## Getting it
 
 lapstack is free software under the MIT license (`LICENSE`), the whole of it:

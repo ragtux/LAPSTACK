@@ -11,3 +11,4 @@ docs/*
 !docs/README.md
 web/test/expected_conf.*
 web/dist/
+!docs/media/
