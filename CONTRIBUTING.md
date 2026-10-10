@@ -15,7 +15,7 @@ reports back to us, so if it broke, we only know when you tell us.
 
 ## Building
 
-`just` lists the developer commands; the README's *Build & run* section has
+`just` lists the developer commands; the README's *Get started* section has
 the plain cargo invocations, and `web/build.sh` builds the browser app
 (needs the `wasm32-unknown-unknown` target and `wasm-bindgen-cli` 0.2.128).
 
@@ -32,9 +32,9 @@ code you are not otherwise changing.
 
 ## Where things are
 
-The README is the design document: every formula the engine implements is
-stated there with the deviations from the papers called out, and each section
-names the file it describes. `docs/README.md` cites the papers. The browser
+`docs/engine.md` and `docs/browser.md` are the design document: every formula
+the engine implements is stated there with the deviations from the papers
+called out, and each section names the file it describes. `docs/README.md` cites the papers. The browser
 app's vocabulary (LAP, DFR, Focus depth, Winner) and layout rules are settled;
 a new control goes next to what it acts on.
 

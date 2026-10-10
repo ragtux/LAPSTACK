@@ -8,7 +8,7 @@ web/test/expected_dff.*
 web/test/big/
 web/test/big25/
 docs/*
-!docs/README.md
+!docs/*.md
 web/test/expected_conf.*
 web/dist/
 !docs/media/

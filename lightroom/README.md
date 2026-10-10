@@ -63,3 +63,14 @@ lapstack.lrplugin/
 On Windows the command line is wrapped in one extra pair of double quotes
 (`LrTasks.execute` hands it to `cmd.exe`, which strips the outermost pair — the
 SDK's long-known quirk); on macOS every argument is single-quoted for `sh`.
+
+## Status
+
+The plugin was written against the
+SDK 6.0 reference and its sources parse under Lua 5.1 (Lightroom's), but it
+has not been run inside Lightroom here: the export-settings keys the menu
+item uses (`LR_format`, `LR_export_bitDepth`, `LR_export_colorSpace`,
+`LR_export_destinationPathPrefix`, …) are the ones published plugins use,
+and whether Lightroom takes a lapstack-written linear DNG on `addPhoto` is
+untested — if it refuses, the plugin says the file was written and leaves
+it.
